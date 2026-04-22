@@ -1,0 +1,25 @@
+id: mock-portal
+description: Local Spring Boot testing-harness mock (form login, CSRF, session cookies)
+baseUrl: http://localhost:3000
+
+steps:
+  - action: navigate
+    target: /login
+  - action: fill
+    selector: "input[name='username']"
+    value: "${credentials.username}"
+  - action: fill
+    selector: "input[name='password']"
+    value: "${credentials.password}"
+    redact: true
+  - action: click
+    selector: "button[type='submit']"
+  - action: waitForUrl
+    target: "**/report"
+
+scrape:
+  fields:
+    - name: username
+      selector: "main.portal-container > p > span"
+    - name: reportDate
+      selector: "#date"

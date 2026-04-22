@@ -26,8 +26,11 @@ public class RunManifest {
 
     public List<Step> steps = new ArrayList<>();
 
+    public Verification verification;
+
     public static class Portal {
-        public String url;
+        public String id;
+        public String baseUrl;
         public String username;
     }
 
@@ -38,6 +41,15 @@ public class RunManifest {
     }
 
     public record Step(Instant at, String action, String target) {}
+
+    public static class Verification {
+        public String status;
+        public Object source;
+        public Object scraped;
+        public List<Diff> diffs;
+
+        public record Diff(String field, Object source, Object scraped) {}
+    }
 
     public RunManifest step(String action, String target) {
         this.steps.add(new Step(Instant.now(), action, target));

@@ -3,6 +3,14 @@ package com.financialagent.worker;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.financialagent.common.domain.ReportSnapshot;
+import com.financialagent.common.verify.ReadBackVerifier;
+import com.financialagent.common.verify.VerificationResult;
+import com.financialagent.worker.portal.PortalDescriptor;
+import com.financialagent.worker.portal.PortalDescriptorLoader;
+import com.financialagent.worker.portal.PortalEngine;
+import com.financialagent.worker.portal.PortalScraper;
+import com.financialagent.worker.portal.SnapshotMapper;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
@@ -17,11 +25,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
 
 public class Agent {
 
@@ -35,11 +46,16 @@ public class Agent {
 
     public static void main(String[] args) throws IOException {
         Properties config = loadConfig();
-        String portalUrl = config.getProperty("portal.url");
-        String username = config.getProperty("portal.username");
-        String password = config.getProperty("portal.password");
+        String portalId = config.getProperty("portal.id");
+        String username = config.getProperty("credentials.username");
+        String password = config.getProperty("credentials.password");
         Path artifactsRoot = Paths.get(config.getProperty("artifacts.dir", "artifacts"))
                 .toAbsolutePath().normalize();
+
+        PortalDescriptor descriptor = PortalDescriptorLoader.load(portalId);
+        Map<String, String> bindings = Map.of(
+                "credentials.username", username,
+                "credentials.password", password);
 
         String runId = newRunId();
         Path runDir = artifactsRoot.resolve(runId);
@@ -48,12 +64,14 @@ public class Agent {
         RunManifest manifest = new RunManifest();
         manifest.runId = runId;
         manifest.startedAt = Instant.now();
-        manifest.portal.url = portalUrl;
+        manifest.portal.id = descriptor.id();
+        manifest.portal.baseUrl = descriptor.baseUrl();
         manifest.portal.username = username;
         manifest.agentWorkerVersion = version(Agent.class.getPackage().getImplementationVersion());
         manifest.playwrightVersion = version(Playwright.class.getPackage().getImplementationVersion());
 
         System.out.println("Run " + runId);
+        System.out.println("Portal: " + descriptor.id() + " (" + descriptor.baseUrl() + ")");
         System.out.println("Artifacts: " + runDir);
 
         Path manifestPath = runDir.resolve("manifest.json");
@@ -71,29 +89,27 @@ public class Agent {
 
             Page page = context.newPage();
 
-            manifest.step("navigate", portalUrl + "/login");
-            page.navigate(portalUrl + "/login");
-
-            manifest.step("fill", "input[name='username']");
-            page.fill("input[name='username']", username);
-
-            manifest.step("fill", "input[name='password'] (value redacted)");
-            page.fill("input[name='password']", password);
-
-            manifest.step("click", "button[type='submit']");
-            page.click("button[type='submit']");
-
-            manifest.step("waitForURL", "**/report");
-            page.waitForURL("**/report");
+            PortalEngine engine = new PortalEngine(page, bindings, manifest::step);
+            engine.run(descriptor);
 
             manifest.step("screenshot", "report.png");
             page.screenshot(new Page.ScreenshotOptions()
                     .setPath(runDir.resolve("report.png"))
                     .setFullPage(true));
 
+            manifest.step("scrape", fieldNames(descriptor));
+            Map<String, String> scraped = new PortalScraper(page).scrape(descriptor.scrape());
+            ReportSnapshot scrapedSnapshot = SnapshotMapper.toSnapshot(scraped);
+            ReportSnapshot sourceSnapshot = new ReportSnapshot(username, LocalDate.now());
+
+            VerificationResult<ReportSnapshot> result =
+                    ReadBackVerifier.verify(sourceSnapshot, scrapedSnapshot);
+            manifest.verification = toManifestVerification(result);
+            manifest.step("verify", result.status().name());
+
             manifest.finalUrl = page.url();
             manifest.finalTitle = page.title();
-            manifest.status = "SUCCESS";
+            manifest.status = result.matched() ? "SUCCESS" : "MISMATCH";
 
             context.tracing().stop(new Tracing.StopOptions()
                     .setPath(runDir.resolve("trace.zip")));
@@ -107,6 +123,24 @@ public class Agent {
             System.out.println("Status: " + manifest.status);
             System.out.println("Manifest: " + manifestPath);
         }
+    }
+
+    private static RunManifest.Verification toManifestVerification(
+            VerificationResult<ReportSnapshot> result) {
+        RunManifest.Verification v = new RunManifest.Verification();
+        v.status = result.status().name();
+        v.source = result.source();
+        v.scraped = result.scraped();
+        v.diffs = result.diffs().stream()
+                .map(d -> new RunManifest.Verification.Diff(d.field(), d.source(), d.scraped()))
+                .toList();
+        return v;
+    }
+
+    private static String fieldNames(PortalDescriptor descriptor) {
+        return descriptor.scrape().fields().stream()
+                .map(PortalDescriptor.Scrape.Field::name)
+                .collect(Collectors.joining(","));
     }
 
     private static String newRunId() {

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mock Portal - Login</title>
+    <link rel="stylesheet" th:href="@{/css/portal.css}">
+</head>
+<body>
+    <main class="portal-container">
+        <h1>Government Payroll Portal</h1>
+        <h2>Sign In</h2>
+        <div th:if="${errorMessage}" class="error" th:text="${errorMessage}"></div>
+        <form th:action="@{/login}" method="post">
+            <div>
+                <label for="username">Username:</label>
+                <input type="text" id="username" name="username" autocomplete="off" required>
+            </div>
+            <div>
+                <label for="password">Password:</label>
+                <input type="password" id="password" name="password" autocomplete="off" required>
+            </div>
+            <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+            <button type="submit">Login</button>
+        </form>
+    </main>
+</body>
+</html>

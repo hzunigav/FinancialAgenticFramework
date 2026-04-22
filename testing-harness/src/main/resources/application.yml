@@ -1,0 +1,12 @@
+server:
+  port: 3000
+
+spring:
+  application:
+    name: mock-portal
+  thymeleaf:
+    cache: false
+
+logging:
+  level:
+    org.springframework.security: INFO

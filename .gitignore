@@ -1,0 +1,37 @@
+# Build output
+target/
+build/
+out/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# Node / frontend
+node_modules/
+dist/
+.npm/
+.pnpm-store/
+
+# Playwright
+.playwright/
+test-results/
+playwright-report/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Local Claude Code state
+.claude/

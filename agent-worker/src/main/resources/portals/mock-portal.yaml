@@ -23,3 +23,8 @@ scrape:
       selector: "main.portal-container > p > span"
     - name: reportDate
       selector: "#date"
+
+securityContext:
+  scrubHarFields:
+    - urlPattern: "**/login"
+      bodyFields: [password]

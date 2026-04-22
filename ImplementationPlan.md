@@ -13,6 +13,7 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live) and [Technica
 |---|---|---|
 | M1 | Mock vertical slice | ✓ |
 | M2 | Portal adapter + Read-Back verifier | ✓ |
+| M2.5 | Credentials provider + HAR scrubbing | ✓ |
 | M3 | Real portal access (Shadow Mode, fill-only) | · NEXT — needs prod credentials |
 | M4 | MCP Server + real payroll data feed | · |
 | M5 | HITL gate + Safe-Submit loop | · |
@@ -53,9 +54,25 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live) and [Technica
 
 ---
 
+## M2.5 — Credentials provider + HAR scrubbing · ✓
+
+**Goal:** Gate the repo against real credentials before they arrive. The framework must be safe to hand a prod password on day one of M3.
+
+**Delivered:**
+- `CredentialsProvider` interface + `PortalCredentials` record in `common-lib` — [CredentialsProvider.java](common-lib/src/main/java/com/financialagent/common/credentials/CredentialsProvider.java), [PortalCredentials.java](common-lib/src/main/java/com/financialagent/common/credentials/PortalCredentials.java). Same interface will back the M6 `AwsSecretsManagerCredentialsProvider`.
+- `LocalFileCredentialsProvider` — reads `~/.financeagent/secrets.properties` (override via `FINANCEAGENT_SECRETS_FILE`), refuses to load if the file grants read access to anyone but the owner (POSIX or ACL) — [LocalFileCredentialsProvider.java](common-lib/src/main/java/com/financialagent/common/credentials/LocalFileCredentialsProvider.java).
+- Mock credentials removed from committed [config.properties](agent-worker/src/main/resources/config.properties). Template at repo root: [secrets.properties.example](secrets.properties.example).
+- `securityContext.scrubHarFields` block in [PortalDescriptor.java](agent-worker/src/main/java/com/financialagent/worker/portal/PortalDescriptor.java) — declarative, per-portal list of URL patterns + body field names to redact in the HAR.
+- [HarScrubber.java](agent-worker/src/main/java/com/financialagent/worker/portal/HarScrubber.java) — post-processes `network.har` after context close. Handles `application/x-www-form-urlencoded` (both the `params` array and the raw `text`) and `application/json` (recursive). Falls back to stripping `postData` entirely for unknown content types — fail-closed.
+- Repo pre-commit hook at [.githooks/pre-commit](.githooks/pre-commit) — blocks any commit introducing a `portals.<id>.credentials.*=*` line for anything other than `mock-portal`, and blocks any file named `secrets.properties`. Activate once per clone: `git config core.hooksPath .githooks`.
+
+**Run evidence:** `agent-worker/artifacts/20260422T142602-e04f2/network.har` — login POST body contains `password=%5BREDACTED%5D` (the URL-encoded form of `[REDACTED]`), and `grep "password=password" network.har manifest.json` returns nothing.
+
+---
+
 ## M3 — Real portal access (Shadow Mode) · NEXT
 
-**Prereq:** User grants credentials and access to a production payroll portal.
+**Prereq:** User grants credentials and access to a production payroll portal. MFA is SMS / email link — see Session handling below.
 
 **Goal:** Exercise the framework against a real site with zero write-risk. Spec Phase 1.
 
@@ -64,12 +81,18 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live) and [Technica
 - New descriptor: `agent-worker/src/main/resources/portals/<real-portal>.yaml`.
 - Extend `PortalEngine` action set as the real portal demands (e.g., `select`, `press`, `waitForSelector`, `uploadFile`).
 - Add Shadow-Mode guard: engine refuses to execute any step marked `submit: true` when descriptor has `shadowMode: true`. Logs what *would* have been submitted.
-- Move credentials out of `config.properties` into environment variables / a git-ignored local secrets file. AWS Secrets Manager swap-in is deferred to M6.
+
+**MFA & session handling (new in M3 because target portal uses SMS/email):**
+- New step action `pause` — halts the engine, surfaces a prompt to the operator (stdin in dev, a HITL queue in M5), waits for a value to be injected into bindings (e.g. the SMS code) before continuing.
+- `BrowserContext.storageState` save/load between runs. Persist the authenticated session at the end of each successful run; load it at the start of the next. Only fall back to full login + MFA when the loaded state fails an authenticated probe step.
+- Session state is itself a bearer token — store encrypted in `~/.financeagent/sessions/<portalId>.enc` (dev) with a key derived from the local credential; AWS Secrets Manager + KMS in prod (M6). Never committed; added to `.gitignore` at M3 implementation.
+- Session TTL declared per portal in the descriptor. On expiry, the engine forces a re-auth on the next run.
 
 **Exit criteria:**
-- Agent logs into the real portal, fills the form, halts before submit.
+- Agent logs into the real portal once with a human-provided MFA code, fills the form, halts before submit.
+- Subsequent runs within the session TTL skip login entirely.
 - Read-Back compares scraped-after-fill against the source payload — MATCH required to call the run successful.
-- Full audit bundle captured.
+- Full audit bundle captured. HAR scrubbing confirmed against the real portal's login payload shape (the rule list in the descriptor is expected to grow during this work).
 
 ---
 
@@ -132,12 +155,17 @@ Added progressively as milestones demand them — not upfront.
 | Capability | Lands at | Spec ref |
 |---|---|---|
 | Strict selectors (fail-fast on UI change) | M2 (in use) | §5 |
-| Password redaction in logs | M2 (in use) | §7.3 partial |
+| Password redaction in step log | M2 (in use) | §7.3 partial |
+| Credential source-of-truth outside repo | M2.5 (in use) | §2 |
+| HAR body-field scrubbing | M2.5 (in use) | §7 |
+| Pre-commit secrets gate | M2.5 (in use) | — |
+| HITL `pause` step + encrypted session reuse | M3 | §6 |
 | Payload SHA-256 hashing | M4 | §5 Ingestion |
 | Java-native PII redactor (salary, SSN, etc.) | M4 | §7.3 |
 | OpenTelemetry tracing | M4 | §7.1 |
 | Idempotent MCP tooling | M4 | §4 |
 | State checkpoint / double-submit guard | M5 | §6 |
+| AWS Secrets Manager + customer-managed KMS | M6 | §2 |
 | WORM audit storage | M6 | §7 |
 
 ---

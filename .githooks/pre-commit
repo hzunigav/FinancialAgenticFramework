@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Repo pre-commit hook: blocks accidental secrets commits.
+#
+# Activate once per clone:
+#   git config core.hooksPath .githooks
+#
+# Checks staged files for:
+#   1. Files named secrets.properties (the real file; the .example is allowed).
+#   2. Lines matching common secret assignments in a non-mock portal section.
+#
+# This is a belt — the suspenders are AWS Secrets Manager in prod and the
+# ~/.financeagent/secrets.properties location outside the repo in dev.
+
+set -e
+
+fail=0
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+for file in $staged; do
+    case "$file" in
+        secrets.properties|**/secrets.properties)
+            echo "pre-commit: refusing to commit $file (did you mean secrets.properties.example?)" >&2
+            fail=1
+            ;;
+        *.example|*.md|*.yml|*.yaml)
+            # docs and examples may legitimately mention key names
+            ;;
+        *)
+            # flag assignments of real-looking secrets in any non-mock portal namespace
+            hits=$(git diff --cached -- "$file" \
+                | grep -E '^\+[^+].*portals\.[a-zA-Z0-9_-]+\.credentials\.[a-zA-Z0-9_]+[[:space:]]*=[[:space:]]*\S' \
+                | grep -v 'portals\.mock-portal\.' \
+                || true)
+            if [ -n "$hits" ]; then
+                echo "pre-commit: $file contains a non-mock portal credential assignment:" >&2
+                echo "$hits" >&2
+                echo "             real credentials belong in ~/.financeagent/secrets.properties, not the repo." >&2
+                fail=1
+            fi
+            ;;
+    esac
+done
+
+if [ "$fail" -ne 0 ]; then
+    echo "" >&2
+    echo "Commit blocked. Override (very rarely appropriate) with: git commit --no-verify" >&2
+    exit 1
+fi
+
+exit 0

@@ -3,9 +3,13 @@ package com.financialagent.worker;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.financialagent.common.credentials.CredentialsProvider;
+import com.financialagent.common.credentials.LocalFileCredentialsProvider;
+import com.financialagent.common.credentials.PortalCredentials;
 import com.financialagent.common.domain.ReportSnapshot;
 import com.financialagent.common.verify.ReadBackVerifier;
 import com.financialagent.common.verify.VerificationResult;
+import com.financialagent.worker.portal.HarScrubber;
 import com.financialagent.worker.portal.PortalDescriptor;
 import com.financialagent.worker.portal.PortalDescriptorLoader;
 import com.financialagent.worker.portal.PortalEngine;
@@ -28,6 +32,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
@@ -47,15 +52,15 @@ public class Agent {
     public static void main(String[] args) throws IOException {
         Properties config = loadConfig();
         String portalId = config.getProperty("portal.id");
-        String username = config.getProperty("credentials.username");
-        String password = config.getProperty("credentials.password");
         Path artifactsRoot = Paths.get(config.getProperty("artifacts.dir", "artifacts"))
                 .toAbsolutePath().normalize();
 
         PortalDescriptor descriptor = PortalDescriptorLoader.load(portalId);
-        Map<String, String> bindings = Map.of(
-                "credentials.username", username,
-                "credentials.password", password);
+
+        CredentialsProvider credentialsProvider = new LocalFileCredentialsProvider();
+        PortalCredentials credentials = credentialsProvider.get(portalId);
+        Map<String, String> bindings = new LinkedHashMap<>();
+        credentials.values().forEach((k, v) -> bindings.put("credentials." + k, v));
 
         String runId = newRunId();
         Path runDir = artifactsRoot.resolve(runId);
@@ -66,7 +71,7 @@ public class Agent {
         manifest.startedAt = Instant.now();
         manifest.portal.id = descriptor.id();
         manifest.portal.baseUrl = descriptor.baseUrl();
-        manifest.portal.username = username;
+        manifest.portal.username = credentials.require("username");
         manifest.agentWorkerVersion = version(Agent.class.getPackage().getImplementationVersion());
         manifest.playwrightVersion = version(Playwright.class.getPackage().getImplementationVersion());
 
@@ -100,7 +105,8 @@ public class Agent {
             manifest.step("scrape", fieldNames(descriptor));
             Map<String, String> scraped = new PortalScraper(page).scrape(descriptor.scrape());
             ReportSnapshot scrapedSnapshot = SnapshotMapper.toSnapshot(scraped);
-            ReportSnapshot sourceSnapshot = new ReportSnapshot(username, LocalDate.now());
+            ReportSnapshot sourceSnapshot = new ReportSnapshot(
+                    credentials.require("username"), LocalDate.now());
 
             VerificationResult<ReportSnapshot> result =
                     ReadBackVerifier.verify(sourceSnapshot, scrapedSnapshot);
@@ -118,6 +124,7 @@ public class Agent {
             manifest.error = e.getClass().getSimpleName() + ": " + e.getMessage();
             throw e;
         } finally {
+            new HarScrubber(descriptor.securityContext()).scrub(runDir.resolve("network.har"));
             manifest.finishedAt = Instant.now();
             MAPPER.writeValue(manifestPath.toFile(), manifest);
             System.out.println("Status: " + manifest.status);

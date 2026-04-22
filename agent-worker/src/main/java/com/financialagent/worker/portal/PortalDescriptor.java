@@ -16,7 +16,8 @@ public record PortalDescriptor(
         String description,
         String baseUrl,
         List<Step> steps,
-        Scrape scrape) {
+        Scrape scrape,
+        SecurityContext securityContext) {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Step(
@@ -38,5 +39,22 @@ public record PortalDescriptor(
 
         @JsonIgnoreProperties(ignoreUnknown = true)
         public record Field(String name, String selector) {}
+    }
+
+    /**
+     * Declarative post-processing applied after the run completes but before
+     * artifacts are sealed. Applied to the HAR file to strip secret request
+     * fields; the live {@code network.har} produced by Playwright is never
+     * kept — only the scrubbed copy is written to disk.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SecurityContext(List<HarScrubRule> scrubHarFields) {
+
+        public List<HarScrubRule> scrubHarFields() {
+            return scrubHarFields == null ? List.of() : scrubHarFields;
+        }
+
+        @JsonIgnoreProperties(ignoreUnknown = true)
+        public record HarScrubRule(String urlPattern, List<String> bodyFields) {}
     }
 }

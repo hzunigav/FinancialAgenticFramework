@@ -35,3 +35,7 @@ Thumbs.db
 
 # Local Claude Code state
 .claude/
+
+# Audit artifacts (per-run agent bundles + portal access logs)
+agent-worker/artifacts/
+testing-harness/logs/

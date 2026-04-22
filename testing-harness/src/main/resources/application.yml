@@ -1,5 +1,13 @@
 server:
   port: 3000
+  tomcat:
+    accesslog:
+      enabled: true
+      directory: ${user.dir}/logs
+      prefix: portal-access
+      suffix: .log
+      pattern: '%h %l %u %t "%r" %s %b %D "%{Referer}i" "%{User-Agent}i"'
+      rotate: true
 
 spring:
   application:

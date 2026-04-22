@@ -129,9 +129,8 @@ public final class LocalFileCredentialsProvider implements CredentialsProvider {
         try {
             UserPrincipal owner = Files.getOwner(file);
             for (AclEntry entry : view.getAcl()) {
-                if (entry.principal().equals(owner)) {
-                    continue;
-                }
+                if (entry.principal().equals(owner)) continue;
+                if (isPrivilegedSystemPrincipal(entry.principal().getName())) continue;
                 if (entry.permissions().contains(AclEntryPermission.READ_DATA)) {
                     throw new SecurityException(
                             "Credentials file " + file + " grants read access to "
@@ -142,5 +141,20 @@ public final class LocalFileCredentialsProvider implements CredentialsProvider {
         } catch (IOException e) {
             throw new IllegalStateException("Failed to read ACL for " + file, e);
         }
+    }
+
+    /**
+     * Windows grants SYSTEM and Administrators access to everything in a
+     * user's profile by default. These are not "other users" in a threat
+     * sense — on a single-user machine SYSTEM is effectively the kernel,
+     * and an admin already has full-disk access. Our check is about
+     * blocking other real users and accidental cloud-sync leaks, not
+     * fighting the platform.
+     */
+    private static boolean isPrivilegedSystemPrincipal(String name) {
+        return name.equalsIgnoreCase("NT AUTHORITY\\SYSTEM")
+                || name.equalsIgnoreCase("BUILTIN\\Administrators")
+                || name.equalsIgnoreCase("NT AUTHORITY\\LOCAL SERVICE")
+                || name.equalsIgnoreCase("NT AUTHORITY\\NETWORK SERVICE");
     }
 }

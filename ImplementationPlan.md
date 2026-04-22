@@ -14,7 +14,8 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live) and [Technica
 | M1 | Mock vertical slice | ✓ |
 | M2 | Portal adapter + Read-Back verifier | ✓ |
 | M2.5 | Credentials provider + HAR scrubbing | ✓ |
-| M3 | Real portal access (Shadow Mode, fill-only) | · NEXT — needs prod credentials |
+| M3.0 | Engine plumbing for MFA + session + shadow | ✓ |
+| M3 | Real portal access (Shadow Mode, fill-only) | · NEXT — needs prod portal details |
 | M4 | MCP Server + real payroll data feed | · |
 | M5 | HITL gate + Safe-Submit loop | · |
 | M6 | Production AWS infra | · |
@@ -70,29 +71,40 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live) and [Technica
 
 ---
 
+## M3.0 — Engine plumbing for MFA + session + shadow · ✓
+
+**Goal:** Land the portal-agnostic mechanisms M3 needs (pause for SMS/email MFA, encrypted session reuse, shadow-mode guard) ahead of real-portal access, so the portal-specific work in M3 is just a descriptor + domain record.
+
+**Delivered:**
+- `pause` action in `PortalEngine` — halts, prompts the operator (stdin in dev), injects the response into bindings under a `bindTo` key, audits the prompt but never the response — [PortalEngine.java](agent-worker/src/main/java/com/financialagent/worker/portal/PortalEngine.java).
+- Shadow-mode guard — top-level `shadowMode: true` in descriptor + per-step `submit: true` flag; guard throws `PortalEngine.ShadowHalt` before touching the page, caller marks the run `SHADOW_HALT` rather than `FAILED` or `SUCCESS`. Unit-tested — [PortalEngineShadowModeTest.java](agent-worker/src/test/java/com/financialagent/worker/portal/PortalEngineShadowModeTest.java).
+- `SessionStore` interface + `LocalEncryptedSessionStore` in `common-lib` — AES-256-GCM, per-portal `.enc` blob at `~/.financeagent/sessions/<portalId>.enc`, key at `~/.financeagent/session-key`. TTL declared per-portal via `session.ttlMinutes`. 8 unit tests: round-trip, no-plaintext-on-disk, TTL expiry purges, missing-file, purge, per-portal isolation, key reuse, IV randomness — [LocalEncryptedSessionStoreTest.java](common-lib/src/test/java/com/financialagent/common/session/LocalEncryptedSessionStoreTest.java).
+- Descriptor restructured from a flat `steps` list into `authSteps` (pre-auth; skipped when a valid session is loaded) and `steps` (post-auth; always run) — [PortalDescriptor.java](agent-worker/src/main/java/com/financialagent/worker/portal/PortalDescriptor.java).
+- Windows ACL check relaxed to ignore privileged system principals (SYSTEM, Administrators, LOCAL SERVICE, NETWORK SERVICE) — they're granted access to everything in a user profile by default and excluding them fought the platform rather than the threat model.
+- Manifest records `portal.shadowMode` and `portal.sessionReused` so auditors can tell at a glance whether a run went through login or reused a session — [RunManifest.java](agent-worker/src/main/java/com/financialagent/worker/RunManifest.java).
+
+**Run evidence:** consecutive runs `20260422T145923-c66c1` (Session reused: false, authSteps ran) and `20260422T145929-d6309` (Session reused: true, first manifest step is `auth-skipped | session-reused`, scrape+verify still MATCH). HAR remains scrubbed across both runs.
+
+---
+
 ## M3 — Real portal access (Shadow Mode) · NEXT
 
-**Prereq:** User grants credentials and access to a production payroll portal. MFA is SMS / email link — see Session handling below.
+**Prereq:** Portal URL, login page structure, MFA delivery method (already confirmed: SMS / email link), and a description of the data to read back.
 
 **Goal:** Exercise the framework against a real site with zero write-risk. Spec Phase 1.
 
-**Planned work:**
+**Planned work (what still remains — the engine is ready):**
 - Replace placeholder `ReportSnapshot` with real `PayrollData` record in `common-lib` (BigDecimal amounts, employee fields, custom serializers per spec §3).
-- New descriptor: `agent-worker/src/main/resources/portals/<real-portal>.yaml`.
-- Extend `PortalEngine` action set as the real portal demands (e.g., `select`, `press`, `waitForSelector`, `uploadFile`).
-- Add Shadow-Mode guard: engine refuses to execute any step marked `submit: true` when descriptor has `shadowMode: true`. Logs what *would* have been submitted.
-
-**MFA & session handling (new in M3 because target portal uses SMS/email):**
-- New step action `pause` — halts the engine, surfaces a prompt to the operator (stdin in dev, a HITL queue in M5), waits for a value to be injected into bindings (e.g. the SMS code) before continuing.
-- `BrowserContext.storageState` save/load between runs. Persist the authenticated session at the end of each successful run; load it at the start of the next. Only fall back to full login + MFA when the loaded state fails an authenticated probe step.
-- Session state is itself a bearer token — store encrypted in `~/.financeagent/sessions/<portalId>.enc` (dev) with a key derived from the local credential; AWS Secrets Manager + KMS in prod (M6). Never committed; added to `.gitignore` at M3 implementation.
-- Session TTL declared per portal in the descriptor. On expiry, the engine forces a re-auth on the next run.
+- New descriptor: `agent-worker/src/main/resources/portals/<real-portal>.yaml`. Expected shape: `authSteps` (navigate → fill → click → pause for MFA code → fill → click → waitForUrl), `steps` (navigate to payroll page, any selects), `scrape` (field-to-selector map), `securityContext.scrubHarFields` updated with the real portal's login and MFA request shapes.
+- `PayrollMapper` to translate scraped strings into `PayrollData`.
+- Extend `PortalEngine` action set as the real portal demands (e.g., `select`, `press`, `waitForSelector`, `uploadFile`) — only the ones actually needed.
+- Add session-validity probe step for the real portal, since server-side sessions can die before client TTL — a cheap `navigate` + expected-URL check at the start of `steps`; on mismatch, purge session and force authSteps to run.
 
 **Exit criteria:**
-- Agent logs into the real portal once with a human-provided MFA code, fills the form, halts before submit.
+- Agent logs into the real portal once with a human-provided MFA code, fills the form, halts before submit via the shadow-mode guard.
 - Subsequent runs within the session TTL skip login entirely.
 - Read-Back compares scraped-after-fill against the source payload — MATCH required to call the run successful.
-- Full audit bundle captured. HAR scrubbing confirmed against the real portal's login payload shape (the rule list in the descriptor is expected to grow during this work).
+- Full audit bundle captured. HAR scrubbing confirmed against the real portal's login and MFA payload shapes.
 
 ---
 
@@ -159,7 +171,8 @@ Added progressively as milestones demand them — not upfront.
 | Credential source-of-truth outside repo | M2.5 (in use) | §2 |
 | HAR body-field scrubbing | M2.5 (in use) | §7 |
 | Pre-commit secrets gate | M2.5 (in use) | — |
-| HITL `pause` step + encrypted session reuse | M3 | §6 |
+| HITL `pause` step + encrypted session reuse | M3.0 (in use) | §6 |
+| Shadow-mode guard (`submit`/`shadowMode` flags) | M3.0 (in use) | Phase 1 |
 | Payload SHA-256 hashing | M4 | §5 Ingestion |
 | Java-native PII redactor (salary, SSN, etc.) | M4 | §7.3 |
 | OpenTelemetry tracing | M4 | §7.1 |

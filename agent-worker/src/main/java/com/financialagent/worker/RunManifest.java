@@ -32,6 +32,8 @@ public class RunManifest {
         public String id;
         public String baseUrl;
         public String username;
+        public Boolean shadowMode;
+        public Boolean sessionReused;
     }
 
     public static class Artifacts {

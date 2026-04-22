@@ -7,6 +7,8 @@ import com.financialagent.common.credentials.CredentialsProvider;
 import com.financialagent.common.credentials.LocalFileCredentialsProvider;
 import com.financialagent.common.credentials.PortalCredentials;
 import com.financialagent.common.domain.ReportSnapshot;
+import com.financialagent.common.session.LocalEncryptedSessionStore;
+import com.financialagent.common.session.SessionStore;
 import com.financialagent.common.verify.ReadBackVerifier;
 import com.financialagent.common.verify.VerificationResult;
 import com.financialagent.worker.portal.HarScrubber;
@@ -23,11 +25,16 @@ import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.Tracing;
 import com.microsoft.playwright.options.HarContentPolicy;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -35,8 +42,10 @@ import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 public class Agent {
@@ -62,6 +71,9 @@ public class Agent {
         Map<String, String> bindings = new LinkedHashMap<>();
         credentials.values().forEach((k, v) -> bindings.put("credentials." + k, v));
 
+        SessionStore sessionStore = new LocalEncryptedSessionStore();
+        Optional<String> savedSession = loadSavedSession(sessionStore, descriptor);
+
         String runId = newRunId();
         Path runDir = artifactsRoot.resolve(runId);
         Files.createDirectories(runDir);
@@ -72,20 +84,22 @@ public class Agent {
         manifest.portal.id = descriptor.id();
         manifest.portal.baseUrl = descriptor.baseUrl();
         manifest.portal.username = credentials.require("username");
+        manifest.portal.shadowMode = descriptor.isShadowMode();
+        manifest.portal.sessionReused = savedSession.isPresent();
         manifest.agentWorkerVersion = version(Agent.class.getPackage().getImplementationVersion());
         manifest.playwrightVersion = version(Playwright.class.getPackage().getImplementationVersion());
 
         System.out.println("Run " + runId);
         System.out.println("Portal: " + descriptor.id() + " (" + descriptor.baseUrl() + ")");
+        System.out.println("Shadow mode: " + descriptor.isShadowMode());
+        System.out.println("Session reused: " + savedSession.isPresent());
         System.out.println("Artifacts: " + runDir);
 
         Path manifestPath = runDir.resolve("manifest.json");
         try (Playwright playwright = Playwright.create();
              Browser browser = playwright.chromium().launch(
                      new BrowserType.LaunchOptions().setHeadless(true));
-             BrowserContext context = browser.newContext(new Browser.NewContextOptions()
-                     .setRecordHarPath(runDir.resolve("network.har"))
-                     .setRecordHarContent(HarContentPolicy.EMBED))) {
+             BrowserContext context = browser.newContext(newContextOptions(runDir, savedSession))) {
 
             context.tracing().start(new Tracing.StartOptions()
                     .setScreenshots(true)
@@ -94,8 +108,18 @@ public class Agent {
 
             Page page = context.newPage();
 
-            PortalEngine engine = new PortalEngine(page, bindings, manifest::step);
-            engine.run(descriptor);
+            PortalEngine engine = new PortalEngine(
+                    page, bindings, manifest::step,
+                    stdinOperatorInput(), descriptor.isShadowMode());
+
+            if (savedSession.isEmpty()) {
+                engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());
+                saveSessionIfEnabled(sessionStore, descriptor, context);
+            } else {
+                manifest.step("auth-skipped", "session-reused");
+            }
+
+            engine.runSteps(descriptor.baseUrl(), descriptor.steps());
 
             manifest.step("screenshot", "report.png");
             page.screenshot(new Page.ScreenshotOptions()
@@ -119,6 +143,9 @@ public class Agent {
 
             context.tracing().stop(new Tracing.StopOptions()
                     .setPath(runDir.resolve("trace.zip")));
+        } catch (PortalEngine.ShadowHalt e) {
+            manifest.status = "SHADOW_HALT";
+            manifest.error = e.getMessage();
         } catch (RuntimeException e) {
             manifest.status = "FAILED";
             manifest.error = e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -130,6 +157,46 @@ public class Agent {
             System.out.println("Status: " + manifest.status);
             System.out.println("Manifest: " + manifestPath);
         }
+    }
+
+    private static Browser.NewContextOptions newContextOptions(Path runDir, Optional<String> savedSession) {
+        Browser.NewContextOptions opts = new Browser.NewContextOptions()
+                .setRecordHarPath(runDir.resolve("network.har"))
+                .setRecordHarContent(HarContentPolicy.EMBED);
+        savedSession.ifPresent(opts::setStorageState);
+        return opts;
+    }
+
+    private static Optional<String> loadSavedSession(SessionStore store, PortalDescriptor descriptor) {
+        PortalDescriptor.SessionConfig session = descriptor.session();
+        if (session == null || !session.enabled()) {
+            return Optional.empty();
+        }
+        return store.load(descriptor.id(), Duration.ofMinutes(session.ttlMinutes()));
+    }
+
+    private static void saveSessionIfEnabled(SessionStore store,
+                                             PortalDescriptor descriptor,
+                                             BrowserContext context) {
+        PortalDescriptor.SessionConfig session = descriptor.session();
+        if (session == null || !session.enabled()) {
+            return;
+        }
+        store.save(descriptor.id(), context.storageState());
+    }
+
+    private static Function<String, String> stdinOperatorInput() {
+        BufferedReader in = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+        return prompt -> {
+            System.out.print("[operator] " + prompt + " > ");
+            System.out.flush();
+            try {
+                String line = in.readLine();
+                return line == null ? "" : line.trim();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        };
     }
 
     private static RunManifest.Verification toManifestVerification(

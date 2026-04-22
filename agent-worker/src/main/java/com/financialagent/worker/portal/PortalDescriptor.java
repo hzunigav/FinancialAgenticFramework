@@ -15,9 +15,24 @@ public record PortalDescriptor(
         String id,
         String description,
         String baseUrl,
+        Boolean shadowMode,
+        SessionConfig session,
+        List<Step> authSteps,
         List<Step> steps,
         Scrape scrape,
         SecurityContext securityContext) {
+
+    public boolean isShadowMode() {
+        return Boolean.TRUE.equals(shadowMode);
+    }
+
+    public List<Step> authSteps() {
+        return authSteps == null ? List.of() : authSteps;
+    }
+
+    public List<Step> steps() {
+        return steps == null ? List.of() : steps;
+    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Step(
@@ -25,14 +40,29 @@ public record PortalDescriptor(
             String selector,
             String target,
             String value,
-            @JsonAlias("redact") Boolean redactValue) {
+            @JsonAlias("redact") Boolean redactValue,
+            String prompt,
+            String bindTo,
+            Boolean submit) {
 
         public boolean redacted() {
             return Boolean.TRUE.equals(redactValue);
         }
+
+        public boolean isSubmit() {
+            return Boolean.TRUE.equals(submit);
+        }
     }
 
-    public enum Action { navigate, fill, click, waitForUrl }
+    public enum Action { navigate, fill, click, waitForUrl, pause }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SessionConfig(Integer ttlMinutes) {
+
+        public boolean enabled() {
+            return ttlMinutes != null && ttlMinutes > 0;
+        }
+    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Scrape(List<Field> fields) {

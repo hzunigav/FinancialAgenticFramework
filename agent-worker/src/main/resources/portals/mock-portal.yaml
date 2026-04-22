@@ -2,7 +2,12 @@ id: mock-portal
 description: Local Spring Boot testing-harness mock (form login, CSRF, session cookies)
 baseUrl: http://localhost:3000
 
-steps:
+shadowMode: true
+
+session:
+  ttlMinutes: 5
+
+authSteps:
   - action: navigate
     target: /login
   - action: fill
@@ -16,6 +21,12 @@ steps:
     selector: "button[type='submit']"
   - action: waitForUrl
     target: "**/report"
+
+# Post-auth steps. Run every time (whether authSteps ran or was skipped via
+# a reused session), so the scrape section always sees /report.
+steps:
+  - action: navigate
+    target: /report
 
 scrape:
   fields:

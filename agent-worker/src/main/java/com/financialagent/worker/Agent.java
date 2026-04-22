@@ -6,17 +6,13 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.financialagent.common.credentials.CredentialsProvider;
 import com.financialagent.common.credentials.LocalFileCredentialsProvider;
 import com.financialagent.common.credentials.PortalCredentials;
-import com.financialagent.common.domain.ReportSnapshot;
 import com.financialagent.common.session.LocalEncryptedSessionStore;
 import com.financialagent.common.session.SessionStore;
-import com.financialagent.common.verify.ReadBackVerifier;
-import com.financialagent.common.verify.VerificationResult;
 import com.financialagent.worker.portal.HarScrubber;
 import com.financialagent.worker.portal.PortalDescriptor;
 import com.financialagent.worker.portal.PortalDescriptorLoader;
 import com.financialagent.worker.portal.PortalEngine;
 import com.financialagent.worker.portal.PortalScraper;
-import com.financialagent.worker.portal.SnapshotMapper;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
@@ -36,7 +32,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
@@ -58,18 +53,25 @@ public class Agent {
             .enable(SerializationFeature.INDENT_OUTPUT)
             .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
+    static final Map<String, PortalAdapter> ADAPTERS = Map.of(
+            "mock-portal", new MockPortalAdapter(),
+            "autoplanilla", new AutoplanillaAdapter());
+
     public static void main(String[] args) throws IOException {
         Properties config = loadConfig();
-        String portalId = config.getProperty("portal.id");
+        String portalId = System.getProperty("portal.id", config.getProperty("portal.id"));
         Path artifactsRoot = Paths.get(config.getProperty("artifacts.dir", "artifacts"))
                 .toAbsolutePath().normalize();
 
         PortalDescriptor descriptor = PortalDescriptorLoader.load(portalId);
+        PortalAdapter adapter = ADAPTERS.get(portalId);
+        if (adapter == null) {
+            throw new IllegalStateException("No PortalAdapter registered for portal: " + portalId);
+        }
 
         CredentialsProvider credentialsProvider = new LocalFileCredentialsProvider();
         PortalCredentials credentials = credentialsProvider.get(portalId);
-        Map<String, String> bindings = new LinkedHashMap<>();
-        credentials.values().forEach((k, v) -> bindings.put("credentials." + k, v));
+        Map<String, String> bindings = buildBindings(credentials);
 
         SessionStore sessionStore = new LocalEncryptedSessionStore();
         Optional<String> savedSession = loadSavedSession(sessionStore, descriptor);
@@ -128,18 +130,10 @@ public class Agent {
 
             manifest.step("scrape", fieldNames(descriptor));
             Map<String, String> scraped = new PortalScraper(page).scrape(descriptor.scrape());
-            ReportSnapshot scrapedSnapshot = SnapshotMapper.toSnapshot(scraped);
-            ReportSnapshot sourceSnapshot = new ReportSnapshot(
-                    credentials.require("username"), LocalDate.now());
-
-            VerificationResult<ReportSnapshot> result =
-                    ReadBackVerifier.verify(sourceSnapshot, scrapedSnapshot);
-            manifest.verification = toManifestVerification(result);
-            manifest.step("verify", result.status().name());
 
             manifest.finalUrl = page.url();
             manifest.finalTitle = page.title();
-            manifest.status = result.matched() ? "SUCCESS" : "MISMATCH";
+            manifest.status = adapter.captureToManifest(scraped, bindings, credentials, manifest);
 
             context.tracing().stop(new Tracing.StopOptions()
                     .setPath(runDir.resolve("trace.zip")));
@@ -157,6 +151,27 @@ public class Agent {
             System.out.println("Status: " + manifest.status);
             System.out.println("Manifest: " + manifestPath);
         }
+    }
+
+    /**
+     * Build the bindings map for a run:
+     * <ul>
+     *   <li>{@code credentials.*} from the {@link PortalCredentials}.</li>
+     *   <li>{@code params.*} from {@code -D} system properties, so dates
+     *       and planilla names can vary per invocation without editing
+     *       the descriptor.</li>
+     * </ul>
+     */
+    private static Map<String, String> buildBindings(PortalCredentials credentials) {
+        Map<String, String> bindings = new LinkedHashMap<>();
+        credentials.values().forEach((k, v) -> bindings.put("credentials." + k, v));
+        System.getProperties().forEach((k, v) -> {
+            String key = k.toString();
+            if (key.startsWith("params.")) {
+                bindings.put(key, v.toString());
+            }
+        });
+        return bindings;
     }
 
     private static Browser.NewContextOptions newContextOptions(Path runDir, Optional<String> savedSession) {
@@ -197,18 +212,6 @@ public class Agent {
                 throw new UncheckedIOException(e);
             }
         };
-    }
-
-    private static RunManifest.Verification toManifestVerification(
-            VerificationResult<ReportSnapshot> result) {
-        RunManifest.Verification v = new RunManifest.Verification();
-        v.status = result.status().name();
-        v.source = result.source();
-        v.scraped = result.scraped();
-        v.diffs = result.diffs().stream()
-                .map(d -> new RunManifest.Verification.Diff(d.field(), d.source(), d.scraped()))
-                .toList();
-        return v;
     }
 
     private static String fieldNames(PortalDescriptor descriptor) {

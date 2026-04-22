@@ -1,6 +1,7 @@
 package com.financialagent.worker.portal;
 
 import com.microsoft.playwright.Page;
+import com.microsoft.playwright.options.SelectOption;
 
 import java.util.List;
 import java.util.Map;
@@ -71,6 +72,15 @@ public final class PortalEngine {
             case waitForUrl -> {
                 audit("waitForUrl", step.target());
                 page.waitForURL(step.target());
+            }
+            case waitForSelector -> {
+                audit("waitForSelector", step.selector());
+                page.waitForSelector(step.selector());
+            }
+            case select -> {
+                String resolved = resolve(step.value());
+                audit("select", step.selector() + " = " + resolved);
+                page.locator(step.selector()).selectOption(new SelectOption().setLabel(resolved));
             }
             case pause -> {
                 String bindTo = step.bindTo();

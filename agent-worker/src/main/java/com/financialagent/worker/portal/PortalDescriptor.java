@@ -54,7 +54,7 @@ public record PortalDescriptor(
         }
     }
 
-    public enum Action { navigate, fill, click, waitForUrl, pause }
+    public enum Action { navigate, fill, click, waitForUrl, waitForSelector, select, pause }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SessionConfig(Integer ttlMinutes) {

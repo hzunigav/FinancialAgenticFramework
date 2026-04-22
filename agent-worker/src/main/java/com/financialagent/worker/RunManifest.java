@@ -26,6 +26,8 @@ public class RunManifest {
 
     public List<Step> steps = new ArrayList<>();
 
+    public Object scraped;
+
     public Verification verification;
 
     public static class Portal {

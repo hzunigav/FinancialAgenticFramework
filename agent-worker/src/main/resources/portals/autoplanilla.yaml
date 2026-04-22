@@ -1,0 +1,105 @@
+id: autoplanilla
+description: AutoPlanilla - CCSS report capture (read-only). First real portal, no MFA.
+baseUrl: https://app.autoplanilla.com
+
+# Shadow mode on by default. Nothing in the scrape flow actually submits
+# anything, so this is belt-and-suspenders for the operator.
+shadowMode: true
+
+# Sessions buy us speed on repeated runs. 30 min is a conservative default
+# for a SaaS login — narrow it if AutoPlanilla's server-side session is
+# shorter.
+session:
+  ttlMinutes: 30
+
+authSteps:
+  # ------------------------------------------------------------------
+  # LOGIN --- selectors below are best guesses. Before the first live
+  # run, verify against the actual login page HTML (DevTools / Elements).
+  # ------------------------------------------------------------------
+  - action: navigate
+    target: /login
+
+  # TODO(selectors): many SaaS login forms use email rather than a
+  # username field. Pick one of these and delete the other; if the real
+  # input has a different name attribute, swap it in.
+  - action: fill
+    selector: "input[type='email'], input[name='email'], input[name='username']"
+    value: "${credentials.username}"
+
+  - action: fill
+    selector: "input[type='password']"
+    value: "${credentials.password}"
+    redact: true
+
+  # TODO(selector): the login button. Text-based is more stable than CSS
+  # class — update the text if the button says something other than
+  # "Iniciar sesión" / "Ingresar" / "Login".
+  - action: click
+    selector: "button[type='submit']"
+
+  # TODO(url): landing page after login. Narrow this glob once confirmed.
+  - action: waitForUrl
+    target: "**/app.autoplanilla.com/**"
+
+steps:
+  - action: navigate
+    target: /reports/ccss
+
+  # TODO(selector strategy): the planilla dropdown in the screenshot
+  # looks like a custom component (Material UI Select / Autocomplete)
+  # rather than a native <select>. If that's the case, the 'select'
+  # action below will fail — replace it with two click steps:
+  #   - action: click
+  #     selector: "[role='combobox']"   # or a more specific selector
+  #   - action: click
+  #     selector: "li[role='option']:has-text('${params.planillaName}')"
+  # If it IS a native select, this line works as-is.
+  - action: select
+    selector: "select"  # TODO: narrow — likely has an id or name
+    value: "${params.planillaName}"
+
+  # TODO(selectors): the two <input type="date"> elements. If they have
+  # distinct names / ids we should use those; if not, we can target by
+  # preceding label text with Playwright's getByLabel. Fallback below
+  # assumes order (first date input = Fecha Inicio).
+  - action: fill
+    selector: "input[type='date'] >> nth=0"
+    value: "${params.fechaInicio}"
+  - action: fill
+    selector: "input[type='date'] >> nth=1"
+    value: "${params.fechaFinal}"
+
+  - action: click
+    selector: "text=GENERAR REPORTE"
+
+  # Wait for the table footer's row count to transition from "of 0" to
+  # a non-zero total. `waitForSelector` with a text filter is a cheap
+  # way to do this without a fixed sleep.
+  # TODO(selector): this may need adjustment based on the actual DOM
+  # structure of the Material React Table footer.
+  - action: waitForSelector
+    selector: "text=/of [1-9]\\d*/"
+
+scrape:
+  fields:
+    # TODO(selector): the totals row, "Total Ingreso" column — what's
+    # displayed as "Total (CRC)" + the first numeric cell in the
+    # screenshot. Likely a <tfoot> row; selector will depend on how
+    # Material React Table renders totals.
+    - name: totalGrossSalaries
+      selector: "tfoot td:nth-child(3)"
+
+    # The pagination footer text like "1-10 of 47". Mapper pulls out
+    # the number after "of".
+    - name: employeeCount
+      selector: ".MuiTablePagination-displayedRows"  # TODO: verify class
+
+securityContext:
+  scrubHarFields:
+    # AutoPlanilla's login endpoint — field name is a guess; update
+    # once we've seen the actual POST body during a live login.
+    - urlPattern: "**/login"
+      bodyFields: [password, j_password, Password]
+    - urlPattern: "**/auth/**"
+      bodyFields: [password, Password]

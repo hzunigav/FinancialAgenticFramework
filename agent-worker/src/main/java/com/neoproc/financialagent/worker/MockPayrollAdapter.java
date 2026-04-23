@@ -3,17 +3,13 @@ package com.neoproc.financialagent.worker;
 import com.neoproc.financialagent.common.credentials.PortalCredentials;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.common.match.EmployeeMatcher;
-import com.neoproc.financialagent.contract.payroll.Audit;
 import com.neoproc.financialagent.contract.payroll.CaptureResultBody;
-import com.neoproc.financialagent.contract.payroll.EnvelopeMeta;
 import com.neoproc.financialagent.contract.payroll.EnvelopeStatus;
 import com.neoproc.financialagent.contract.payroll.PayrollCaptureResult;
 import com.neoproc.financialagent.contract.payroll.PayrollSubmitRequest;
-import com.neoproc.financialagent.contract.payroll.PayrollSubmitResult;
 import com.neoproc.financialagent.contract.payroll.RosterDiff;
 import com.neoproc.financialagent.contract.payroll.SubmitRequestBody;
 import com.neoproc.financialagent.contract.payroll.SubmitResultBody;
-import com.neoproc.financialagent.contract.payroll.SubmitTask;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
 import com.neoproc.financialagent.worker.portal.PortalDescriptor;
 import com.neoproc.financialagent.worker.portal.PortalScraper;
@@ -22,13 +18,11 @@ import com.microsoft.playwright.Page;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 
 /**
  * Write-flow adapter for the mock payroll harness. Reads either a
@@ -45,7 +39,7 @@ import java.util.UUID;
  * <p>Legacy {@code -Dparams.salary.<id>=<amount>} input is still
  * accepted to keep existing manual smoke tests working.
  */
-final class MockPayrollAdapter implements PortalAdapter {
+final class MockPayrollAdapter extends AbstractSubmitAdapter {
 
     private static final String PARAM_SALARY_PREFIX = "params.salary.";
     private static final String PARAM_NAME_PREFIX = "params.canonicalName.";
@@ -162,11 +156,11 @@ final class MockPayrollAdapter implements PortalAdapter {
     }
 
     @Override
-    public String captureToManifest(Map<String, String> scraped,
-                                    List<Map<String, String>> scrapedRows,
-                                    Map<String, String> bindings,
-                                    PortalCredentials credentials,
-                                    RunManifest manifest) {
+    protected SubmitOutcome buildSubmitOutcome(Map<String, String> scraped,
+                                               List<Map<String, String>> scrapedRows,
+                                               Map<String, String> bindings,
+                                               PortalCredentials credentials,
+                                               RunManifest manifest) {
         BigDecimal serverGrandTotal = parseMoney(require(scraped, "grandTotal"));
         BigDecimal serverSubmittedTotal = parseMoney(require(scraped, "submittedTotal"));
         int serverUpdatedCount = parseInt(require(scraped, "updatedCount"));
@@ -217,59 +211,26 @@ final class MockPayrollAdapter implements PortalAdapter {
             System.out.println("****************************");
         }
 
-        writeEnvelope(status, serverGrandTotal, serverUpdatedCount, bindings, manifest);
-        return status;
-    }
-
-    private void writeEnvelope(String status,
-                               BigDecimal serverTotal,
-                               int serverCount,
-                               Map<String, String> bindings,
-                               RunManifest manifest) {
-        long firmId = Long.parseLong(require(bindings, "params.firmId"));
-        Path runDir = Path.of(require(bindings, "runtime.runDir"));
-        String runId = require(bindings, "runtime.runId");
-
-        EnvelopeCipher cipher = EnvelopeIo.defaultCipher();
-
         SubmitResultBody body = new SubmitResultBody(
                 status,
                 null, // mock harness does not issue a portal confirmation id today
-                new SubmitResultBody.Totals("CRC", serverTotal, serverCount),
+                new SubmitResultBody.Totals("CRC", serverGrandTotal, serverUpdatedCount),
                 submittedRows,
                 rosterDiff,
                 null);
 
-        EnvelopeIo.EncryptedPayload encrypted = EnvelopeIo.encryptBody(body, cipher, firmId);
+        String runId = require(bindings, "runtime.runId");
+        String businessKey = bindings.getOrDefault(
+                "params.businessKey", "mock-payroll::" + runId);
 
-        EnvelopeMeta envelope = new EnvelopeMeta(
-                UUID.randomUUID().toString(),
-                bindings.getOrDefault("params.businessKey", "mock-payroll::" + runId),
-                firmId,
-                "es",
-                Instant.now(),
-                "agent-worker/mock-payroll",
-                runId);
-
-        SubmitTask task = SubmitTask.forSalaries(
+        return new SubmitOutcome(
+                status,
+                body,
                 "mock-payroll",
+                businessKey,
+                "agent-worker/mock-payroll",
                 sourceCaptureEnvelopeId,
-                null, null);
-
-        Audit audit = new Audit("manifest.json", null, null, encrypted.payloadSha256());
-
-        PayrollSubmitResult envelopeRecord = new PayrollSubmitResult(
-                PayrollSubmitResult.SCHEMA,
-                envelope,
-                task,
-                encrypted.meta(),
-                encrypted.ciphertext(),
-                audit);
-
-        Path envelopeFile = runDir.resolve("payroll-submit-result.v1.json");
-        EnvelopeIo.write(envelopeRecord, envelopeFile);
-        manifest.step("envelope", envelopeFile.getFileName()
-                + " (envelopeId=" + envelope.envelopeId() + ", encrypted)");
+                null); // per-firm portal — no client identifier
     }
 
     /**
@@ -362,14 +323,6 @@ final class MockPayrollAdapter implements PortalAdapter {
 
     private static int parseInt(String raw) {
         return Integer.parseInt(raw.trim());
-    }
-
-    private static String require(Map<String, String> map, String key) {
-        String v = map.get(key);
-        if (v == null || v.isBlank()) {
-            throw new IllegalStateException("Missing binding: " + key);
-        }
-        return v;
     }
 
     /** Internal canonical employee shape, source-agnostic. */

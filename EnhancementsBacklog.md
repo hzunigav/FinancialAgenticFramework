@@ -81,30 +81,6 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 
 ---
 
-### Descriptor DSL: `when`, `expect`, `while`, per-step `timeoutMs` / `retries`
-
-**What:** Extend [PortalEngine](agent-worker/src/main/java/com/neoproc/financialagent/worker/portal/PortalEngine.java) with four new actions — `when` (conditional branch on selector presence), `expect` (assert text / count / value), `while` (loop while a selector is visible, for pagination) — plus per-step `timeoutMs` and `retries` overrides.
-
-**Why:** Current DSL covers linear flows. Any portal that ships intermittent screens (ToS prompts), needs post-submit assertions, or paginates results beyond the page will today force adapter-side Java forks. Declarative coverage of these patterns keeps adapters thin and descriptors readable.
-
-**Size:** ~150 lines in PortalEngine + descriptor schema updates; 1 day with tests.
-
-**Trigger to pick up:** before the Phase 2 CCSS / INS / Hacienda descriptors are written, so Phase 2 authors never hit a missing action.
-
----
-
-### `AbstractCaptureAdapter` / `AbstractSubmitAdapter` base classes
-
-**What:** Pull the envelope plumbing (metadata, encryption selection, manifest stepping, sha256 audit, envelope file write) into two abstract bases. Concrete adapters implement a single hook — `buildResult(scraped, rows)` — and inherit the rest.
-
-**Why:** [MockPayrollAdapter.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/MockPayrollAdapter.java) is 381 lines, most of which is envelope boilerplate that would be copy-pasted across CCSS / INS / Hacienda adapters. Each copy is a place to forget a hash or drop a step from the manifest. A shared base lets new adapters land at ~100 lines and removes that review risk.
-
-**Size:** 1-2 days including refactor of the two existing adapters.
-
-**Trigger to pick up:** before Phase 2 portal adapters are written, or immediately after the first of the three Phase 2 adapters ships (to avoid refactor churn mid-onboarding).
-
----
-
 ### Descriptor replay harness
 
 **What:** Record a successful run's Playwright trace once, store it as a fixture under `agent-worker/src/test/resources/replays/<portalId>/`. A JUnit runner re-plays the descriptor against the recorded page states and asserts it still completes + produces the expected scraped values.
@@ -186,6 +162,22 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 **Size:** 15 minutes initially + ongoing discipline at each doc-affecting commit.
 
 **Trigger to pick up:** before the second handover conversation with Praxis (not strictly required for the first since the whole thing is new to them).
+
+---
+
+## Shipped
+
+### Descriptor DSL: `when`, `expect`, `while`
+
+**Shipped:** conditional branches, assertions, and pagination loops are now declarative. `when` / `expect` / `while` added to [PortalEngine](agent-worker/src/main/java/com/neoproc/financialagent/worker/portal/PortalEngine.java) with 9 new tests in [PortalEngineControlFlowTest](agent-worker/src/test/java/com/neoproc/financialagent/worker/portal/PortalEngineControlFlowTest.java). Unblocks Phase 2 portal authoring — CCSS/INS/Hacienda can now handle ToS prompts, post-submit assertions, and paginated result sets without adapter-side Java forks.
+
+**Not shipped (deferred):** per-step `timeoutMs` / `retries` overrides. Lower priority; revisit when a specific Phase 2 portal needs a non-default timeout.
+
+---
+
+### `AbstractCaptureAdapter` / `AbstractSubmitAdapter` base classes
+
+**Shipped:** envelope plumbing (metadata, encryption, audit hashing, file write) extracted into two abstract templates; common helpers into `BaseAdapter`. Concrete adapters now implement one hook (`buildCaptureOutcome` or `buildSubmitOutcome`). [AutoplanillaAdapter](agent-worker/src/main/java/com/neoproc/financialagent/worker/AutoplanillaAdapter.java) shrank from 132 to 73 lines (45% reduction); [MockPayrollAdapter](agent-worker/src/main/java/com/neoproc/financialagent/worker/MockPayrollAdapter.java) from 381 to 334 (envelope boilerplate gone — the remaining lines are genuine adapter logic). New Phase 2 adapters land at ~50-100 lines each rather than copying envelope plumbing per portal.
 
 ---
 

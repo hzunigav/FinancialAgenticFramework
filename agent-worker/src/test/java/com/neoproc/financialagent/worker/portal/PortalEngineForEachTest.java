@@ -24,7 +24,8 @@ class PortalEngineForEachTest {
         return new PortalDescriptor.Step(
                 PortalDescriptor.Action.pause,
                 null, null, null, null, prompt, bindTo, null,
-                null, null, null);
+                null, null, null,
+                null, null, null, null, null, null);
     }
 
     private static PortalDescriptor.Step forEachStep(String over, String item,
@@ -32,7 +33,8 @@ class PortalEngineForEachTest {
         return new PortalDescriptor.Step(
                 PortalDescriptor.Action.forEach,
                 null, null, null, null, null, null, null,
-                over, item, sub);
+                over, item, sub,
+                null, null, null, null, null, null);
     }
 
     @Test
@@ -126,7 +128,8 @@ class PortalEngineForEachTest {
                 PortalDescriptor.Action.click,
                 "button[type='submit']",
                 null, null, null, null, null, Boolean.TRUE,
-                null, null, null);
+                null, null, null,
+                null, null, null, null, null, null);
 
         Map<String, List<Map<String, String>>> listBindings = new HashMap<>();
         listBindings.put("updates", List.of(Map.of("id", "A1")));

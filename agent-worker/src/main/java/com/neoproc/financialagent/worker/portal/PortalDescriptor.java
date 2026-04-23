@@ -2,6 +2,7 @@ package com.neoproc.financialagent.worker.portal;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.List;
 import java.util.Map;
@@ -64,9 +65,20 @@ public record PortalDescriptor(
             String prompt,
             String bindTo,
             Boolean submit,
+            // forEach: list-binding name and per-item scope name
             String over,
             String item,
-            List<Step> steps) {
+            // forEach body / when "then" branch / while body
+            List<Step> steps,
+            // when: predicate + optional "else" branch
+            Boolean exists,
+            List<Step> elseSteps,
+            // expect: exactly one of containsText / matchesRegex / hasCount must be set
+            String containsText,
+            String matchesRegex,
+            Integer hasCount,
+            // while: safety cap on the loop (defaults to 100)
+            Integer maxIterations) {
 
         public boolean redacted() {
             return Boolean.TRUE.equals(redactValue);
@@ -79,9 +91,25 @@ public record PortalDescriptor(
         public List<Step> steps() {
             return steps == null ? List.of() : steps;
         }
+
+        public List<Step> elseSteps() {
+            return elseSteps == null ? List.of() : elseSteps;
+        }
+
+        /** Default max iterations for a {@code while} loop — prevents runaway
+         *  loops when the body fails to change the condition. 100 is enough
+         *  for any realistic pagination; if a real portal needs more,
+         *  override at the descriptor level. */
+        public int maxIterationsOrDefault() {
+            return maxIterations == null ? 100 : maxIterations;
+        }
     }
 
-    public enum Action { navigate, fill, click, waitForUrl, waitForSelector, select, pause, forEach }
+    public enum Action {
+        navigate, fill, click, waitForUrl, waitForSelector, select, pause, forEach,
+        when, expect,
+        @JsonProperty("while") whileLoop
+    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record SessionConfig(Integer ttlMinutes) {

@@ -155,6 +155,88 @@ public final class PortalEngine {
                     }
                 }
             }
+            case when -> {
+                String resolvedSelector = resolve(step.selector());
+                boolean expectedToExist = step.exists() == null || Boolean.TRUE.equals(step.exists());
+                boolean actuallyExists = page != null && page.locator(resolvedSelector).count() > 0;
+                boolean predicateMet = expectedToExist == actuallyExists;
+                audit("when", resolvedSelector
+                        + " exists=" + expectedToExist
+                        + " matched=" + predicateMet);
+                List<PortalDescriptor.Step> branch = predicateMet ? step.steps() : step.elseSteps();
+                for (PortalDescriptor.Step sub : branch) {
+                    execute(baseUrl, sub);
+                }
+            }
+            case expect -> {
+                String resolvedSelector = resolve(step.selector());
+                if (step.containsText() != null) {
+                    String expected = resolve(step.containsText());
+                    String actual = page.locator(resolvedSelector).textContent();
+                    if (actual == null || !actual.contains(expected)) {
+                        throw new ExpectationFailed(
+                                "expect containsText failed: selector=" + resolvedSelector
+                                        + " expected=\"" + expected + "\" actual=\""
+                                        + (actual == null ? "<null>" : actual) + "\"");
+                    }
+                    audit("expect", resolvedSelector + " containsText=\"" + expected + "\"");
+                } else if (step.matchesRegex() != null) {
+                    String pattern = resolve(step.matchesRegex());
+                    String actual = page.locator(resolvedSelector).textContent();
+                    if (actual == null || !Pattern.compile(pattern).matcher(actual).find()) {
+                        throw new ExpectationFailed(
+                                "expect matchesRegex failed: selector=" + resolvedSelector
+                                        + " pattern=" + pattern + " actual=\""
+                                        + (actual == null ? "<null>" : actual) + "\"");
+                    }
+                    audit("expect", resolvedSelector + " matchesRegex=" + pattern);
+                } else if (step.hasCount() != null) {
+                    int actual = page.locator(resolvedSelector).count();
+                    if (actual != step.hasCount()) {
+                        throw new ExpectationFailed(
+                                "expect hasCount failed: selector=" + resolvedSelector
+                                        + " expected=" + step.hasCount()
+                                        + " actual=" + actual);
+                    }
+                    audit("expect", resolvedSelector + " hasCount=" + step.hasCount());
+                } else {
+                    throw new IllegalStateException(
+                            "expect step requires one of containsText / matchesRegex / hasCount");
+                }
+            }
+            case whileLoop -> {
+                String resolvedSelector = resolve(step.selector());
+                int max = step.maxIterationsOrDefault();
+                int iterations = 0;
+                List<PortalDescriptor.Step> body = step.steps();
+                audit("while", "begin selector=" + resolvedSelector + " max=" + max);
+                while (page.locator(resolvedSelector).count() > 0) {
+                    if (iterations >= max) {
+                        throw new IllegalStateException(
+                                "while loop exceeded maxIterations=" + max
+                                        + " — selector still matches: " + resolvedSelector
+                                        + ". Likely cause: body steps are not changing the"
+                                        + " condition. Check the loop body or raise maxIterations.");
+                    }
+                    for (PortalDescriptor.Step sub : body) {
+                        execute(baseUrl, sub);
+                    }
+                    iterations++;
+                }
+                audit("while", "end iterations=" + iterations);
+            }
+        }
+    }
+
+    /**
+     * Thrown when an {@code expect} step's assertion is not met. Distinct
+     * from {@code IllegalStateException} so Phase-2 portal authors can
+     * identify reconciliation-style failures separately from engine bugs
+     * or descriptor misconfiguration.
+     */
+    public static final class ExpectationFailed extends RuntimeException {
+        public ExpectationFailed(String message) {
+            super(message);
         }
     }
 

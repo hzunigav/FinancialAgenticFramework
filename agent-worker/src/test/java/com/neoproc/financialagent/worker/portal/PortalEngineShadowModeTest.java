@@ -23,7 +23,8 @@ class PortalEngineShadowModeTest {
                 PortalDescriptor.Action.click,
                 "button[type='submit']",
                 null, null, null, null, null, Boolean.TRUE,
-                null, null, null);
+                null, null, null,
+                null, null, null, null, null, null);
 
         Map<String, Object> audits = new HashMap<>();
         PortalEngine engine = new PortalEngine(
@@ -52,7 +53,8 @@ class PortalEngineShadowModeTest {
                 PortalDescriptor.Action.fill,
                 "input[name='q']",
                 null, "value", null, null, null, null,
-                null, null, null);
+                null, null, null,
+                null, null, null, null, null, null);
 
         PortalEngine engine = new PortalEngine(
                 null, new HashMap<>(),

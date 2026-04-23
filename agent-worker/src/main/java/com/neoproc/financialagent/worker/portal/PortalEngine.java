@@ -80,27 +80,31 @@ public final class PortalEngine {
                 page.navigate(url);
             }
             case fill -> {
+                String resolvedSelector = resolve(step.selector());
                 String resolved = resolve(step.value());
-                audit("fill", step.selector()
+                audit("fill", resolvedSelector
                         + (step.redacted() ? " (value redacted)" : " = " + resolved));
-                page.locator(step.selector()).fill(resolved);
+                page.locator(resolvedSelector).fill(resolved);
             }
             case click -> {
-                audit("click", step.selector());
-                page.locator(step.selector()).click();
+                String resolvedSelector = resolve(step.selector());
+                audit("click", resolvedSelector);
+                page.locator(resolvedSelector).click();
             }
             case waitForUrl -> {
                 audit("waitForUrl", step.target());
                 page.waitForURL(step.target());
             }
             case waitForSelector -> {
-                audit("waitForSelector", step.selector());
-                page.waitForSelector(step.selector());
+                String resolvedSelector = resolve(step.selector());
+                audit("waitForSelector", resolvedSelector);
+                page.waitForSelector(resolvedSelector);
             }
             case select -> {
+                String resolvedSelector = resolve(step.selector());
                 String resolved = resolve(step.value());
-                audit("select", step.selector() + " = " + resolved);
-                page.locator(step.selector()).selectOption(new SelectOption().setLabel(resolved));
+                audit("select", resolvedSelector + " = " + resolved);
+                page.locator(resolvedSelector).selectOption(new SelectOption().setLabel(resolved));
             }
             case pause -> {
                 String bindTo = step.bindTo();

@@ -1,5 +1,6 @@
 package com.neoproc.financialagent.worker.envelope;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -34,7 +35,11 @@ public final class EnvelopeIo {
     public static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .enable(SerializationFeature.INDENT_OUTPUT)
-            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            // Tolerate unknown fields on the wire — contracts evolve additively
+            // and producers may include debug fields (e.g. __note_to_reader) in
+            // dev fixtures. Per CONTRACT.md §8 backward-compat policy.
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
     private EnvelopeIo() {}
 

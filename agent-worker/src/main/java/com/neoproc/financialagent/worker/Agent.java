@@ -20,6 +20,7 @@ import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.Tracing;
 import com.microsoft.playwright.options.HarContentPolicy;
+import com.microsoft.playwright.options.LoadState;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -125,7 +126,16 @@ public class Agent {
                 engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());
                 saveSessionIfEnabled(sessionStore, descriptor, context);
             } else {
-                manifest.step("auth-skipped", "session-reused");
+                // Restored storage state gives us cookies but leaves the page
+                // on about:blank. Main steps assume we start from the portal
+                // dashboard, so land the page at baseUrl and wait for the
+                // SPA to settle (NETWORKIDLE) — without this, the first
+                // click on a post-auth element tends to race the hydration
+                // and time out.
+                page.navigate(descriptor.baseUrl());
+                page.waitForLoadState(LoadState.NETWORKIDLE);
+                manifest.step("auth-skipped",
+                        "session-reused; navigated to " + descriptor.baseUrl() + " (networkidle)");
             }
 
             adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);

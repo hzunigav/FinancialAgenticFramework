@@ -56,13 +56,14 @@
 
         "totals": {
           "type": "object",
-          "required": ["currency", "submittedTotal", "updatedCount"],
+          "required": ["currency", "grandTotal", "updatedCount"],
           "additionalProperties": false,
           "properties": {
-            "currency":       { "type": "string", "pattern": "^[A-Z]{3}$" },
-            "submittedTotal": { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$",
-                                "description": "Sum of submitted-row salaries as the portal echoed back. Compared to the agent's canonical sum to detect MISMATCH." },
-            "updatedCount":   { "type": "integer", "minimum": 0 }
+            "currency":   { "type": "string", "pattern": "^[A-Z]{3}$" },
+            "grandTotal": { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$",
+                            "description": "Post-submit grand total visible on the portal (sum of all salaries, changed and unchanged). Reconciles against the sum of all salaries pulled from the source-of-truth; any drift flips the run to MISMATCH, with rosterDiff naming the employees that explain the gap." },
+            "updatedCount": { "type": "integer", "minimum": 0,
+                              "description": "Diagnostic: how many rows the agent actually changed on this submit. Not used for reconciliation." }
           }
         },
 

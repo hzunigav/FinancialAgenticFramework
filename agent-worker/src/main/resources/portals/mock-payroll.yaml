@@ -66,6 +66,13 @@ steps:
 
 scrape:
   fields:
+    # Grand total is the source of truth for reconciliation — it reflects
+    # the full post-submit payroll sum on the portal side, which must
+    # equal the total of all salaries pulled from AutoPlanilla. Delta
+    # fields (submittedTotal/updatedCount) are recorded for diagnostics
+    # but not used for the pass/fail gate.
+    - name: grandTotal
+      selector: "#grand-total"
     - name: submittedTotal
       selector: "#submitted-total"
     - name: updatedCount

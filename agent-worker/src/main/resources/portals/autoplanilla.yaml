@@ -59,8 +59,13 @@ steps:
   # Native <select> (Playwright's selectOption confirms this in the
   # recording). Engine uses SelectOption.setLabel, so params.planillaName
   # must match the visible option text, e.g. "NeoProc Quincenal USD".
+  # Playwright Java lacks the `label=` locator engine, and MUI wrapping
+  # can hide the element from role=combobox lookups, so we target the
+  # native <select> directly. The CCSS Report page has one such element
+  # (the planilla chooser); if another select is ever added, narrow
+  # this with a stable attribute.
   - action: select
-    selector: 'label=Please select the payroll'
+    selector: 'select'
     value: "${params.planillaName}"
 
   - action: fill
@@ -118,9 +123,13 @@ scrape:
   # the tbody anchor. Per-row column selectors are evaluated relative
   # to each row.
   #
-  # The Total Income (CRC) body cell uses the same Emotion hash class
-  # (css-1wj4860) as the corresponding tfoot cell — Emotion deduplicates
-  # styles across body/footer when the visual treatment matches.
+  # Column layout (verified against a live April 2026 report):
+  #   1 Identification  2 Employee  3 Total Income (USD)  4 Income Tax
+  #   5 Exchange Rate   6 Total Income (CRC)              7 Renta (CRC)
+  # Body cells render values as plain text (no <b> wrapper), so the
+  # positional :nth-child selector is the cheap, churn-proof choice.
+  # tfoot uses Emotion hashes like css-1wj4860 because the totals row
+  # is bolded, but those hashes are NOT present on tbody cells.
   #
   # TODO(scaling): rows-per-page is capped at 30 by the descriptor's
   # combobox click. Larger payrolls will need pagination — out of scope
@@ -130,7 +139,7 @@ scrape:
     columns:
       id: "td:nth-child(1)"
       name: "td:nth-child(2)"
-      grossSalary: "td.MuiTableCell-body.css-1wj4860 > div > b"
+      grossSalary: "td:nth-child(6)"
 
 securityContext:
   scrubHarFields:

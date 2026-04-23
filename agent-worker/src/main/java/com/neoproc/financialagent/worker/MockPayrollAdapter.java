@@ -52,6 +52,13 @@ final class MockPayrollAdapter implements PortalAdapter {
     private static final String UPDATES_BINDING = "params.employeeUpdates";
 
     // Captured during beforeSteps, consumed in captureToManifest.
+    // canonicalGrandTotal is the authoritative reconciliation target: the
+    // sum of EVERY canonical employee's salary, including ones that didn't
+    // match a portal row (missingFromPortal). It must equal the portal's
+    // post-submit grand total for the run to be SUCCESS; any drift shifts
+    // the gap by exactly one (or more) employees' salary, which is why
+    // rosterDiff is the human-readable explanation of a mismatch.
+    private BigDecimal canonicalGrandTotal = BigDecimal.ZERO;
     private BigDecimal canonicalSubmittedTotal = BigDecimal.ZERO;
     private int canonicalUpdatedCount = 0;
     private RosterDiff rosterDiff = new RosterDiff(List.of(), List.of());
@@ -98,10 +105,12 @@ final class MockPayrollAdapter implements PortalAdapter {
         List<Map<String, String>> updates = new ArrayList<>();
         List<SubmitResultBody.SubmittedRow> matchedRows = new ArrayList<>();
         BigDecimal total = BigDecimal.ZERO;
+        BigDecimal grandTotal = BigDecimal.ZERO;
         boolean[] displayedMatched = new boolean[displayed.size()];
         List<RosterDiff.MissingFromPortal> missingFromPortal = new ArrayList<>();
 
         for (Canonical c : canonicals) {
+            grandTotal = grandTotal.add(c.salary());
             Optional<Integer> matched = c.name() != null
                     ? EmployeeMatcher.match(c.id(), c.name(), displayedIds, displayedNames)
                     : EmployeeMatcher.matchById(c.id(), displayedIds);
@@ -140,6 +149,7 @@ final class MockPayrollAdapter implements PortalAdapter {
         }
 
         listBindings.put(UPDATES_BINDING, updates);
+        canonicalGrandTotal = grandTotal.setScale(2, RoundingMode.HALF_UP);
         canonicalSubmittedTotal = total.setScale(2, RoundingMode.HALF_UP);
         canonicalUpdatedCount = updates.size();
         submittedRows = List.copyOf(matchedRows);
@@ -147,6 +157,7 @@ final class MockPayrollAdapter implements PortalAdapter {
         manifest.step("roster-diff",
                 "missingFromPortal=" + missingFromPortal.size()
                         + " missingFromPayroll=" + missingFromPayroll.size()
+                        + " canonicalGrandTotal=" + canonicalGrandTotal
                         + " canonicalSubmittedTotal=" + canonicalSubmittedTotal);
     }
 
@@ -156,11 +167,16 @@ final class MockPayrollAdapter implements PortalAdapter {
                                     Map<String, String> bindings,
                                     PortalCredentials credentials,
                                     RunManifest manifest) {
+        BigDecimal serverGrandTotal = parseMoney(require(scraped, "grandTotal"));
         BigDecimal serverSubmittedTotal = parseMoney(require(scraped, "submittedTotal"));
         int serverUpdatedCount = parseInt(require(scraped, "updatedCount"));
 
-        boolean totalsMatch = canonicalSubmittedTotal.compareTo(serverSubmittedTotal) == 0
-                && canonicalUpdatedCount == serverUpdatedCount;
+        // Grand-total reconciliation: the portal's post-submit total must
+        // equal the sum of every salary we pulled from the source-of-truth.
+        // Any drift (missingFromPortal / missingFromPayroll) shifts the two
+        // by exactly the drifted employees' salaries, so totals and
+        // rosterDiff agree on the same root cause.
+        boolean totalsMatch = canonicalGrandTotal.compareTo(serverGrandTotal) == 0;
 
         String status;
         if (!totalsMatch) {
@@ -173,29 +189,35 @@ final class MockPayrollAdapter implements PortalAdapter {
 
         manifest.step("verify",
                 "status=" + status
-                        + " canonicalTotal=" + canonicalSubmittedTotal
-                        + " serverTotal=" + serverSubmittedTotal
-                        + " canonicalCount=" + canonicalUpdatedCount
-                        + " serverCount=" + serverUpdatedCount);
+                        + " canonicalGrandTotal=" + canonicalGrandTotal
+                        + " serverGrandTotal=" + serverGrandTotal
+                        + " delta(canonical)=" + canonicalSubmittedTotal
+                        + "/" + canonicalUpdatedCount
+                        + " delta(server)=" + serverSubmittedTotal
+                        + "/" + serverUpdatedCount);
 
         if (EnvelopeStatus.MISMATCH.equals(status) || EnvelopeStatus.PARTIAL.equals(status)) {
             System.out.println();
             System.out.println("*** HITL REVIEW REQUIRED — status=" + status + " ***");
             if (EnvelopeStatus.MISMATCH.equals(status)) {
-                System.out.println("Totals diverged: canonical=" + canonicalSubmittedTotal
-                        + " portal=" + serverSubmittedTotal);
+                BigDecimal gap = serverGrandTotal.subtract(canonicalGrandTotal);
+                System.out.println("Grand totals diverged: canonical=" + canonicalGrandTotal
+                        + " portal=" + serverGrandTotal
+                        + " (portal - canonical = " + gap + ")");
             }
             if (!rosterDiff.isEmpty()) {
                 System.out.println("Roster diff:");
                 rosterDiff.missingFromPortal().forEach(m -> System.out.println(
-                        "  missingFromPortal id=" + m.id() + " name=" + m.name()));
+                        "  missingFromPortal id=" + m.id() + " name=" + m.name()
+                                + " expectedSalary=" + m.expectedSalary()));
                 rosterDiff.missingFromPayroll().forEach(m -> System.out.println(
-                        "  missingFromPayroll id=" + m.id() + " displayName=" + m.displayName()));
+                        "  missingFromPayroll id=" + m.id() + " displayName=" + m.displayName()
+                                + " lastKnownSalary=" + m.lastKnownSalary()));
             }
             System.out.println("****************************");
         }
 
-        writeEnvelope(status, serverSubmittedTotal, serverUpdatedCount, bindings, manifest);
+        writeEnvelope(status, serverGrandTotal, serverUpdatedCount, bindings, manifest);
         return status;
     }
 

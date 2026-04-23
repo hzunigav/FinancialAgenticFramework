@@ -31,7 +31,7 @@ public record SubmitResultBody(
 
     public record PortalConfirmation(String id, Instant issuedAt, String rawText) {}
 
-    public record Totals(String currency, BigDecimal submittedTotal, int updatedCount) {}
+    public record Totals(String currency, BigDecimal grandTotal, int updatedCount) {}
 
     public record SubmittedRow(String id, String displayName, BigDecimal salary) {}
 

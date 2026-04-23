@@ -16,7 +16,11 @@ public class SecurityConfig {
         http
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/login", "/css/**", "/error").permitAll()
+                        // dev-only: demo scripts curl these without auth
+                        .requestMatchers("/employees/reset", "/employees/seed").permitAll()
                         .anyRequest().authenticated())
+                .csrf(csrf -> csrf.ignoringRequestMatchers(
+                        "/employees/reset", "/employees/seed"))
                 .formLogin(form -> form
                         .loginPage("/login")
                         .loginProcessingUrl("/login")

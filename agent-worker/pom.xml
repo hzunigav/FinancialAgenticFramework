@@ -14,6 +14,10 @@
     <name>agent-worker</name>
     <description>Playwright-driven worker that performs portal UI interactions</description>
 
+    <properties>
+        <exec.mainClass>com.neoproc.financialagent.worker.Agent</exec.mainClass>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.neoproc.financialagent</groupId>
@@ -53,7 +57,7 @@
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
                 <configuration>
-                    <mainClass>com.neoproc.financialagent.worker.Agent</mainClass>
+                    <mainClass>${exec.mainClass}</mainClass>
                 </configuration>
             </plugin>
         </plugins>

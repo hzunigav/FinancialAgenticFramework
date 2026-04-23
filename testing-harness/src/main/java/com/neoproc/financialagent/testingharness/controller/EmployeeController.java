@@ -1,7 +1,7 @@
 package com.neoproc.financialagent.testingharness.controller;
 
 import com.neoproc.financialagent.testingharness.model.Employee;
-import com.neoproc.financialagent.testingharness.model.EmployeeRegistry;
+import com.neoproc.financialagent.testingharness.model.PayrollRoster;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -14,10 +14,17 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Read + write flow for the mock payroll table. GET /employees renders a
- * per-row salary input; POST /employees/submit echoes back what was
- * received along with the server-side sum so the caller (agent under
- * test) can reconcile its own running total against the portal's.
+ * Read + write flow for the mock payroll table.
+ * <ul>
+ *   <li>GET {@code /employees} renders the per-row editable table,
+ *       read from the mutable {@link PayrollRoster}.</li>
+ *   <li>POST {@code /employees/submit} echoes totals AND persists the
+ *       new salaries on the roster, so subsequent GETs show them —
+ *       this is what lets the demo visibly fill the table across
+ *       sequential agent runs.</li>
+ *   <li>POST {@code /employees/reset} re-seeds the roster to its
+ *       initial values. Used between demo runs.</li>
+ * </ul>
  *
  * <p>Salary inputs are keyed by the employee's display ID (with hyphens,
  * e.g. {@code salary[1-0909-0501]=1234567}), which is what the agent
@@ -26,9 +33,15 @@ import java.util.Map;
 @Controller
 public class EmployeeController {
 
+    private final PayrollRoster roster;
+
+    public EmployeeController(PayrollRoster roster) {
+        this.roster = roster;
+    }
+
     @GetMapping("/employees")
     public String employees(Model model) {
-        List<Employee> employees = EmployeeRegistry.EMPLOYEES;
+        List<Employee> employees = roster.list();
         BigDecimal currentTotal = employees.stream()
                 .map(Employee::currentSalary)
                 .reduce(BigDecimal.ZERO, BigDecimal::add)
@@ -40,11 +53,11 @@ public class EmployeeController {
 
     @PostMapping("/employees/submit")
     public String submit(@RequestParam Map<String, String> params, Model model) {
-        List<Employee> employees = EmployeeRegistry.EMPLOYEES;
+        List<Employee> before = roster.list();
         BigDecimal submittedTotal = BigDecimal.ZERO;  // sum of changed rows only
         BigDecimal grandTotal = BigDecimal.ZERO;      // payroll after submission
         int updatedCount = 0;
-        for (Employee e : employees) {
+        for (Employee e : before) {
             String paramKey = "salary[" + e.id() + "]";
             String raw = params.get(paramKey);
             BigDecimal valueForGrand = e.currentSalary();
@@ -54,10 +67,11 @@ public class EmployeeController {
                     if (submitted.compareTo(e.currentSalary()) != 0) {
                         submittedTotal = submittedTotal.add(submitted);
                         updatedCount++;
+                        roster.updateSalary(e.id(), submitted);
                     }
                     valueForGrand = submitted;
                 } catch (NumberFormatException nfe) {
-                    // Bad input — fall back to the existing salary.
+                    // Bad input — leave the existing salary intact.
                 }
             }
             grandTotal = grandTotal.add(valueForGrand);
@@ -68,5 +82,11 @@ public class EmployeeController {
         model.addAttribute("grandTotal", grandTotal);
         model.addAttribute("updatedCount", updatedCount);
         return "confirmation";
+    }
+
+    @PostMapping("/employees/reset")
+    public String reset(Model model) {
+        roster.reset();
+        return "redirect:/employees";
     }
 }

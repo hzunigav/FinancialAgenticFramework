@@ -1,0 +1,62 @@
+{
+  "schema": "payroll-capture-result.v1",
+
+  "__note_to_reader": [
+    "This is a synthetic capture envelope for the demo pipeline. It simulates what Praxis BPM would receive from an upstream capture Service Task (e.g. AutoPlanilla).",
+    "Cleartext for easy inspection — production envelopes carry encrypted result blocks (see CONTRACT.md §4).",
+    "Crafted to exercise every matcher path against the hardcoded 15-employee INS-look harness roster:",
+    "  - 10 entries match harness rows by id AND name (2 with NO hyphens in id, 3 with transliterated names — Urena/Munoz instead of Ureña/Muñoz)",
+    "  - 2 entries have ids NOT in the harness → will show up as roster_diff.missingFromPortal (new-hire candidates)",
+    "  - 5 harness rows are NOT in this envelope → will show up as roster_diff.missingFromPayroll (termination candidates)",
+    "All submitted salaries differ from the harness's seed values, so every matched row gets updated and visibly changes on the /employees page."
+  ],
+
+  "envelope": {
+    "envelopeId":  "11111111-2222-3333-4444-555555555555",
+    "businessKey": "2026-02::demo",
+    "firmId":      12345,
+    "locale":      "es",
+    "createdAt":   "2026-02-28T18:00:00Z",
+    "issuer":      "demo/capture-synthesizer",
+    "issuerRunId": "demo-cycle-1"
+  },
+
+  "task": {
+    "type":         "PAYROLL_CAPTURE",
+    "operation":    "CAPTURE",
+    "sourcePortal": "autoplanilla",
+    "period":       { "from": "2026-02-01", "to": "2026-02-28" },
+    "planilla":     { "id": null, "name": "Demo Planilla Febrero 2026" }
+  },
+
+  "encryption": null,
+
+  "result": {
+    "status": "SUCCESS",
+    "totals": {
+      "currency":      "CRC",
+      "grossSalaries": "11210000.00",
+      "renta":         "0.00",
+      "employeeCount": 12
+    },
+    "employees": [
+      { "id": "0-110080108", "displayName": "OLGER ULATE ROJAS",                "grossSalary": "800000.00"  },
+      { "id": "0-114230204", "displayName": "Carlos Andres Montero Arce",       "grossSalary": "950000.00"  },
+      { "id": "0-116360868", "displayName": "VERONICA ROJAS SANCHEZ",           "grossSalary": "700000.00"  },
+      { "id": "0-118040420", "displayName": "DAPHNE GABRIELA MORA HERNANDEZ",   "grossSalary": "870000.00"  },
+      { "id": "0-118860150", "displayName": "FRANCISCO JOSE OCHOA MEDINA",      "grossSalary": "1200000.00" },
+      { "id": "0111940073",  "displayName": "Pablo Roberto Urena Garcia",       "grossSalary": "1350000.00" },
+      { "id": "0-108260501", "displayName": "FERNANDO JOSE URENA MORA",         "grossSalary": "1400000.00" },
+      { "id": "0-115010333", "displayName": "LUIS ALEJANDRO CASCANTE CALDERON", "grossSalary": "1000000.00" },
+      { "id": "0-117040400", "displayName": "ANDRES MARIN MUNOZ",               "grossSalary": "790000.00"  },
+      { "id": "0-207630807", "displayName": "EVELYN NATALIA GODINEZ BOZA",      "grossSalary": "950000.00"  },
+      { "id": "0-123456789", "displayName": "JUAN PEREZ GHOST",                 "grossSalary": "500000.00"  },
+      { "id": "0-987654321", "displayName": "MARIA NUEVA EMPLEADA",             "grossSalary": "700000.00"  }
+    ]
+  },
+
+  "audit": {
+    "manifestPath":  "n/a — synthetic demo fixture",
+    "payloadSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

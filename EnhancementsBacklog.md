@@ -81,6 +81,114 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 
 ---
 
+### Descriptor DSL: `when`, `expect`, `while`, per-step `timeoutMs` / `retries`
+
+**What:** Extend [PortalEngine](agent-worker/src/main/java/com/neoproc/financialagent/worker/portal/PortalEngine.java) with four new actions — `when` (conditional branch on selector presence), `expect` (assert text / count / value), `while` (loop while a selector is visible, for pagination) — plus per-step `timeoutMs` and `retries` overrides.
+
+**Why:** Current DSL covers linear flows. Any portal that ships intermittent screens (ToS prompts), needs post-submit assertions, or paginates results beyond the page will today force adapter-side Java forks. Declarative coverage of these patterns keeps adapters thin and descriptors readable.
+
+**Size:** ~150 lines in PortalEngine + descriptor schema updates; 1 day with tests.
+
+**Trigger to pick up:** before the Phase 2 CCSS / INS / Hacienda descriptors are written, so Phase 2 authors never hit a missing action.
+
+---
+
+### `AbstractCaptureAdapter` / `AbstractSubmitAdapter` base classes
+
+**What:** Pull the envelope plumbing (metadata, encryption selection, manifest stepping, sha256 audit, envelope file write) into two abstract bases. Concrete adapters implement a single hook — `buildResult(scraped, rows)` — and inherit the rest.
+
+**Why:** [MockPayrollAdapter.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/MockPayrollAdapter.java) is 381 lines, most of which is envelope boilerplate that would be copy-pasted across CCSS / INS / Hacienda adapters. Each copy is a place to forget a hash or drop a step from the manifest. A shared base lets new adapters land at ~100 lines and removes that review risk.
+
+**Size:** 1-2 days including refactor of the two existing adapters.
+
+**Trigger to pick up:** before Phase 2 portal adapters are written, or immediately after the first of the three Phase 2 adapters ships (to avoid refactor churn mid-onboarding).
+
+---
+
+### Descriptor replay harness
+
+**What:** Record a successful run's Playwright trace once, store it as a fixture under `agent-worker/src/test/resources/replays/<portalId>/`. A JUnit runner re-plays the descriptor against the recorded page states and asserts it still completes + produces the expected scraped values.
+
+**Why:** Today a descriptor is only exercisable by running against a real browser session. That blocks offline iteration during portal outages, makes descriptor regressions invisible in CI, and forces onboarding work to happen only when the portal's submission window is open. Fixtures decouple descriptor development from portal availability.
+
+**Size:** ~2 days — Playwright's `BrowserContext.newContext(tracing=...)` already produces the fixture; the replay runner is the new piece.
+
+**Trigger to pick up:** after the first production descriptor (AutoPlanilla) stabilizes, or when CI flakes on portal outages become noticeable.
+
+---
+
+### Split `PortalOnboarding.md` into dev and production workflows
+
+**What:** Split [PortalOnboarding.md](PortalOnboarding.md) into two docs: "Develop a descriptor locally" (keeps the current `~/.financeagent/secrets.properties` + `mvn exec:java` flow) and "Deploy a descriptor to production" (Vault-backed credentials, Praxis-dispatched envelopes, queue consumer model).
+
+**Why:** After Phase 1 lands, the production flow is materially different from the dev flow — different credentials store, different invocation path, different observability. Leaving one doc that mixes both will guarantee that future agent authors follow dev-mode instructions in production and get stuck.
+
+**Size:** half a day.
+
+**Trigger to pick up:** when Phase 1 is complete and production deployment is concrete (not before — we want the real production flow documented, not a speculative version).
+
+---
+
+### Per-portal rate-limit declaration
+
+**What:** New descriptor field `rateLimit: { maxConcurrent, minIntervalSeconds }`. Worker enforces via a portal-keyed semaphore / Guava `RateLimiter`; Praxis's RabbitMQ consumer prefetch matches `maxConcurrent` for rate-limited queues.
+
+**Why:** When multiple workers hit CCSS / INS / Hacienda across firms concurrently, portals throttle. First symptom is mysterious failures that look like data issues. Cheaper to declare and enforce limits up front than diagnose the same throttle event three times.
+
+**Size:** 1 day — descriptor + engine + documentation.
+
+**Trigger to pick up:** before the second firm is onboarded, or before the first throttling incident (whichever comes first).
+
+---
+
+### Structured HITL review payload + Praxis UI contract
+
+**What:** Add a `review` block to `PayrollSubmitResult` envelopes with status MISMATCH / PARTIAL, carrying a structured "what to show the reviewer" payload and the set of actions the reviewer can take (resubmit, acknowledge-as-expected, escalate). Paired with an appendix in [PraxisIntegrationHandoff.md](PraxisIntegrationHandoff.md) specifying the Praxis-side queue view + action API.
+
+**Why:** MISMATCH / PARTIAL envelopes will accumulate from cycle 1. Without a payload spec, the agent surfaces "something's wrong" as a free-text console message and Praxis's review UI ends up bespoke per portal. A structured payload makes the UI generic, forces the agent to surface actionable info, and gives Praxis a target to build against.
+
+**Size:** 1-2 days — contract changes (SubmitResultBody record + schema), agent-worker population in `MockPayrollAdapter.captureToManifest`, handoff-doc appendix.
+
+**Trigger to pick up:** before first production PARTIAL event (will happen in cycle 1 if any real drift exists between AutoPlanilla and the target portals).
+
+---
+
+### Staging environment plan
+
+**What:** Prefix-based split across all stateful systems — `financeagent/` for prod vs `financeagent-staging/` for staging on Vault mounts, matching RabbitMQ vhosts, worker deployments via env-driven config.
+
+**Why:** Today the plan has local-dev and production; nothing in between. Pre-prod testing against real portals = real firm data and real regulatory exposure. A prefix-based staging costs ~1-2 days of setup and buys rehearsal surface that materially de-risks financial submissions.
+
+**Size:** 1-2 days.
+
+**Trigger to pick up:** deferred per 2026-04-23 decision. Revisit before the first customer-impacting production rehearsal, or if a pre-prod bug slips into production.
+
+---
+
+### Secret-rotation handling on the worker
+
+**What:** On portal 401 / 403 during a run, the worker purges its cached session, fetches fresh credentials from Vault, retries the current step once. Same pattern for Vault AppRole token refresh on expiry.
+
+**Why:** The worker fetches credentials once at run start. When portals rotate passwords or AppRole tokens expire mid-run, the failure mode is silent outage until the next run, which may be a day later. Rotation-aware retry turns this into transparent recovery.
+
+**Size:** half a day once the `VaultCredentialsProvider` exists.
+
+**Trigger to pick up:** deferred per 2026-04-23 decision. Revisit before first credential rotation event, or when first AppRole token approaches expiry.
+
+---
+
+### `PraxisIntegrationHandoff.md` changelog breadcrumb
+
+**What:** Add a "Changelog" section at the top of [PraxisIntegrationHandoff.md](PraxisIntegrationHandoff.md) listing the last N material changes with commit SHAs, or per-subsection tags referencing the commit that last touched them.
+
+**Why:** As the handoff doc grows and Praxis has follow-up conversations with us, they will ask version-dependent questions ("does this match the commit you sent over last week?"). A small changelog lets them triage what changed without re-reading the whole doc.
+
+**Size:** 15 minutes initially + ongoing discipline at each doc-affecting commit.
+
+**Trigger to pick up:** before the second handover conversation with Praxis (not strictly required for the first since the whole thing is new to them).
+
+---
+
 ## How to add an entry
 
 Copy the template below, append under **Active entries**, and keep it to four short lines plus a one-line trigger.

@@ -270,6 +270,26 @@ This is the biggest code delta on the agent-worker side — replacing `Agent.mai
 - [ ] Duplicate receipt → return the previously-computed result (if still in artifact storage) or emit a `FAILED` envelope with `errorDetail.category=DUPLICATE_ENVELOPE`. Do **not** re-execute portal actions for a duplicate — the portal is not idempotent.
 - [ ] Worker-side retries: zero for write operations (portal submissions are side-effectful). Retries are a Praxis concern — if a message hits the DLQ, Praxis's retry policy decides whether to re-publish a new envelope (with a new envelopeId) or escalate to a human.
 
+### C.5 Per-portal rate limiting
+
+Government portals will throttle us aggressively once we submit at scale across firms. Failures surface as mysterious timeouts that look like data issues — much cheaper to declare and enforce limits defensively from day one than diagnose the same throttle event three times.
+
+- [ ] **Descriptor declares the limit.** Each portal descriptor gains a `rateLimit: { maxConcurrent, minIntervalSeconds }` block (new field, agent-worker side — tracked in [EnhancementsBacklog.md](EnhancementsBacklog.md)). Example values to use as starting points until real numbers come from the portals:
+  ```yaml
+  # ccss-sicere.yaml (tight limits likely)
+  rateLimit:
+    maxConcurrent: 1
+    minIntervalSeconds: 5
+
+  # ins-rt-virtual.yaml, hacienda-ovi.yaml
+  rateLimit:
+    maxConcurrent: 2
+    minIntervalSeconds: 2
+  ```
+- [ ] **Worker enforces the limit in-process.** A portal-keyed semaphore gates concurrent runs; a rate-limiter enforces the minimum interval between submissions. Limits are per-worker-process; across multiple worker replicas, see the next bullet.
+- [ ] **Praxis honors the limit at the broker level.** RabbitMQ consumer prefetch on each `financeagent.tasks.submit.<portalId>` queue must not exceed `maxConcurrent * replicas`. If CCSS is declared as `maxConcurrent: 1` and runs with 2 worker replicas, set the queue prefetch to 2. This keeps the broker from handing out messages the workers cannot immediately process.
+- [ ] **Acceptance:** submitting 10 `mock-payroll` envelopes to the queue simultaneously while the descriptor declares `maxConcurrent: 2` results in at most 2 active browser sessions against the mock harness at any instant, and all 10 eventually complete in order.
+
 ---
 
 ## 5. Workstream D — BPMN Service Task + Receive Task wiring
@@ -347,11 +367,55 @@ This is the biggest code delta on the agent-worker side — replacing `Agent.mai
 
 ---
 
-## 8. Integration testing plan
+## 8. Workstream G — Human-in-the-loop (HITL) review
+
+**Goal:** give Praxis a structured, generic way to surface `MISMATCH` and `PARTIAL` results to a reviewer without each portal inventing its own UI or review API.
+
+`MISMATCH` and `PARTIAL` envelopes will accumulate from cycle one — any real drift between AutoPlanilla and the three target portals produces one. Without a contract for what the reviewer sees and can do, the agent emits free-text console messages (as today) and Praxis builds a bespoke UI per portal. Under this workstream, the envelope itself carries the review payload and the action vocabulary is standardized.
+
+### G.1 Envelope gains a `review` block
+
+- [ ] Extend `SubmitResultBody` with an optional `review` block populated only for `MISMATCH` / `PARTIAL` runs. Proposed shape:
+  ```json
+  "review": {
+    "severity": "MISMATCH | PARTIAL",
+    "summary":  "human-readable one-liner, e.g. \"Portal grand total exceeds canonical by 1,319,818.62 CRC\"",
+    "signals": [
+      { "type": "TOTAL_GAP",            "canonical": "17239260.72", "portal": "18559079.34", "gap": "1319818.62" },
+      { "type": "MISSING_FROM_PORTAL",  "id": "117040400", "name": "ANDRES MARIN",  "expectedSalary": "902403.59" },
+      { "type": "MISSING_FROM_PAYROLL", "id": "999999901", "name": "JUAN PEREZ GHOST", "lastKnownSalary": "1234567.89" }
+    ],
+    "allowedActions": ["RESUBMIT", "ACKNOWLEDGE", "ESCALATE"]
+  }
+  ```
+- [ ] Agent-worker populates `signals` from the same data it already computes for the roster diff + reconciliation. No new browser interactions; pure restructuring of what the adapter already has in hand.
+- [ ] Schema + DTO changes live in `contract-api/`; tracked as a backlog entry ([EnhancementsBacklog.md: Structured HITL review payload](EnhancementsBacklog.md)).
+
+### G.2 Praxis-side review surface
+
+- [ ] A Flowable user task (already in the BPMN design per [PayrollOrchestrationFlow.md §4](PayrollOrchestrationFlow.md)) receives the `review` block as its task-form input.
+- [ ] Review UI renders `summary` at the top, lists `signals` grouped by `type` (gap cards, missing-from-portal list, missing-from-payroll list), and exposes exactly the buttons in `allowedActions`. Generic across portals — no per-portal customization needed.
+- [ ] Reviewer's choice routes the process:
+  - `RESUBMIT` → process loops back to the relevant submit Service Task with a new envelope (new envelopeId; links to the prior via `task.sourceCaptureEnvelopeId`).
+  - `ACKNOWLEDGE` → process completes with status `PARTIAL_ACCEPTED`, cycle moves on. Manifest of the run + the reviewer's comment persist in the artifact store.
+  - `ESCALATE` → process moves to an engineering escalation user task outside the payroll flow.
+
+### G.3 Observability linkage
+
+- [ ] Each review decision emits a metric (`agent_review_decisions_total{action="resubmit|acknowledge|escalate"}`) so a spike in acknowledgements vs resubmits becomes a visible signal of process drift.
+- [ ] The `review.summary` field is what shows on the operations dashboard next to each PARTIAL/MISMATCH envelope. Keep it one line — the full detail is in `signals`.
+
+### G.4 Acceptance
+
+- [ ] A deliberately drifted mock-payroll run (run via [demo/test-roster-drift.sh](demo/test-roster-drift.sh) in dev) produces a `PayrollSubmitResult` envelope with a populated `review` block. Praxis's review UI renders it correctly, and each of the three action buttons routes the BPMN process as specified.
+
+---
+
+## 9. Integration testing plan
 
 How to validate the full pipeline before touching any real government portal.
 
-### 8.1 Local / dev validation
+### 9.1 Local / dev validation
 
 Agent-worker already has a complete end-to-end test that runs without Praxis:
 - `demo/run-pipeline.sh` — runs real AutoPlanilla capture, seeds the mock harness, runs submit. See [agent-worker README] or the script header for usage.
@@ -359,7 +423,7 @@ Agent-worker already has a complete end-to-end test that runs without Praxis:
 
 These prove the worker and the contract are correct in isolation.
 
-### 8.2 Praxis-side contract test
+### 9.2 Praxis-side contract test
 
 - [ ] Write a Praxis integration test that:
   1. Starts an embedded RabbitMQ (TestContainers works well).
@@ -368,7 +432,7 @@ These prove the worker and the contract are correct in isolation.
   - The worker running against this test can be a Docker container (from §F.1) or a locally-launched Spring Boot app.
 - [ ] **Acceptance:** the test passes reliably on the CI runner.
 
-### 8.3 Staging rehearsal
+### 9.3 Staging rehearsal
 
 - [ ] Before first real CCSS / INS / Hacienda submission, a full end-to-end rehearsal in staging against a test firm + sandbox credentials (if the portals offer them — they typically don't, in which case staging = production-against-a-real-firm, with extra supervision).
 - [ ] Rehearsal checklist:
@@ -382,7 +446,7 @@ These prove the worker and the contract are correct in isolation.
 
 ---
 
-## 9. Rollout plan
+## 10. Rollout plan
 
 Once Phase 1 is green in staging:
 
@@ -393,20 +457,22 @@ Once Phase 1 is green in staging:
 
 ---
 
-## 10. Open questions (please confirm or redirect)
+## 11. Open questions (please confirm or redirect)
 
-These are assumptions I've made that Praxis may want to adjust. Getting answers unblocks concrete work.
+These are assumptions I've made that Praxis may want to adjust. Each is tagged **BLOCKING** (decision must land before Phase 1 development can start in earnest) or **NON-BLOCKING** (decision can be made while other workstreams are in flight, as long as it's settled before the dependent workstream's acceptance test).
 
-1. **RabbitMQ vs other broker.** I've assumed RabbitMQ because it's the most common Flowable pairing. If Praxis already uses Kafka or has a different message bus, we adapt the topology but the contract (`PayrollSubmitRequest` / `PayrollSubmitResult` JSON) is unchanged.
-2. **Redis vs Postgres for idempotency state.** Worker needs a shared store for processed envelopeIds. Pick whichever Praxis already operates.
-3. **Artifact storage.** Same question — S3-compatible object storage for the run manifests. Whatever Praxis already has.
-4. **HITL review UI.** Who builds the UI that surfaces `MISMATCH` / `PARTIAL` envelopes for payroll admins? This is a Praxis concern (it's a User Task in BPM), but it needs design input from whoever owns the finance UX.
-5. **Firm onboarding flow timing.** Do portal credentials get entered at firm-create time, or lazily when a firm first enables payroll agents? The latter is cleaner but requires a UI trigger.
-6. **Phase 2 kickoff.** The CCSS / INS / Hacienda descriptor work can start in parallel with Phase 1 — selector discovery against the live portals doesn't block on the Praxis plumbing. Schedule a session between whoever will write those three descriptors and a payroll admin who can walk through the portals during a live submission window.
+1. **[BLOCKING, §C]** RabbitMQ vs other broker. I've assumed RabbitMQ because it's the most common Flowable pairing. If Praxis already uses Kafka or has a different message bus, we adapt the topology but the contract (`PayrollSubmitRequest` / `PayrollSubmitResult` JSON) is unchanged. Blocks all of Workstream C design.
+2. **[NON-BLOCKING, §C.4]** Redis vs Postgres for idempotency state. Worker needs a shared store for processed envelopeIds. Pick whichever Praxis already operates. Can be decided before the first staging run; doesn't block the worker runtime change.
+3. **[NON-BLOCKING, §F.3]** Artifact storage. Same question — S3-compatible object storage for the run manifests. Whatever Praxis already has. Can be decided before Workstream F's acceptance test; for dev work, local disk is fine.
+4. **[BLOCKING, §G]** HITL review UI ownership + design. It's a User Task in BPM (Praxis-side), but the `review` payload shape in Workstream G needs sign-off from whoever owns the finance UX. Blocks the agent-worker's ability to finalize the `review` schema.
+5. **[NON-BLOCKING, §B.2]** Firm onboarding flow timing. Do portal credentials get entered at firm-create time, or lazily when a firm first enables payroll agents? The latter is cleaner but requires a UI trigger. Doesn't block Vault KV provisioning; can be decided while §B is being built.
+6. **[NON-BLOCKING, Phase 2]** Phase 2 kickoff. The CCSS / INS / Hacienda descriptor work can start in parallel with Phase 1 — selector discovery against the live portals doesn't block on the Praxis plumbing. Schedule a session between whoever will write those three descriptors and a payroll admin who can walk through the portals during a live submission window.
+
+**First-week focus for Praxis:** resolve Q1 and Q4. Everything else can proceed in parallel.
 
 ---
 
-## 11. Estimation (rough)
+## 12. Estimation (rough)
 
 | Workstream | Praxis-side effort | Agent-worker-side effort | Parallelizable? |
 |---|---|---|---|
@@ -416,7 +482,8 @@ These are assumptions I've made that Praxis may want to adjust. Getting answers 
 | D. BPMN wiring | ~3 eng-days | 0 | no (depends on A, B, C) |
 | E. Observability | ~1 eng-day | ~1 eng-day | yes |
 | F. Packaging | ~2 eng-days (K8s + AppRole setup) | ~1 eng-day (Dockerfile) | yes |
+| G. HITL review | ~2 eng-days (user task + review UI) | ~1 eng-day (review payload) | yes, once Q4 resolved |
 | Integration testing | ~2 eng-days | ~1 eng-day | no (depends on all above) |
-| **Total** | **~15 eng-days** | **~11 eng-days** | |
+| **Total** | **~17 eng-days** | **~12 eng-days** | |
 
 With focused parallelism and no surprises, the critical path is ~3 weeks end-to-end. Phase 2 (the three real portal descriptors) can run alongside starting the week after.

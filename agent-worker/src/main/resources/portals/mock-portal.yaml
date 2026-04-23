@@ -4,6 +4,8 @@ baseUrl: http://localhost:3000
 
 shadowMode: true
 
+credentialScope: per-firm
+
 session:
   ttlMinutes: 5
 

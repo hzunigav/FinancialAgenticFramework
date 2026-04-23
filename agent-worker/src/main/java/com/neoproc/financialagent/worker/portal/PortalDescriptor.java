@@ -17,14 +17,33 @@ public record PortalDescriptor(
         String description,
         String baseUrl,
         Boolean shadowMode,
+        String credentialScope,
         SessionConfig session,
         List<Step> authSteps,
         List<Step> steps,
         Scrape scrape,
         SecurityContext securityContext) {
 
+    public static final String SCOPE_PER_FIRM = "per-firm";
+    public static final String SCOPE_SHARED = "shared";
+
     public boolean isShadowMode() {
         return Boolean.TRUE.equals(shadowMode);
+    }
+
+    /**
+     * How portal credentials are scoped at the source of truth. Drives the
+     * Vault path the credentials provider reads from (per-firm subtree vs
+     * shared subtree). Defaults to per-firm — the safer assumption for a
+     * new portal, since leaking shared credentials to the wrong tenant is
+     * the worse failure mode.
+     */
+    public String credentialScope() {
+        return credentialScope == null ? SCOPE_PER_FIRM : credentialScope;
+    }
+
+    public boolean hasSharedCredentials() {
+        return SCOPE_SHARED.equals(credentialScope());
     }
 
     public List<Step> authSteps() {

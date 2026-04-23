@@ -106,11 +106,16 @@ Everything else is internal to one side.
 
 ## 3. Workstream B — Vault KV for portal credentials
 
-**Goal:** eliminate the dev-only `~/.financeagent/secrets.properties` file. Portal credentials live in Vault, scoped per firm.
+**Goal:** eliminate the dev-only `~/.financeagent/secrets.properties` file. Portal credentials live in Vault, with the right scope for each portal's real-world access model.
 
-**Today (dev):** `LocalFileCredentialsProvider` reads `portals.<portalId>.credentials.<name>=<value>` from a flat properties file. Agent looks up credentials by portalId only — no firm scoping.
+**Today (dev):** `LocalFileCredentialsProvider` reads `portals.<portalId>.credentials.<name>=<value>` from a flat properties file. Agent looks up credentials by portalId only — no firm scoping, no concept of shared vs per-firm creds.
 
-**Production:** credentials must be scoped per `(firmId, portalId)` tuple so one Praxis tenant can't read another's portal credentials.
+**Production:** credentials scope depends on the portal. Two models exist in the wild:
+
+| Scope | Example portals | Real-world meaning |
+|---|---|---|
+| **per-firm** | CCSS Sicere | Each client firm has its own patrono-level login. NeoProc logs in *as the firm*; a different firm = different credentials. |
+| **shared** | INS RT-Virtual, Hacienda OVI, AutoPlanilla | A single NeoProc-owned login covers every client firm. After login, the agent picks the target client on the portal page using a firm-specific identifier (cédula jurídica / client code). |
 
 ### B.0 Centralization — one source of truth
 
@@ -118,7 +123,8 @@ A legitimate concern when two services need credentials is where they're entered
 
 - **One UI for entry.** The Praxis firm-admin UI is the *only* place a human ever enters portal credentials. Agent-worker has no UI. Admins never touch a worker container or a secrets file.
 - **One store.** All credentials (portal creds for the agent-worker, plus whatever credentials Praxis uses for its own external integrations) live in the same Vault instance. Separate mounts for separation of concerns (`financeagent/` for this work; Praxis keeps whatever mount it uses today), but operationally it's one Vault with one UI in front of it.
-- **Two readers, narrowly scoped.** Praxis reads (and writes) via its own AppRole with a policy allowing UI-driven writes. The agent-worker reads via its own AppRole with a read-only policy scoped to `financeagent/firms/+/portals/+`. Neither service can read the other's credentials. This is the standard Vault pattern; think of the two AppRoles like two database users with different grants on the same database.
+- **Two readers, narrowly scoped.** Praxis reads (and writes) via its own AppRole with a policy allowing UI-driven writes. The agent-worker reads via its own AppRole with a read-only policy scoped to the `financeagent/` subtrees below. Neither service can read the other's credentials. This is the standard Vault pattern; think of the two AppRoles like two database users with different grants on the same database.
+- **One admin flow per portal, not per firm-portal combination.** For shared-creds portals, NeoProc enters credentials *once* (at tenant level), not N times (once per onboarded firm). Rotation touches one path. The per-firm metadata (which client to pick after login) is captured separately and is *not* a secret.
 
 Why not push credentials into the envelope itself and skip the worker's Vault integration entirely? We considered it. It's feasible (credentials get encrypted with the per-firm transit key and ride the envelope), but the tradeoffs land wrong: credentials end up in flight on the message bus on every run, Praxis becomes the critical path for every worker action, and the blast radius on a broker compromise is larger. A read-only AppRole on the worker side is ~15 lines of Spring code and one small policy — strictly cleaner.
 
@@ -127,7 +133,10 @@ What the user-facing experience looks like:
 ```
    [Payroll admin]
         │
-        │  (enters credentials once, in the Praxis firm-admin UI)
+        │  per-firm portals (CCSS):  enters credentials per firm
+        │  shared portals (INS/Hacienda/AutoPlanilla):
+        │       — enters tenant credentials ONCE
+        │       — per-firm: enters the client identifier for that portal
         ▼
    ┌─────────────────────┐
    │  Praxis (Spring)    │──── writes ───┐
@@ -141,6 +150,8 @@ What the user-facing experience looks like:
                                           │
    ┌─────────────────────┐                │
    │   Agent-worker      │──── reads ─────┘
+   │   (scope chosen per │
+   │    descriptor)      │
    └─────────────────────┘
 ```
 
@@ -149,32 +160,53 @@ So: one place to enter, one place to rotate, one audit trail. No duplication.
 ### B.1 Vault KV mount + layout
 
 - [ ] Mount a KV v2 secrets engine. Suggested path: `financeagent/` (parallel to the existing transit mount).
-- [ ] Per-firm, per-portal secret layout:
+- [ ] **Two subtrees, one per credential scope:**
   ```
+  # Per-firm — one record per (firmId, portalId). Used by: CCSS Sicere.
   financeagent/firms/<firmId>/portals/<portalId>
     -> { username: "...", password: "...", mfaMethod: "totp|sms|none", mfaSecret: "..." }
+
+  # Shared — one record per portalId, reused across every firm in this
+  # Praxis tenant. Used by: INS RT-Virtual, Hacienda OVI, AutoPlanilla.
+  financeagent/shared/portals/<portalId>
+    -> { username: "...", password: "...", mfaMethod: "totp|sms|none", mfaSecret: "..." }
   ```
-- [ ] **Acceptance:** `vault kv get financeagent/firms/12345/portals/autoplanilla` returns the stored credentials for firm 12345.
+- [ ] **Acceptance:** `vault kv get financeagent/firms/12345/portals/ccss-sicere` returns firm 12345's CCSS login; `vault kv get financeagent/shared/portals/ins-rt-virtual` returns NeoProc's shared INS login. Confirming both paths are reachable under the tenant's Vault policy.
 
 ### B.2 Firm onboarding UI
 
-- [ ] Extend the Praxis firm-admin UI (the same one that triggers `FirmCreatedEvent`) to collect portal credentials when a firm wants to enable payroll agents. The UI writes to the Vault KV path above. Credentials never touch Praxis's relational DB.
+Two workflows, depending on portal scope:
+
+- [ ] **Per-firm portals.** Existing pattern: when a firm is onboarded (or when payroll agents are enabled for an already-onboarded firm), the admin enters credentials per firm per portal. UI writes to `financeagent/firms/<firmId>/portals/<portalId>`.
+- [ ] **Shared portals (tenant-level credentials).** NeoProc enters credentials once at tenant setup time (not per firm). UI writes to `financeagent/shared/portals/<portalId>`. The credentials form is only shown to users with tenant-admin role.
+- [ ] **Shared portals (per-firm client identifier).** Separately, each firm's record gets a **client identifier** field per shared portal — what the portal indexes that firm by (cédula jurídica, internal client code, whatever). Stored in Praxis's firm record, not Vault. This is **not a secret**; it's firm metadata that travels with the envelope.
+- [ ] **Envelope carries the client identifier for shared-creds runs.** Extend the submit envelope's `task` block with an optional `clientIdentifier` field. Praxis populates it from the firm's record when dispatching to a shared-creds portal. The worker feeds it into the descriptor as `${params.clientIdentifier}`, and the descriptor's `steps` block uses it to pick the right client on the post-login page:
+  ```yaml
+  steps:
+    - action: select               # or click / fill, depending on portal UI
+      selector: 'role=combobox[name="Cliente"]'
+      value: "${params.clientIdentifier}"
+    - action: ...                  # then the normal per-firm flow
+  ```
+  See also the `credentialScope: shared` declaration in the portal descriptor ([autoplanilla.yaml](agent-worker/src/main/resources/portals/autoplanilla.yaml) is a live example) — the worker uses this to know which Vault subtree to read.
 - [ ] **MFA handling:** out of scope for Phase 1 if none of the three target portals require it. If any do — CCSS likely does — see [PortalOnboarding.md](PortalOnboarding.md) for how the worker's `pause` action lets an operator enter MFA codes interactively. Revisit once the Phase 2 team reports back.
 
 ### B.3 Credentials provider swap on the worker
 
-- [ ] Agent-worker side: add a `VaultCredentialsProvider` in `common-lib` that implements the existing `CredentialsProvider` interface. It takes `(firmId, portalId)` and reads from `financeagent/firms/<firmId>/portals/<portalId>`.
+- [ ] Agent-worker side: add a `VaultCredentialsProvider` in `common-lib` that implements the existing `CredentialsProvider` interface. On lookup, it reads the target portal's descriptor, checks `credentialScope`, and fetches from either `financeagent/firms/<firmId>/portals/<portalId>` (per-firm) or `financeagent/shared/portals/<portalId>` (shared). The descriptor-driven scope avoids any runtime guessing.
 - [ ] Worker picks the provider via env var:
   ```
   FINANCEAGENT_CREDENTIALS=local    (default — LocalFileCredentialsProvider)
   FINANCEAGENT_CREDENTIALS=vault    (VaultCredentialsProvider)
   ```
-- [ ] Worker identifies itself to Vault using an AppRole tied to the agent-worker's deployment identity. Policy: read-only on `financeagent/firms/+/portals/+`. **The worker never gets a broad secret read policy — it only reads the credential it's about to use**, gated by the `firmId` and `portalId` from the incoming envelope.
+- [ ] Worker identifies itself to Vault using an AppRole tied to the agent-worker's deployment identity. Policy grants read-only on **both** subtrees — `financeagent/firms/+/portals/+` AND `financeagent/shared/portals/+` — and nothing else. The descriptor's `credentialScope` constrains which path is actually hit per run.
 
 ### B.4 Scoping enforcement
 
 - [ ] The worker uses the `envelope.firmId` from the incoming `PayrollSubmitRequest` as the authoritative firm scope. It must not accept a firmId from any other source (system property, env, etc.).
-- [ ] **Acceptance:** a worker receiving an envelope with `firmId=12345` cannot read credentials under `financeagent/firms/67890/...` even if the envelope body claims otherwise.
+- [ ] For shared-creds portals, the worker uses `task.clientIdentifier` from the envelope as the authoritative per-firm selector on the portal page. The worker does not derive the identifier from the firmId — Praxis is the source of truth for which portal-side identifier maps to which firm.
+- [ ] **Acceptance (per-firm):** a worker receiving an envelope with `firmId=12345` targeting a per-firm portal cannot read credentials under `financeagent/firms/67890/...` even if the envelope body claims otherwise.
+- [ ] **Acceptance (shared):** a worker receiving an envelope with `firmId=12345` and `task.clientIdentifier=3-101-000001` targeting a shared portal logs in with the shared creds, selects the `3-101-000001` client on the post-login page, and submits. The audit trail records `firmId=12345, portal=ins-rt-virtual, clientIdentifier=3-101-000001` even though the underlying session is shared.
 
 ---
 

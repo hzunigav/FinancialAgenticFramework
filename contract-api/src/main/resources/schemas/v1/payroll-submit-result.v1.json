@@ -19,7 +19,9 @@
         "type":         { "const": "PAYROLL_SUBMIT" },
         "operation":    { "type": "string", "enum": ["SUBMIT_SALARIES", "SUBMIT_RENTA_DECLARATION"] },
         "targetPortal": { "type": "string", "enum": ["ccss-sicere", "ins-rt-virtual", "hacienda-ovi", "mock-payroll"] },
-        "sourceCaptureEnvelopeId": { "type": "string", "format": "uuid" }
+        "sourceCaptureEnvelopeId": { "type": "string", "format": "uuid" },
+        "clientIdentifier": { "type": "string",
+          "description": "Echoed from the submit-request for shared-creds portals; absent for per-firm portals." }
       }
     },
 

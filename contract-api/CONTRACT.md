@@ -42,12 +42,14 @@ When `encryption` is present, the matching payload field is a `vault:vN:...` cip
 | `envelope.issuer` | Identifies the producer software, e.g. `agent-worker/autoplanilla` or `praxis-bpm/payroll-process`. |
 | `envelope.issuerRunId` | Producer-side correlation. For agent envelopes this is the run directory name in `artifacts/`. For BPM envelopes it's the process instance id. |
 | `task.sourceCaptureEnvelopeId` (submit envelopes only) | Links a submit run back to the capture envelope it derived from. Required for audit chain-of-custody. |
+| `task.clientIdentifier` (optional) | **Shared-creds portals only.** The portal-side identifier (cédula jurídica, internal client code, etc.) that selects which client to act on after NeoProc's shared login. Not a secret; lives on the firm record in Praxis, not in Vault. BPM must populate this when dispatching to any portal whose descriptor declares `credentialScope: shared`. Omit for per-firm portals. |
 
 **BPM commitments to honor:**
 
 1. Treat unknown `result.status` values as escalation. Don't silently advance the process.
 2. Echo `envelope.businessKey` back on any callback so the worker can correlate.
 3. Pass the upstream capture envelope verbatim into the submit task payload — no transformation. The worker re-verifies via `audit.payloadSha256`.
+4. For shared-creds portals, BPM must include `task.clientIdentifier` in the submit envelope. Workers reject shared-portal envelopes that lack it rather than guess. See [PraxisIntegrationHandoff.md §3 B.4](../PraxisIntegrationHandoff.md#b4-scoping-enforcement) for the scoping rationale.
 
 ---
 

@@ -6,6 +6,12 @@ baseUrl: https://app.autoplanilla.com
 # anything, so this is belt-and-suspenders for the operator.
 shadowMode: true
 
+# NeoProc's single AutoPlanilla login sees every client's payroll — the
+# planilla selector on the CCSS Report page picks the target client.
+# Credentials live at financeagent/shared/portals/autoplanilla in Vault;
+# the per-firm client selection happens via params.planillaName.
+credentialScope: shared
+
 # Sessions buy us speed on repeated runs. 30 min is a conservative default
 # for a SaaS login — narrow it if AutoPlanilla's server-side session is
 # shorter.

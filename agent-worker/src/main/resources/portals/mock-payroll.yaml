@@ -8,6 +8,11 @@ baseUrl: http://localhost:3000
 # autoplanilla) keep shadowMode: true.
 shadowMode: false
 
+# The harness is a stand-in for a per-firm write portal (CCSS Sicere in
+# production terms), so credentials are declared per-firm even though
+# dev only ever has one set.
+credentialScope: per-firm
+
 # Sessions don't really help here since the harness restarts between
 # runs; keep TTL short so stale cookies don't mask test issues.
 session:

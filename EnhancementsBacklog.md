@@ -57,6 +57,18 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 
 ---
 
+### Lifecycle event envelopes (hire / termination)
+
+**What:** New schemas under `contract-api/` for the operations beyond the v1 monthly cycle: `employee-register.v1.json` (Aviso de Ingreso for CCSS, parallel registrations for INS RT-Virtual and Hacienda OVI), `employee-deregister.v1.json` (Aviso de Egreso). Plus the agent-side adapters that drive each portal's hire/termination form. The v1 envelope already extends cleanly via `task.operation` and per-employee `attributes` map.
+
+**Why:** Surfaced during the first contract design conversation (2026-04). The monthly cycle's `roster_diff` already names the gaps; the BPMN flow in [PayrollOrchestrationFlow.md](PayrollOrchestrationFlow.md) routes them to placeholder lifecycle subprocesses. Defer until at least one real target portal hire form is mapped — without DOM access we'd be designing on speculation, and field requirements per portal (CCSS occupation code, INS risk class, Hacienda residence status) need finance/HR confirmation first.
+
+**Size:** 2-3 days per portal once finance has confirmed the field set: descriptor + adapter + per-portal hire/termination tests.
+
+**Trigger to pick up:** first time the monthly cycle returns `PARTIAL` against a real portal (not the mock) and a real new hire / termination needs to flow through.
+
+---
+
 ### ServiceLoader-based `PortalAdapter` registration
 
 **What:** Replace the hardcoded `Agent.ADAPTERS = Map.of(...)` with `ServiceLoader<PortalAdapter>` discovery. Adding a portal = new adapter class + META-INF service entry; no edits to central code.

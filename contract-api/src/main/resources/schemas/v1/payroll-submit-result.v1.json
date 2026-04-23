@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoproc.com/financialagent/schemas/payroll-submit-result.v1.json",
+  "title": "PayrollSubmitResult v1",
+  "description": "Result of a target-portal submit Service Task. Carries totals reconciliation, the per-employee row diff (roster_diff) that drives BPM lifecycle subprocesses, and portal-issued submission proof.",
+  "type": "object",
+  "required": ["schema", "envelope", "task", "result", "audit"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "payroll-submit-result.v1" },
+
+    "envelope": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/envelope" },
+
+    "task": {
+      "type": "object",
+      "required": ["type", "operation", "targetPortal"],
+      "additionalProperties": false,
+      "properties": {
+        "type":         { "const": "PAYROLL_SUBMIT" },
+        "operation":    { "type": "string", "enum": ["SUBMIT_SALARIES", "SUBMIT_RENTA_DECLARATION"] },
+        "targetPortal": { "type": "string", "enum": ["ccss-sicere", "ins-rt-virtual", "hacienda-ovi", "mock-payroll"] },
+        "sourceCaptureEnvelopeId": { "type": "string", "format": "uuid" }
+      }
+    },
+
+    "encryption": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Encryption" },
+
+    "result": {
+      "oneOf": [
+        { "$ref": "#/$defs/SubmitResultBody" },
+        { "type": "string", "pattern": "^vault:v\\d+:" }
+      ]
+    },
+
+    "audit": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Audit" }
+  },
+
+  "$defs": {
+    "SubmitResultBody": {
+      "type": "object",
+      "required": ["status", "totals", "submittedRows", "roster_diff"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["SUCCESS", "PARTIAL", "MISMATCH", "FAILED"] },
+
+        "portalConfirmation": {
+          "type": ["object", "null"],
+          "description": "Portal-issued submission proof (CCSS planilla id, INS contribution id, Hacienda submission ref). Null when submission did not reach a confirmation.",
+          "additionalProperties": false,
+          "properties": {
+            "id":        { "type": "string" },
+            "issuedAt":  { "type": "string", "format": "date-time" },
+            "rawText":   { "type": "string" }
+          }
+        },
+
+        "totals": {
+          "type": "object",
+          "required": ["currency", "submittedTotal", "updatedCount"],
+          "additionalProperties": false,
+          "properties": {
+            "currency":       { "type": "string", "pattern": "^[A-Z]{3}$" },
+            "submittedTotal": { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$",
+                                "description": "Sum of submitted-row salaries as the portal echoed back. Compared to the agent's canonical sum to detect MISMATCH." },
+            "updatedCount":   { "type": "integer", "minimum": 0 }
+          }
+        },
+
+        "submittedRows": {
+          "type": "array",
+          "description": "Rows the agent actually filled and submitted. One entry per matched canonical employee.",
+          "items": {
+            "type": "object",
+            "required": ["id", "displayName", "salary"],
+            "additionalProperties": false,
+            "properties": {
+              "id":          { "type": "string" },
+              "displayName": { "type": "string" },
+              "salary":      { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" }
+            }
+          }
+        },
+
+        "roster_diff": {
+          "type": "object",
+          "required": ["missingFromPortal", "missingFromPayroll"],
+          "additionalProperties": false,
+          "description": "Per-target reconciliation. Drives BPM lifecycle subprocesses (register hires, deregister terminations) when status=PARTIAL.",
+          "properties": {
+            "missingFromPortal": {
+              "type": "array",
+              "description": "In source payroll, not found on target portal. Each entry is a likely new-hire registration candidate.",
+              "items": {
+                "type": "object",
+                "required": ["id", "name"],
+                "additionalProperties": false,
+                "properties": {
+                  "id":             { "type": "string" },
+                  "name":           { "type": "string" },
+                  "expectedSalary": { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+                  "attributes":     { "type": "object", "additionalProperties": { "type": "string" } }
+                }
+              }
+            },
+            "missingFromPayroll": {
+              "type": "array",
+              "description": "On target portal, not in source payroll. Each entry is a likely deregistration candidate. Confirm before acting — terminations are high-risk.",
+              "items": {
+                "type": "object",
+                "required": ["id", "displayName"],
+                "additionalProperties": false,
+                "properties": {
+                  "id":              { "type": "string" },
+                  "displayName":     { "type": "string" },
+                  "lastKnownSalary": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" }
+                }
+              }
+            }
+          }
+        },
+
+        "errorDetail": {
+          "type": ["object", "null"],
+          "description": "Populated when status=FAILED. Engineering escalation path uses this to triage.",
+          "additionalProperties": false,
+          "properties": {
+            "errorClass":   { "type": "string", "enum": ["TRANSIENT", "PERMANENT"] },
+            "category":     { "type": "string", "enum": ["NETWORK", "SELECTOR", "CREDENTIALS", "PORTAL_REJECTED", "OTHER"] },
+            "message":      { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

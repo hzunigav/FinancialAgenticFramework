@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoproc.com/financialagent/schemas/payroll-submit-request.v1.json",
+  "title": "PayrollSubmitRequest v1",
+  "description": "Input envelope to a target-portal submit Service Task (CCSS Sicere, INS RT-Virtual, Hacienda OVI, mock-payroll). Built by the BPM by composing the capture result with a target-portal flag. Consumed by the agent-worker's adapter.beforeSteps.",
+  "type": "object",
+  "required": ["schema", "envelope", "task", "request", "audit"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "payroll-submit-request.v1" },
+
+    "envelope": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/envelope" },
+
+    "task": {
+      "type": "object",
+      "required": ["type", "operation", "targetPortal", "period", "planilla"],
+      "additionalProperties": false,
+      "properties": {
+        "type":         { "const": "PAYROLL_SUBMIT" },
+        "operation":    { "type": "string", "enum": ["SUBMIT_SALARIES", "SUBMIT_RENTA_DECLARATION"] },
+        "targetPortal": { "type": "string", "enum": ["ccss-sicere", "ins-rt-virtual", "hacienda-ovi", "mock-payroll"] },
+        "sourceCaptureEnvelopeId": { "type": "string", "format": "uuid",
+          "description": "envelopeId of the upstream capture envelope this submission derives from. Lets the agent and BPM trace cause-and-effect." },
+        "period":   { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/task/properties/period" },
+        "planilla": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/task/properties/planilla" }
+      }
+    },
+
+    "encryption": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Encryption" },
+
+    "request": {
+      "oneOf": [
+        { "$ref": "#/$defs/SubmitRequestBody" },
+        { "type": "string", "pattern": "^vault:v\\d+:" }
+      ]
+    },
+
+    "audit": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Audit" }
+  },
+
+  "$defs": {
+    "SubmitRequestBody": {
+      "type": "object",
+      "required": ["employees"],
+      "additionalProperties": false,
+      "properties": {
+        "employees": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "displayName", "salary"],
+            "additionalProperties": false,
+            "properties": {
+              "id":          { "type": "string", "minLength": 1 },
+              "displayName": { "type": "string", "minLength": 1 },
+              "salary":      { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+              "attributes":  { "type": "object", "additionalProperties": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

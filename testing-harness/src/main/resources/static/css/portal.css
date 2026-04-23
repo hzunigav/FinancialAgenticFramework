@@ -60,3 +60,71 @@ button {
     padding: 0.5rem;
     margin-bottom: 1rem;
 }
+
+/* Wider container so the planilla table fits without horizontal scroll. */
+.portal-container--wide {
+    max-width: 900px;
+}
+
+/* Mimics the INS planilla table look: blue header bar, bordered cells,
+   red monospaced ID column. The agent reads .id-cell / .name-cell by
+   class — styling does not affect selectors. */
+.ins-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 0.9rem;
+}
+
+.ins-table thead th {
+    background: #2a6fae;
+    color: #fff;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #1f5485;
+    font-weight: bold;
+}
+
+.ins-table tbody td {
+    padding: 0.4rem 0.75rem;
+    border: 1px solid #cfd8e3;
+    background: #fff;
+}
+
+.ins-table tbody tr:nth-child(even) td {
+    background: #f4f8fc;
+}
+
+.ins-table .id-cell {
+    color: #c00;
+    font-weight: bold;
+    font-family: "Consolas", "Courier New", monospace;
+    white-space: nowrap;
+}
+
+.ins-table .name-cell {
+    color: #002255;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.ins-table .salary-input {
+    width: 8rem;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid #888;
+    text-align: right;
+    font-family: inherit;
+}
+
+.ins-table tfoot td {
+    background: #eef2f7;
+    border: 1px solid #cfd8e3;
+    padding: 0.5rem 0.75rem;
+    text-align: right;
+    font-weight: bold;
+}
+
+.ins-table tfoot td:first-child {
+    text-align: left;
+}

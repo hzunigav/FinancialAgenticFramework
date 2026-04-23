@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mock Portal - Submission Confirmed</title>
+    <link rel="stylesheet" th:href="@{/css/portal.css}">
+</head>
+<body>
+    <main class="portal-container">
+        <h1>Submission Received</h1>
+        <p>The server summed all row salaries (submitted + untouched current values).</p>
+        <dl>
+            <dt>Employees updated this submission</dt>
+            <dd id="updated-count" th:text="${updatedCount}">0</dd>
+            <dt>Submitted-rows total (CRC)</dt>
+            <dd id="submitted-total" th:text="${submittedTotal}">0.00</dd>
+            <dt>Payroll grand total after submission (CRC)</dt>
+            <dd id="grand-total" th:text="${grandTotal}">0.00</dd>
+        </dl>
+        <p><a th:href="@{/employees}">Back to table</a></p>
+    </main>
+</body>
+</html>

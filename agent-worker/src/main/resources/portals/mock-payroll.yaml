@@ -1,0 +1,77 @@
+id: mock-payroll
+description: Local write-flow test portal — login, fuzzy-match employees, fill salaries, submit, reconcile totals.
+baseUrl: http://localhost:3000
+
+# The mock is the one place it is SAFE to let submit actually fire — the
+# whole point of this descriptor is to exercise the write path end-to-end
+# and verify the HITL mismatch flag works. Production portals (and
+# autoplanilla) keep shadowMode: true.
+shadowMode: false
+
+# Sessions don't really help here since the harness restarts between
+# runs; keep TTL short so stale cookies don't mask test issues.
+session:
+  ttlMinutes: 5
+
+# Runtime parameters (-Dparams.<key>=<value>):
+#   params.salary.<canonicalId>=<amount>
+#     Repeatable. Each entry is a target salary keyed by the agent's
+#     canonical (digit-only or hyphenated) ID. The adapter's beforeSteps
+#     normalizes both sides and matches via EmployeeMatcher.
+#   params.canonicalName.<canonicalId>=<name>
+#     Optional — when provided, the adapter runs a name confirmation
+#     check after the ID match as a data-drift guardrail.
+
+authSteps:
+  - action: navigate
+    target: /login
+  - action: fill
+    selector: "input[name='username']"
+    value: "${credentials.username}"
+  - action: fill
+    selector: "input[name='password']"
+    value: "${credentials.password}"
+    redact: true
+  - action: click
+    selector: "button[type='submit']"
+  # Spring Security's defaultSuccessUrl sends every successful login to
+  # /report; the adapter's beforeSteps re-navigates from there to
+  # /employees before the main steps list fires.
+  - action: waitForUrl
+    target: "**/report"
+
+steps:
+  - action: navigate
+    target: /employees
+  - action: waitForSelector
+    selector: "tr.employee-row"
+
+  # MockPayrollAdapter.beforeSteps has populated `params.employeeUpdates`
+  # as a list of {index, id, salary} maps — one entry per canonical
+  # employee that was successfully matched to a displayed row.
+  - action: forEach
+    over: params.employeeUpdates
+    item: emp
+    steps:
+      - action: fill
+        selector: "tr[data-emp-index='${emp.index}'] input.salary-input"
+        value: "${emp.salary}"
+
+  - action: click
+    selector: "button[type='submit']"
+    submit: true
+
+  - action: waitForSelector
+    selector: "#submitted-total"
+
+scrape:
+  fields:
+    - name: submittedTotal
+      selector: "#submitted-total"
+    - name: updatedCount
+      selector: "#updated-count"
+
+securityContext:
+  scrubHarFields:
+    - urlPattern: "**/login"
+      bodyFields: [password]

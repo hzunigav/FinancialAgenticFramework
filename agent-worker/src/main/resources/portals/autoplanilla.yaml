@@ -12,88 +12,125 @@ shadowMode: true
 session:
   ttlMinutes: 30
 
-authSteps:
-  # ------------------------------------------------------------------
-  # LOGIN --- selectors below are best guesses. Before the first live
-  # run, verify against the actual login page HTML (DevTools / Elements).
-  # ------------------------------------------------------------------
-  - action: navigate
-    target: /login
+# Runtime parameters the operator passes via -Dparams.<key>=<value>:
+#   params.planillaName = visible label in the "Please select the payroll"
+#                          dropdown (e.g. "NeoProc Quincenal USD").
+#                          The engine's `select` action matches by label,
+#                          not by underlying option value.
+#   params.fechaInicio   = ISO date, e.g. 2026-04-01 (the Start Date input
+#                          accepts ISO via .fill()).
+#   params.fechaFinal    = ISO date, e.g. 2026-04-30.
 
-  # TODO(selectors): many SaaS login forms use email rather than a
-  # username field. Pick one of these and delete the other; if the real
-  # input has a different name attribute, swap it in.
+authSteps:
+  # Selectors below come from the operator's Playwright codegen recording
+  # (April 2026). Semantic locators (role= / label=) are preferred over
+  # CSS classes because they survive Material UI class-hash churn.
+  - action: navigate
+    target: /
+
+  - action: click
+    selector: 'role=link[name="iniciar sesión"]'
+
   - action: fill
-    selector: "input[type='email'], input[name='email'], input[name='username']"
+    selector: 'role=textbox[name="Nombre de usuario"]'
     value: "${credentials.username}"
 
   - action: fill
-    selector: "input[type='password']"
+    selector: 'role=textbox[name="Su contraseña"]'
     value: "${credentials.password}"
     redact: true
 
-  # TODO(selector): the login button. Text-based is more stable than CSS
-  # class — update the text if the button says something other than
-  # "Iniciar sesión" / "Ingresar" / "Login".
   - action: click
-    selector: "button[type='submit']"
+    selector: 'role=button[name="Iniciar sesión"]'
 
-  # TODO(url): landing page after login. Narrow this glob once confirmed.
-  - action: waitForUrl
-    target: "**/app.autoplanilla.com/**"
+  # Confirm authenticated state by waiting for the top-nav "Payroll" link.
+  # The pre-login site is on the same domain, so a URL glob can't tell us
+  # whether the credentials actually took — a post-login element can.
+  - action: waitForSelector
+    selector: 'role=link[name=/^Payroll$/]'
 
 steps:
-  - action: navigate
-    target: /reports/ccss
+  - action: click
+    selector: 'role=link[name=/^Payroll$/]'
 
-  # TODO(selector strategy): the planilla dropdown in the screenshot
-  # looks like a custom component (Material UI Select / Autocomplete)
-  # rather than a native <select>. If that's the case, the 'select'
-  # action below will fail — replace it with two click steps:
-  #   - action: click
-  #     selector: "[role='combobox']"   # or a more specific selector
-  #   - action: click
-  #     selector: "li[role='option']:has-text('${params.planillaName}')"
-  # If it IS a native select, this line works as-is.
+  - action: click
+    selector: 'role=menuitem[name="CCSS Report"]'
+
+  # Native <select> (Playwright's selectOption confirms this in the
+  # recording). Engine uses SelectOption.setLabel, so params.planillaName
+  # must match the visible option text, e.g. "NeoProc Quincenal USD".
   - action: select
-    selector: "select"  # TODO: narrow — likely has an id or name
+    selector: 'label=Please select the payroll'
     value: "${params.planillaName}"
 
-  # TODO(selectors): the two <input type="date"> elements. If they have
-  # distinct names / ids we should use those; if not, we can target by
-  # preceding label text with Playwright's getByLabel. Fallback below
-  # assumes order (first date input = Fecha Inicio).
   - action: fill
-    selector: "input[type='date'] >> nth=0"
+    selector: 'role=textbox[name="Start Date"]'
     value: "${params.fechaInicio}"
+
   - action: fill
-    selector: "input[type='date'] >> nth=1"
+    selector: 'role=textbox[name="End Date"]'
     value: "${params.fechaFinal}"
 
   - action: click
-    selector: "text=GENERAR REPORTE"
+    selector: 'role=button[name="Generate Report"]'
 
-  # Wait for the table footer's row count to transition from "of 0" to
-  # a non-zero total. `waitForSelector` with a text filter is a cheap
-  # way to do this without a fixed sleep.
-  # TODO(selector): this may need adjustment based on the actual DOM
-  # structure of the Material React Table footer.
+  # Wait for the pagination footer to show a non-zero total ("of N" with
+  # N >= 1). Cheap substitute for a data-loaded event.
   - action: waitForSelector
-    selector: "text=/of [1-9]\\d*/"
+    selector: 'text=/of [1-9]\d*/'
+
+  # Bump rows-per-page to 30 so the totals row stays visible without
+  # horizontal paging. Harmless when the dataset is <= 10 rows.
+  - action: click
+    selector: 'role=combobox[name="Rows per page"]'
+  - action: click
+    selector: 'role=option[name="30"]'
 
 scrape:
+  # M3 capture shape (path A): payroll-wide totals + employee count only.
+  # Per-row capture is explicitly out of scope at this milestone — the
+  # engine's scraper is single-value-per-selector (see PortalScraper),
+  # and the QA check only needs totals to match against the government
+  # portal. Revisit in M3b if per-row reconciliation becomes useful.
+  #
+  # Selectors below were verified via DevTools → Elements → Copy Selector
+  # against a real report (April 2026). The Emotion/MUI hash classes
+  # (css-1wj4860, css-4bhzvj, css-10gei56) are the only things that
+  # distinguish the two footer cells from each other; expect them to
+  # churn on AutoPlanilla MUI upgrades, at which point re-pick the
+  # hashes from the Elements panel.
   fields:
-    # TODO(selector): the totals row, "Total Ingreso" column — what's
-    # displayed as "Total (CRC)" + the first numeric cell in the
-    # screenshot. Likely a <tfoot> row; selector will depend on how
-    # Material React Table renders totals.
+    # Total Income (CRC) totals cell — middle of the three footer cells.
     - name: totalGrossSalaries
-      selector: "tfoot td:nth-child(3)"
+      selector: "tfoot tr td.MuiTableCell-footer.css-1wj4860 > div > b"
 
-    # The pagination footer text like "1-10 of 47". Mapper pulls out
-    # the number after "of".
+    # Renta (CRC) totals cell — rightmost of the three footer cells.
+    - name: totalRenta
+      selector: "tfoot tr td.MuiTableCell-footer.css-4bhzvj > div > b"
+
+    # Pagination footer text, e.g. "1-10 of 13". Mapper pulls the
+    # number after "of".
     - name: employeeCount
-      selector: ".MuiTablePagination-displayedRows"  # TODO: verify class
+      selector: "div.MuiBox-root.css-10gei56 > div > div > div > span"
+
+  # Per-employee row capture. Material React Table renders body rows as
+  # <tr class="MuiTableRow-root"> inside <tbody>; tfoot is excluded by
+  # the tbody anchor. Per-row column selectors are evaluated relative
+  # to each row.
+  #
+  # The Total Income (CRC) body cell uses the same Emotion hash class
+  # (css-1wj4860) as the corresponding tfoot cell — Emotion deduplicates
+  # styles across body/footer when the visual treatment matches.
+  #
+  # TODO(scaling): rows-per-page is capped at 30 by the descriptor's
+  # combobox click. Larger payrolls will need pagination — out of scope
+  # for this slice; revisit when a planilla > 30 employees ships.
+  rows:
+    selector: "tbody > tr.MuiTableRow-root"
+    columns:
+      id: "td:nth-child(1)"
+      name: "td:nth-child(2)"
+      grossSalary: "td.MuiTableCell-body.css-1wj4860 > div > b"
 
 securityContext:
   scrubHarFields:

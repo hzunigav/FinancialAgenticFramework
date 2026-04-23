@@ -1,7 +1,7 @@
 # Implementation Plan: Financial Agentic Framework
 
 Living document. Source of truth for *where we are* vs. *what's next*.
-Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live), [TechnicalRequirements.md](TechnicalRequirements.md) (the spec), and [EnhancementsBacklog.md](EnhancementsBacklog.md) (post-production improvements).
+Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live), [TechnicalRequirements.md](TechnicalRequirements.md) (the spec), [EnhancementsBacklog.md](EnhancementsBacklog.md) (post-production improvements), and [PortalOnboarding.md](PortalOnboarding.md) (how to add a new portal).
 
 **Legend:** ✓ done · → in progress · · planned
 

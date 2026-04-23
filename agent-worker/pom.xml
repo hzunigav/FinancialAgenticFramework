@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.financialagent</groupId>
+        <groupId>com.neoproc.financialagent</groupId>
         <artifactId>finance-agent-root</artifactId>
         <version>1.0.0-SNAPSHOT</version>
     </parent>
@@ -16,8 +16,12 @@
 
     <dependencies>
         <dependency>
-            <groupId>com.financialagent</groupId>
+            <groupId>com.neoproc.financialagent</groupId>
             <artifactId>common-lib</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.neoproc.financialagent</groupId>
+            <artifactId>contract-api</artifactId>
         </dependency>
         <dependency>
             <groupId>com.microsoft.playwright</groupId>
@@ -49,7 +53,7 @@
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
                 <configuration>
-                    <mainClass>com.financialagent.worker.Agent</mainClass>
+                    <mainClass>com.neoproc.financialagent.worker.Agent</mainClass>
                 </configuration>
             </plugin>
         </plugins>

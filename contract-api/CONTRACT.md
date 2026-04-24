@@ -37,12 +37,12 @@ When `encryption` is present, the matching payload field is a `vault:vN:...` cip
 |---|---|
 | `envelope.envelopeId` | UUID v4. Producer-generated. **Idempotency key.** Workers store seen ids in `ExecutionState` (M5+) and reject duplicates. |
 | `envelope.businessKey` | Producer-generated, format `<period>::<planillaId-or-name>` (e.g. `2026-02::1051`). Flowable correlation key for Receive Tasks. |
-| `envelope.firmId` | Tenant scope. Drives Vault key resolution AND determines which credentials the agent fetches. **Required on every envelope.** |
+| `envelope.firmId` | Tenant scope. Drives KMS key alias resolution (`alias/payroll-firm-<firmId>`) AND determines which credentials the agent fetches from Secrets Manager. **Required on every envelope.** |
 | `envelope.locale` | BCP-47 (`es`, `en`, `es-CR`). Used for any human-facing strings the worker emits (HITL prompts, error messages). |
 | `envelope.issuer` | Identifies the producer software, e.g. `agent-worker/autoplanilla` or `praxis-bpm/payroll-process`. |
 | `envelope.issuerRunId` | Producer-side correlation. For agent envelopes this is the run directory name in `artifacts/`. For BPM envelopes it's the process instance id. |
 | `task.sourceCaptureEnvelopeId` (submit envelopes only) | Links a submit run back to the capture envelope it derived from. Required for audit chain-of-custody. |
-| `task.clientIdentifier` (optional) | **Shared-creds portals only.** The portal-side identifier (cédula jurídica, internal client code, etc.) that selects which client to act on after NeoProc's shared login. Not a secret; lives on the firm record in Praxis, not in Vault. BPM must populate this when dispatching to any portal whose descriptor declares `credentialScope: shared`. Omit for per-firm portals. |
+| `task.clientIdentifier` (optional) | **Shared-creds portals only.** The portal-side identifier (cédula jurídica, internal client code, etc.) that selects which client to act on after NeoProc's shared login. Not a secret; lives on the firm record in Praxis as a `FirmPortalIdentifier` entity, not in Secrets Manager. BPM must populate this when dispatching to any portal whose descriptor declares `credentialScope: shared`. Omit for per-firm portals. |
 
 **BPM commitments to honor:**
 
@@ -68,59 +68,102 @@ See [PayrollOrchestrationFlow.md §4](../PayrollOrchestrationFlow.md#4-status-vo
 
 ## 4. Encryption
 
-### Scheme
+### Schemes
 
 ```
-encryption.scheme:          "vault-transit-v1" | "local-aes-gcm-v1"
-encryption.keyName:         "payroll-firm-<firmId>"
-encryption.keyVersion:      <integer, embedded in the vault:vN: prefix>
+encryption.scheme:          "aws-kms-envelope-v1" | "local-aes-gcm-v1"
+encryption.keyName:         "alias/payroll-firm-<firmId>"   (KMS alias in prod; logical name in dev)
+encryption.keyVersion:      <integer — see per-scheme wire format notes>
 encryption.ciphertextField: "result"   (or "request" for submit-request)
 ```
 
-Both schemes produce a wire-identical `vault:vN:<base64>` ciphertext format so an envelope captured in dev (under `local-aes-gcm-v1`) decrypts cleanly under `vault-transit-v1` after the corresponding Vault transit key is provisioned.
+Each scheme parses its own wire format. The envelope's `scheme` field selects the decoder; no cross-scheme wire compatibility is required. (Earlier drafts used `vault-transit-v1` via HashiCorp Vault; that was replaced with AWS KMS envelope encryption on 2026-04-23 for cost reasons — same per-firm-key primitive, ~10× cheaper on AWS.)
+
+### Wire formats
+
+**`local-aes-gcm-v1`** (dev only):
+```
+vault:v1:<base64>
+```
+Base64 decodes to `[12-byte IV][ciphertext][16-byte auth tag]`. The `vault:` prefix is legacy and retained so existing dev artifacts continue to parse; the scheme name, not the prefix, selects the cipher implementation.
+
+**`aws-kms-envelope-v1`** (production):
+```
+aws-kms:v1:<base64(JSON)>
+```
+Base64 decodes to JSON:
+```json
+{
+  "kid": "arn:aws:kms:us-east-1:123456789012:key/abcd-...",
+  "edk": "<base64 AWS-KMS-encrypted DEK>",
+  "iv":  "<base64 12-byte IV>",
+  "ct":  "<base64 AES-256-GCM ciphertext + 16-byte auth tag>"
+}
+```
+The DEK (Data Encryption Key) is a 32-byte key produced by AWS KMS `GenerateDataKey`. The worker and Praxis call `kms.Decrypt(edk)` to recover the DEK, then AES-256-GCM-decrypt the ciphertext. The `kid` field is informational — KMS extracts the key ARN from the encrypted DEK itself during decrypt.
 
 ### Local dev (today)
 
 `LocalDevCipher` in `common-lib` implements `local-aes-gcm-v1`:
 - AES-256-GCM, 96-bit random IV, 128-bit auth tag.
 - Per-firm keys at `~/.financeagent/cipher-keys/payroll-firm-<firmId>` (auto-created on first encrypt).
-- `keyVersion` is always `1` in dev — rotation is a Vault concern.
+- `keyVersion` is always `1` in dev.
 
 Selection is environment-driven:
 ```
 FINANCEAGENT_CIPHER=local   (default — uses LocalDevCipher)
-FINANCEAGENT_CIPHER=vault   (uses VaultTransitCipher — currently a stub)
+FINANCEAGENT_CIPHER=kms     (uses KmsEnvelopeCipher — AWS SDK v2)
 ```
 
 ### Production (Praxis-side runbook)
 
-Praxis must complete three things to switch from `local-aes-gcm-v1` to `vault-transit-v1`:
+Praxis must complete three things to switch from `local-aes-gcm-v1` to `aws-kms-envelope-v1`:
 
-1. **Mount the transit engine** in the existing Vault deployment:
-   ```bash
-   vault secrets enable transit
+1. **Add AWS SDK v2 KMS client** to Praxis's `pom.xml`:
+   ```xml
+   <dependency>
+     <groupId>software.amazon.awssdk</groupId>
+     <artifactId>kms</artifactId>
+   </dependency>
+   ```
+   Credentials resolve via the AWS SDK's default provider chain — in production, this is the Praxis service's IAM role (instance profile, IRSA for EKS, or ECS task role). No static keys in config.
+
+2. **Create a per-firm KMS key at firm-onboarding time.** Belongs in the existing `Firm` onboarding service:
+   ```java
+   CreateKeyResponse key = kms.createKey(CreateKeyRequest.builder()
+       .description("Payroll envelope key — firm " + firmId)
+       .keyUsage(KeyUsageType.ENCRYPT_DECRYPT)
+       .keySpec(KeySpec.SYMMETRIC_DEFAULT)
+       .tags(Tag.builder().tagKey("firmId").tagValue(String.valueOf(firmId)).build())
+       .build());
+   kms.createAlias(CreateAliasRequest.builder()
+       .aliasName("alias/payroll-firm-" + firmId)
+       .targetKeyId(key.keyMetadata().keyId())
+       .build());
+   kms.enableKeyRotation(EnableKeyRotationRequest.builder()
+       .keyId(key.keyMetadata().keyId())
+       .build());
+   ```
+   Alias creation is **not** idempotent — the listener must check via `listAliases()` before `createKey` to avoid `AlreadyExistsException` on re-onboarding. Suggested integration point: a `FirmOnboardingListener` bean that consumes `FirmCreatedEvent` and idempotently provisions the key.
+
+3. **Grant the worker's IAM task role `kms:Decrypt`** on keys tagged with `firmId`:
+   ```json
+   {
+     "Effect": "Allow",
+     "Action": "kms:Decrypt",
+     "Resource": "arn:aws:kms:*:*:key/*",
+     "Condition": { "StringLike": { "aws:ResourceTag/firmId": "*" } }
+   }
    ```
 
-2. **Add a Vault Java client** to Praxis's `pom.xml`. Either:
-   - Spring Cloud Vault (`spring-cloud-starter-vault-config`) — heavier, full integration with Spring property sources, OR
-   - Plain Spring `WebClient` against Vault REST — lighter, ~50 lines of code in a `VaultTransitClient` bean.
+Once those are done, `KmsEnvelopeCipher` (in `common-lib`) becomes the live impl. Encrypt flow:
+1. `GenerateDataKey(alias/payroll-firm-<firmId>, AES_256)` → returns plaintext 32-byte DEK + encrypted DEK.
+2. AES-256-GCM encrypt the envelope body with the DEK + a random 96-bit IV.
+3. Serialize `{kid, edk, iv, ct}` to JSON and base64-wrap with the `aws-kms:v1:` prefix.
 
-   Either works. Recommend `WebClient` since Praxis only needs encrypt/decrypt against transit; the full Spring Cloud Vault stack is overkill.
+Decrypt reverses: strip prefix, base64 decode, JSON parse, `Decrypt(edk)` to recover the plaintext DEK, AES-256-GCM decrypt the ciphertext.
 
-3. **Provision a transit key per firm at firm-onboarding time.** This belongs in the existing `Firm` onboarding service:
-   ```bash
-   vault write -f transit/keys/payroll-firm-<firmId>
-   ```
-   The endpoint is idempotent — re-onboarding does not regenerate the key. Suggested integration point: a new `FirmOnboardingListener` bean that listens for `FirmCreatedEvent` and posts to Vault.
-
-Once those three are done, `VaultTransitCipher` (already in `common-lib`) becomes the live impl. Replace the `throw new UnsupportedOperationException` body with the Vault REST call — payload shape:
-```json
-POST /v1/transit/encrypt/payroll-firm-<firmId>
-{ "plaintext": "<base64 of cleartext>" }
-→ { "data": { "ciphertext": "vault:v3:..." } }
-```
-
-The response's `ciphertext` field is exactly the wire format the contract uses — no string manipulation needed.
+**Acceptance:** given a capture envelope produced by the worker in staging (`encryption.scheme=aws-kms-envelope-v1`, KMS alias provisioned for the test firm), Praxis's `KmsEnvelopeClient.decrypt()` returns the same cleartext body the worker's encrypt call started with.
 
 ---
 
@@ -145,7 +188,7 @@ Records under `com.neoproc.financialagent.contract.payroll`:
 | `EnvelopeStatus`       | `SUCCESS` / `PARTIAL` / `MISMATCH` / `FAILED` constants |
 | `Audit`                | Per-spec §5 hashes + artifact pointers |
 
-All records are Jackson-serializable. The `result` / `request` field is typed `Object` so it can hold either the cleartext body record OR a Vault-format ciphertext string — Jackson handles both via the runtime type.
+All records are Jackson-serializable. The `result` / `request` field is typed `Object` so it can hold either the cleartext body record OR a scheme-prefixed ciphertext string (`aws-kms:v1:...` or `vault:v1:...`) — Jackson handles both via the runtime type.
 
 ---
 

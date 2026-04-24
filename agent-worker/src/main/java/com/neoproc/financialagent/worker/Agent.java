@@ -147,6 +147,21 @@ public class Agent {
                     .setPath(runDir.resolve("report.png"))
                     .setFullPage(true));
 
+            // Optional: capture the fully-rendered DOM as an HTML fixture.
+            // Used to regression-test descriptor selectors offline (no live
+            // portal needed). Enable per run with -Dfixture.capture=true;
+            // operators then copy the promoted file into
+            // agent-worker/src/test/resources/fixtures/<portalId>/ as the
+            // canonical snapshot the CI tests run against.
+            if (Boolean.parseBoolean(System.getProperty("fixture.capture", "false"))) {
+                Path fixturesDir = runDir.resolve("fixtures");
+                Files.createDirectories(fixturesDir);
+                Path fixtureFile = fixturesDir.resolve(descriptor.id() + "-post-steps.html");
+                Files.writeString(fixtureFile, page.content());
+                manifest.step("fixture-capture",
+                        fixtureFile.getFileName() + " (" + Files.size(fixtureFile) + " bytes)");
+            }
+
             manifest.step("scrape", fieldNames(descriptor));
             PortalScraper scraper = new PortalScraper(page);
             Map<String, String> scraped = scraper.scrape(descriptor.scrape());

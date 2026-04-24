@@ -81,30 +81,6 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 
 ---
 
-### Descriptor replay harness
-
-**What:** Record a successful run's Playwright trace once, store it as a fixture under `agent-worker/src/test/resources/replays/<portalId>/`. A JUnit runner re-plays the descriptor against the recorded page states and asserts it still completes + produces the expected scraped values.
-
-**Why:** Today a descriptor is only exercisable by running against a real browser session. That blocks offline iteration during portal outages, makes descriptor regressions invisible in CI, and forces onboarding work to happen only when the portal's submission window is open. Fixtures decouple descriptor development from portal availability.
-
-**Size:** ~2 days — Playwright's `BrowserContext.newContext(tracing=...)` already produces the fixture; the replay runner is the new piece.
-
-**Trigger to pick up:** after the first production descriptor (AutoPlanilla) stabilizes, or when CI flakes on portal outages become noticeable.
-
----
-
-### Split `PortalOnboarding.md` into dev and production workflows
-
-**What:** Split [PortalOnboarding.md](PortalOnboarding.md) into two docs: "Develop a descriptor locally" (keeps the current `~/.financeagent/secrets.properties` + `mvn exec:java` flow) and "Deploy a descriptor to production" (Vault-backed credentials, Praxis-dispatched envelopes, queue consumer model).
-
-**Why:** After Phase 1 lands, the production flow is materially different from the dev flow — different credentials store, different invocation path, different observability. Leaving one doc that mixes both will guarantee that future agent authors follow dev-mode instructions in production and get stuck.
-
-**Size:** half a day.
-
-**Trigger to pick up:** when Phase 1 is complete and production deployment is concrete (not before — we want the real production flow documented, not a speculative version).
-
----
-
 ### Per-portal rate-limit declaration
 
 **What:** New descriptor field `rateLimit: { maxConcurrent, minIntervalSeconds }`. Worker enforces via a portal-keyed semaphore / Guava `RateLimiter`; Praxis's RabbitMQ consumer prefetch matches `maxConcurrent` for rate-limited queues.
@@ -178,6 +154,18 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 ### `AbstractCaptureAdapter` / `AbstractSubmitAdapter` base classes
 
 **Shipped:** envelope plumbing (metadata, encryption, audit hashing, file write) extracted into two abstract templates; common helpers into `BaseAdapter`. Concrete adapters now implement one hook (`buildCaptureOutcome` or `buildSubmitOutcome`). [AutoplanillaAdapter](agent-worker/src/main/java/com/neoproc/financialagent/worker/AutoplanillaAdapter.java) shrank from 132 to 73 lines (45% reduction); [MockPayrollAdapter](agent-worker/src/main/java/com/neoproc/financialagent/worker/MockPayrollAdapter.java) from 381 to 334 (envelope boilerplate gone — the remaining lines are genuine adapter logic). New Phase 2 adapters land at ~50-100 lines each rather than copying envelope plumbing per portal.
+
+---
+
+### Descriptor replay harness (fixture-capture + offline scrape test)
+
+**Shipped:** `-Dfixture.capture=true` flag dumps the fully-rendered DOM to `artifacts/<runId>/fixtures/<portalId>-post-steps.html` at scrape time; a `DescriptorFixture` test utility plus `DescriptorFixtureTest` let CI exercise a descriptor's scrape section against a captured fixture with no live portal. Per-portal regression tests for Phase 2 plug into this pattern. Full step-level replay (record fill/click/submit, replay them) not implemented — the 80% case is verifying selectors still match, which the scrape-only harness covers.
+
+---
+
+### Split `PortalOnboarding.md` into dev and production workflows
+
+**Shipped:** [PortalOnboarding.md](PortalOnboarding.md) is now dev-focused, with a new "Iterating on captured fixtures" section and a "Next step: production rollout" pointer. [PortalDeployment.md](PortalDeployment.md) covers the production path: worker image + K8s bake-in, Vault credential provisioning (per-firm vs shared), BPMN wiring, smoke test, per-firm enablement, rollback procedure, and post-deploy ownership. Each doc has a cross-link to the other so readers land in the right place.
 
 ---
 

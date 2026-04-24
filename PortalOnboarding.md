@@ -1,6 +1,8 @@
 # Portal Onboarding
 
-How to add a new portal to the framework — from *"here's a URL I want to scrape"* to *"the agent is pulling data from it."*
+How to add a new portal to the framework — from *"here's a URL I want to scrape"* to *"the agent is pulling data from it **on my local machine**."*
+
+**Scope:** this doc covers local descriptor development. Once the descriptor runs cleanly against the real portal from a developer's workstation, production rollout (worker image build, Vault credential provisioning, BPMN wiring, staging rehearsal) is covered separately in [PortalDeployment.md](PortalDeployment.md).
 
 The manual work is a one-shot recording session on your machine using Playwright Codegen. Everything after that is small iteration between you and the agent. This guide is reusable across portals; a worked example (AutoPlanilla) is at the bottom.
 
@@ -124,6 +126,37 @@ Username can stay or go — not load-bearing. TOTP seeds, API keys, anything els
 - **Codegen can't see an element** (some custom components confuse the picker): open DevTools (F12) on the same browser window, grab the outerHTML of that element, paste it in chat with a note about which step it belongs to.
 - **You realize mid-recording that you clicked the wrong thing**: just keep going — I'll prune extra steps from the translation. It's faster than re-recording.
 - **The portal has a step that requires human input** (SMS code, email link): pause recording, tell me the shape of the step, resume after completing it. The `pause` engine action handles this category — the descriptor gets a step with `action: pause` at that point.
+
+---
+
+## Iterating on captured fixtures
+
+Once the descriptor runs end-to-end against the real portal once, you usually don't want to hit the real portal for every subsequent selector tweak — the portal might rate-limit you, might not be in a submission window, might just be slow. The fixture-capture flow lets you iterate locally against a saved DOM snapshot:
+
+```bash
+# 1. Run the agent once with capture enabled
+mvn -pl agent-worker exec:java \
+  -Dportal.id=<portalId> \
+  -Dparams.<key>=<value> ... \
+  -Dfixture.capture=true
+
+# 2. Promote the captured fixture into the test resources
+cp artifacts/<runId>/fixtures/<portalId>-post-steps.html \
+   agent-worker/src/test/resources/fixtures/<portalId>/post-steps.html
+
+# 3. Write or update a JUnit test that uses DescriptorFixture to run
+#    the scrape against the fixture and assert the expected values
+```
+
+See `DescriptorFixture` in the test sources for the helper API and `DescriptorFixtureTest` for an example usage. The test runs in CI without any portal available, so selector regressions land as red builds instead of silent production failures.
+
+When the portal redesigns its UI and selectors stop matching, capture a fresh fixture and either update the existing test or add a second one — a promoted fixture from a real run is always the cheapest debugging asset.
+
+---
+
+## Next step: production rollout
+
+When the descriptor runs cleanly locally and has fixture-test coverage, the production rollout path is in [PortalDeployment.md](PortalDeployment.md) — worker image build, Vault credential provisioning, BPMN wiring, staging rehearsal, and the per-firm enablement procedure. Dev and prod are deliberately separate docs so that each stays focused on one concern.
 
 ---
 

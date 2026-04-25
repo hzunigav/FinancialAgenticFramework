@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: agent-worker
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    virtual-host: ${RABBITMQ_VHOST:/}
+    listener:
+      simple:
+        # AUTO: Spring acks on listener return, nacks (requeue=false → DLQ) on exception.
+        acknowledge-mode: auto
+        default-requeue-rejected: false
+        # One in-flight message per consumer; respects per-portal maxConcurrent from PortalRateLimiter.
+        prefetch: 1
+
+portal:
+  id: ${PORTAL_ID:mock-payroll}
+
+agent:
+  worker:
+    artifacts-dir: ${ARTIFACTS_DIR:artifacts}
+    submit-queue: financeagent.tasks.submit.${portal.id}
+    results-exchange: financeagent.results
+    results-routing-key: ""
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+logging:
+  level:
+    com.neoproc.financialagent: INFO

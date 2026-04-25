@@ -15,7 +15,8 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live), [TechnicalRe
 | M2 | Portal adapter + Read-Back verifier | ✓ |
 | M2.5 | Credentials provider + HAR scrubbing | ✓ |
 | M3.0 | Engine plumbing for MFA + session + shadow | ✓ |
-| M3 | Real portal access (Shadow Mode, fill-only) | · NEXT — needs prod portal details |
+| M3 | Real portal access (Shadow Mode, fill-only) | ✓ |
+| P1 | Praxis Phase 1 integration — agent-worker readiness | → in progress |
 | M4 | MCP Server + real payroll data feed | · |
 | M5 | HITL gate + Safe-Submit loop | · |
 | M6 | Production AWS infra | · |
@@ -87,24 +88,60 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live), [TechnicalRe
 
 ---
 
-## M3 — Real portal access (Shadow Mode) · NEXT
+## M3 — Real portal access (Shadow Mode) · ✓
 
-**Prereq:** Portal URL, login page structure, MFA delivery method (already confirmed: SMS / email link), and a description of the data to read back.
+**Portal:** AutoPlanilla (`https://app.autoplanilla.com`) — shared credentials (NeoProc login), planilla selected via `params.planillaName`.
 
 **Goal:** Exercise the framework against a real site with zero write-risk. Spec Phase 1.
 
-**Planned work (what still remains — the engine is ready):**
-- Replace placeholder `ReportSnapshot` with real `PayrollData` record in `common-lib` (BigDecimal amounts, employee fields, custom serializers per spec §3).
-- New descriptor: `agent-worker/src/main/resources/portals/<real-portal>.yaml`. Expected shape: `authSteps` (navigate → fill → click → pause for MFA code → fill → click → waitForUrl), `steps` (navigate to payroll page, any selects), `scrape` (field-to-selector map), `securityContext.scrubHarFields` updated with the real portal's login and MFA request shapes.
-- `PayrollMapper` to translate scraped strings into `PayrollData`.
-- Extend `PortalEngine` action set as the real portal demands (e.g., `select`, `press`, `waitForSelector`, `uploadFile`) — only the ones actually needed.
-- Add session-validity probe step for the real portal, since server-side sessions can die before client TTL — a cheap `navigate` + expected-URL check at the start of `steps`; on mismatch, purge session and force authSteps to run.
+**Delivered:**
+- `PayrollSummary` + `PayrollEmployeeRow` domain records in `common-lib` — BigDecimal amounts, employee id/name/grossSalary, CRC currency fields.
+- `autoplanilla.yaml` descriptor — `authSteps` (navigate → fill → click), `steps` (navigate to CCSS Report, date-range selects), `scrape` (totals + per-row Material React Table with 30-row cap), `securityContext.scrubHarFields` for login payload — [autoplanilla.yaml](agent-worker/src/main/resources/portals/autoplanilla.yaml).
+- `AutoplanillaMapper` — CRC currency parser (`₡`/`CRC` prefix, comma grouping), `"of N"` pagination-footer employee-count parser — [AutoplanillaMapper.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/AutoplanillaMapper.java).
+- `AutoplanillaAdapter` — capture-only; builds `PayrollSummary`, emits `payroll-capture-result.v1` envelope — [AutoplanillaAdapter.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/AutoplanillaAdapter.java).
+- `AbstractCaptureAdapter` / `AbstractSubmitAdapter` base classes — envelope emission, encryption, audit hashing — reusable for CCSS Sicere, INS, Hacienda.
+- Payroll data successfully captured from the real AutoPlanilla portal in shadow mode.
+
+---
+
+## P1 — Praxis Phase 1 integration (agent-worker) · in progress
+
+**Goal:** Land the agent-worker-side deltas enumerated in [PraxisIntegrationHandoff.md](PraxisIntegrationHandoff.md) so the moment Praxis ships Workstreams A/B/C, production cutover is an env-var flip (`FINANCEAGENT_CIPHER=kms`, `FINANCEAGENT_CREDENTIALS=aws`), not a code change. Does not depend on real-portal credentials — runs in parallel with M3.
+
+**Planned work (sequenced for parallel PRs):**
+
+1. **`KmsEnvelopeCipher` in `common-lib`** — ~50-line wrapper around AWS SDK v2 `KmsClient` implementing the existing `EnvelopeCipher` interface. Dev runs unchanged (`local-aes-gcm-v1`); production path gated by `FINANCEAGENT_CIPHER=kms`. Tested against LocalStack. Handoff §A.4.
+2. **`AwsSecretsManagerCredentialsProvider` in `common-lib`** — implements existing `CredentialsProvider`; reads the descriptor's `credentialScope` to pick `financeagent/firms/<firmId>/portals/<portalId>` vs `financeagent/shared/portals/<portalId>`. Wired via `FINANCEAGENT_CREDENTIALS=aws`. Handoff §B.3.
+3. **Per-portal `rateLimit` descriptor field + worker enforcement** — pulled forward from [EnhancementsBacklog.md](EnhancementsBacklog.md). `rateLimit: { maxConcurrent, minIntervalSeconds }` on `PortalDescriptor`; portal-keyed semaphore + Guava `RateLimiter` in `PortalEngine`. Handoff §C.5.
+4. **`review` block on `PayrollSubmitResult`** — pulled forward from [EnhancementsBacklog.md](EnhancementsBacklog.md). Extend `SubmitResultBody` with `{ severity, summary, signals[], allowedActions[] }`; adapters populate from existing roster-diff / reconciliation data. Handoff §G.1.
+5. **Correlation-ID logging** — thread `envelopeId` / `businessKey` / `issuerRunId` into every log line (MDC) and into `manifest.json`. Handoff §E.1.
+6. **CLI → Spring Boot queue consumer** — biggest delta. Replace `Agent.main()` with a `@RabbitListener`-driven Spring Boot app; Postgres-backed idempotency table keyed on `envelopeId` (7-day TTL); ack on success, nack-requeue=false on unrecoverable errors. Tested end-to-end against TestContainers RabbitMQ. Handoff §C.3 + §C.4.
+7. **Dockerfile** — multi-stage on `mcr.microsoft.com/playwright/java:<current-stable>`; `docker run` against a local Rabbit processes a test envelope. Handoff §F.1.
+
+**Supervision hooks (feed Praxis Workstream H — see handoff §9) — Delivered:**
+- **Prometheus metrics** — `agent_capture_duration_seconds` and `agent_submit_duration_seconds` (Timer, tags `portal` + `status`) recorded in `PortalRunService.run()` finally block via `Metrics.globalRegistry` (no-op in CLI mode, bound to `PrometheusMeterRegistry` in Spring Boot mode). `agent_reconciliation_gap_colones` (DistributionSummary) and `agent_roster_diff_size` (Counter, tag `bucket=missingFromPortal|missingFromPayroll`) recorded in `AbstractSubmitAdapter.recordSubmitMetrics()` while the cleartext body is in scope, extracting gap from the `TOTAL_GAP` signal (0 for SUCCESS) and sizes from `RosterDiff` — [PortalRunService.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/PortalRunService.java), [AbstractSubmitAdapter.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/AbstractSubmitAdapter.java).
+- Structured terminal-state log line per run: one INFO entry with final status (`SUCCESS` / `PARTIAL` / `FAILED` / `MISMATCH`) + the correlation triple — already delivered with MDC logging (Item 5).
+- `mock-payroll` descriptor deployable in the production worker image — already included in the worker image (no dev-only flags).
+
+**Delivered (Items 1–7):**
+- **Dockerfile** — two-stage build: `maven:3.9-eclipse-temurin-21-jammy` compiles the `agent-worker` sub-reactor (`-pl agent-worker -am`) with POM-layer caching for fast incremental rebuilds; `mcr.microsoft.com/playwright/java:v1.48.0-jammy` runtime image carries Chromium/Firefox/WebKit at `/ms-playwright` and OpenJDK 21 with `pwuser` (uid 1000) as the non-root process owner. `PORTAL_ID`, `RABBITMQ_*`, `FINANCEAGENT_CIPHER/CREDENTIALS` are all env-var-injected; production values (`kms` / `aws`) override the dev defaults at ECS task-definition time (Handoff §F.2). `docker-compose.yml` at repo root spins up `rabbitmq:3.12-management` + the worker for local acceptance testing — [Dockerfile](Dockerfile), [docker-compose.yml](docker-compose.yml).
+
+**Delivered (Items 1–6):**
+- `KmsEnvelopeCipher` — AES-256-GCM envelope encryption via AWS KMS GenerateDataKey; wire format `kms:v1:<b64 encDEK>.<b64 IV+CT>`; plaintext DEK zeroed in `finally`; `FINANCEAGENT_CIPHER=kms` wired into `EnvelopeIo.defaultCipher()` — [KmsEnvelopeCipher.java](common-lib/src/main/java/com/neoproc/financialagent/common/crypto/KmsEnvelopeCipher.java).
+- `AwsSecretsManagerCredentialsProvider` — resolves `financeagent/shared/portals/<id>` vs `financeagent/firms/<firmId>/portals/<id>` from descriptor `credentialScope`; parses JSON secret; `FINANCEAGENT_CREDENTIALS=aws` wired into `Agent.buildCredentialsProvider()` — [AwsSecretsManagerCredentialsProvider.java](common-lib/src/main/java/com/neoproc/financialagent/common/credentials/AwsSecretsManagerCredentialsProvider.java).
+- `RateLimit` record on `PortalDescriptor` + `PortalRateLimiter` — semaphore (maxConcurrent) + Guava RateLimiter (minIntervalSeconds), portal-keyed static registry, try-with-resources `Permit`; `autoplanilla.yaml` set to `maxConcurrent:1 / minIntervalSeconds:5`; wired into `Agent.main()` — [PortalRateLimiter.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/portal/PortalRateLimiter.java).
+- `Review` + `Signal` on `SubmitResultBody` — structured HITL block for MISMATCH/PARTIAL runs; `Signal` discriminates `TOTAL_GAP / MISSING_FROM_PORTAL / MISSING_FROM_PAYROLL` with `@JsonInclude(NON_NULL)` per-type fields; `allowedActions` always `[RESUBMIT, ACKNOWLEDGE, ESCALATE]`; `MockPayrollAdapter` populates from existing roster-diff/reconciliation data — [SubmitResultBody.java](contract-api/src/main/java/com/neoproc/financialagent/contract/payroll/SubmitResultBody.java).
+- SLF4J/Logback MDC correlation-ID logging — `issuerRunId`, `firmId`, `businessKey`, `envelopeId` threaded into every log line via MDC; Logback pattern `ts=... level=... issuerRunId=... firmId=... businessKey=... envelopeId=... msg="..."`; MDC set in `Agent.main()` at run start and updated by `AbstractSubmitAdapter`/`AbstractCaptureAdapter` at envelope emit; `envelopeId` + `businessKey` also written to `manifest.json` — [logback.xml](agent-worker/src/main/resources/logback.xml).
+- **CLI → Spring Boot queue consumer** — `Agent.main()` refactored to a thin CLI wrapper delegating to `PortalRunService` (plain Java, no Spring, creates a fresh adapter per run to prevent mutable-state contamination across concurrent messages). `WorkerApplication` (`@SpringBootApplication`) is the production entry point. `PayrollTaskListener` (`@RabbitListener`) subscribes to `financeagent.tasks.submit.${portal.id}`, checks `InMemoryIdempotencyStore` (Caffeine, 7-day TTL — swap to Redis/Postgres at M6 with zero caller changes), calls `PortalRunService.run()`, reads `payroll-submit-result.v1.json` from the run directory, and publishes to `financeagent.results` with `correlation-id = envelope.businessKey`. Acks on normal return; nacks (requeue=false → DLQ) only when even the error-result publish fails. Full exchange/queue topology from Handoff §C.1 declared in `RabbitMqConfig`; `/actuator/prometheus` exposed on port 8080. Tested end-to-end against TestContainers RabbitMQ with `@MockBean PortalRunService` — [WorkerApplication.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/WorkerApplication.java), [PayrollTaskListener.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/listener/PayrollTaskListener.java), [PortalRunService.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/PortalRunService.java), [InMemoryIdempotencyStore.java](agent-worker/src/main/java/com/neoproc/financialagent/worker/idempotency/InMemoryIdempotencyStore.java).
+
+**Sequencing:** Items 1 and 2 are independent and tiny (~1 day each) — land first, in parallel. Items 3–5 are each ~1 day and independent; land in any order once 1–2 are in. Item 6 is the ~5-day block — start once 1–5 are merged so the consumer picks up the new envelope shape, rate-limiting, and correlation-ID logging from day one. Item 7 after 6.
 
 **Exit criteria:**
-- Agent logs into the real portal once with a human-provided MFA code, fills the form, halts before submit via the shadow-mode guard.
-- Subsequent runs within the session TTL skip login entirely.
-- Read-Back compares scraped-after-fill against the source payload — MATCH required to call the run successful.
-- Full audit bundle captured. HAR scrubbing confirmed against the real portal's login and MFA payload shapes.
+- `FINANCEAGENT_CIPHER=kms` round-trips encrypt/decrypt against a LocalStack KMS alias.
+- `FINANCEAGENT_CREDENTIALS=aws` resolves per-firm and shared paths based on descriptor `credentialScope`.
+- Worker consumes `payroll-submit-request.v1` from RabbitMQ and emits `payroll-submit-result.v1` with matching `correlation-id`; duplicate `envelopeId` returns the prior result without re-running portal actions.
+- Docker image processes a mock envelope on a fresh host.
+- `/actuator/prometheus` exposes the four spec metrics during a run.
 
 ---
 
@@ -189,7 +226,7 @@ Added progressively as milestones demand them — not upfront.
 - CDK infra-aws module — M6 only.
 - LangChain4j wiring — M4 (pointless before MCP exists).
 - RabbitMQ / DynamoDB / S3 WORM — M5/M6 (local substitutes until then).
-- Praxis BPM integration — M5 (HITL can be demonstrated without Praxis first).
+- Praxis BPM integration — Praxis-side scope tracked in [PraxisIntegrationHandoff.md](PraxisIntegrationHandoff.md); agent-worker readiness tracked in P1 above.
 
 ---
 

@@ -211,13 +211,17 @@ final class MockPayrollAdapter extends AbstractSubmitAdapter {
             System.out.println("****************************");
         }
 
+        SubmitResultBody.Review review = buildReview(
+                status, canonicalGrandTotal, serverGrandTotal, rosterDiff);
+
         SubmitResultBody body = new SubmitResultBody(
                 status,
                 null, // mock harness does not issue a portal confirmation id today
                 new SubmitResultBody.Totals("CRC", serverGrandTotal, serverUpdatedCount),
                 submittedRows,
                 rosterDiff,
-                null);
+                null,
+                review);
 
         String runId = require(bindings, "runtime.runId");
         String businessKey = bindings.getOrDefault(
@@ -323,6 +327,52 @@ final class MockPayrollAdapter extends AbstractSubmitAdapter {
 
     private static int parseInt(String raw) {
         return Integer.parseInt(raw.trim());
+    }
+
+    private static SubmitResultBody.Review buildReview(
+            String status, BigDecimal canonical, BigDecimal portal, RosterDiff diff) {
+        if (!EnvelopeStatus.MISMATCH.equals(status) && !EnvelopeStatus.PARTIAL.equals(status)) {
+            return null;
+        }
+        List<SubmitResultBody.Signal> signals = new ArrayList<>();
+        boolean totalsMatch = canonical.compareTo(portal) == 0;
+        if (!totalsMatch) {
+            signals.add(new SubmitResultBody.Signal(
+                    "TOTAL_GAP", canonical, portal, portal.subtract(canonical),
+                    null, null, null, null));
+        }
+        diff.missingFromPortal().forEach(m -> signals.add(new SubmitResultBody.Signal(
+                "MISSING_FROM_PORTAL", null, null, null,
+                m.id(), m.name(), m.expectedSalary(), null)));
+        diff.missingFromPayroll().forEach(m -> signals.add(new SubmitResultBody.Signal(
+                "MISSING_FROM_PAYROLL", null, null, null,
+                m.id(), m.displayName(), null, m.lastKnownSalary())));
+
+        String summary = buildReviewSummary(status, canonical, portal, diff);
+        return new SubmitResultBody.Review(
+                status, summary, signals, List.of("RESUBMIT", "ACKNOWLEDGE", "ESCALATE"));
+    }
+
+    private static String buildReviewSummary(
+            String status, BigDecimal canonical, BigDecimal portal, RosterDiff diff) {
+        StringBuilder sb = new StringBuilder();
+        if (EnvelopeStatus.MISMATCH.equals(status)) {
+            BigDecimal gap = portal.subtract(canonical).abs();
+            String direction = portal.compareTo(canonical) > 0
+                    ? "Portal exceeds canonical" : "Canonical exceeds portal";
+            sb.append(direction).append(" by ").append(gap.toPlainString()).append(" CRC");
+        }
+        if (!diff.isEmpty()) {
+            if (!sb.isEmpty()) sb.append("; ");
+            int mfp = diff.missingFromPortal().size();
+            int mfpay = diff.missingFromPayroll().size();
+            if (mfp > 0) sb.append(mfp).append(" employee(s) missing from portal");
+            if (mfpay > 0) {
+                if (mfp > 0) sb.append(", ");
+                sb.append(mfpay).append(" missing from payroll");
+            }
+        }
+        return sb.toString();
     }
 
     /** Internal canonical employee shape, source-agnostic. */

@@ -19,6 +19,7 @@ public record PortalDescriptor(
         String baseUrl,
         Boolean shadowMode,
         String credentialScope,
+        RateLimit rateLimit,
         SessionConfig session,
         List<Step> authSteps,
         List<Step> steps,
@@ -137,6 +138,29 @@ public record PortalDescriptor(
          */
         @JsonIgnoreProperties(ignoreUnknown = true)
         public record RowSpec(String selector, Map<String, String> columns) {}
+    }
+
+    /**
+     * Per-portal access constraints enforced by {@link PortalRateLimiter}.
+     * Absent means no constraints (safe default for dev/mock portals).
+     *
+     * <ul>
+     *   <li>{@code maxConcurrent} — maximum parallel agent runs against this
+     *       portal. Set to 1 for shared-credential portals (one session).</li>
+     *   <li>{@code minIntervalSeconds} — minimum wall-clock gap between
+     *       consecutive runs. Prevents hammering the portal under burst load.</li>
+     * </ul>
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record RateLimit(Integer maxConcurrent, Double minIntervalSeconds) {
+
+        public int maxConcurrentOrDefault() {
+            return maxConcurrent == null ? 1 : maxConcurrent;
+        }
+
+        public double minIntervalSecondsOrDefault() {
+            return minIntervalSeconds == null ? 0.0 : minIntervalSeconds;
+        }
     }
 
     /**

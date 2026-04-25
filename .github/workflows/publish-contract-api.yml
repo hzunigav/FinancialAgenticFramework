@@ -1,0 +1,36 @@
+name: Publish contract-api to GitHub Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'contract-api/**'
+      - 'pom.xml'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Run contract-api tests
+        run: mvn -pl contract-api -am test --no-transfer-progress
+
+      - name: Publish to GitHub Packages
+        run: mvn -pl contract-api -am deploy -DskipTests --no-transfer-progress
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

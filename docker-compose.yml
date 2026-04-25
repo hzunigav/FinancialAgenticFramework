@@ -1,0 +1,42 @@
+# Local acceptance test for P1 Item 7.
+#
+# Usage:
+#   docker build -t financeagent-worker:local .
+#   docker compose up -d
+#
+# Then publish a test message to verify the full pipeline:
+#   # Open RabbitMQ management UI → http://localhost:15672 (guest/guest)
+#   # Publish a payroll-submit-request.v1 JSON to financeagent.tasks.submit.mock-payroll
+#   # Expect a payroll-submit-result.v1 to appear on financeagent.results within 60 s
+#   # Check worker health: http://localhost:8080/actuator/health
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # management UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  agent-worker:
+    image: financeagent-worker:local
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      PORTAL_ID: mock-payroll
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: guest
+      RABBITMQ_PASSWORD: guest
+      FINANCEAGENT_CIPHER: local
+      FINANCEAGENT_CREDENTIALS: local
+    volumes:
+      # Persist run artifacts on the host for inspection after a test run.
+      - ./artifacts:/app/artifacts
+    ports:
+      - "8080:8080"   # /actuator/health, /actuator/prometheus

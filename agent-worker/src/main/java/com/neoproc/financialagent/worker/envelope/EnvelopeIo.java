@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
+import com.neoproc.financialagent.common.crypto.KmsEnvelopeCipher;
 import com.neoproc.financialagent.common.crypto.LocalDevCipher;
 import com.neoproc.financialagent.common.crypto.VaultTransitCipher;
 import com.neoproc.financialagent.contract.payroll.Encryption;
@@ -24,8 +25,8 @@ import java.util.HexFormat;
  *
  * <p>Cipher selection is environment-driven:
  * <ul>
- *   <li>{@code FINANCEAGENT_CIPHER=vault} → {@link VaultTransitCipher}
- *       (production; throws until Praxis wires Vault transit).</li>
+ *   <li>{@code FINANCEAGENT_CIPHER=kms} → {@link KmsEnvelopeCipher} (production, AWS KMS).</li>
+ *   <li>{@code FINANCEAGENT_CIPHER=vault} → {@link VaultTransitCipher} (throws until wired).</li>
  *   <li>{@code FINANCEAGENT_CIPHER=local} or unset → {@link LocalDevCipher}
  *       with key dir at {@code ~/.financeagent/cipher-keys/}.</li>
  * </ul>
@@ -45,6 +46,9 @@ public final class EnvelopeIo {
 
     public static EnvelopeCipher defaultCipher() {
         String which = System.getenv("FINANCEAGENT_CIPHER");
+        if ("kms".equalsIgnoreCase(which)) {
+            return new KmsEnvelopeCipher();
+        }
         if ("vault".equalsIgnoreCase(which)) {
             return new VaultTransitCipher();
         }

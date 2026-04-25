@@ -81,30 +81,6 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 
 ---
 
-### Per-portal rate-limit declaration
-
-**What:** New descriptor field `rateLimit: { maxConcurrent, minIntervalSeconds }`. Worker enforces via a portal-keyed semaphore / Guava `RateLimiter`; Praxis's RabbitMQ consumer prefetch matches `maxConcurrent` for rate-limited queues.
-
-**Why:** When multiple workers hit CCSS / INS / Hacienda across firms concurrently, portals throttle. First symptom is mysterious failures that look like data issues. Cheaper to declare and enforce limits up front than diagnose the same throttle event three times.
-
-**Size:** 1 day — descriptor + engine + documentation.
-
-**Trigger to pick up:** before the second firm is onboarded, or before the first throttling incident (whichever comes first).
-
----
-
-### Structured HITL review payload + Praxis UI contract
-
-**What:** Add a `review` block to `PayrollSubmitResult` envelopes with status MISMATCH / PARTIAL, carrying a structured "what to show the reviewer" payload and the set of actions the reviewer can take (resubmit, acknowledge-as-expected, escalate). Paired with an appendix in [PraxisIntegrationHandoff.md](PraxisIntegrationHandoff.md) specifying the Praxis-side queue view + action API.
-
-**Why:** MISMATCH / PARTIAL envelopes will accumulate from cycle 1. Without a payload spec, the agent surfaces "something's wrong" as a free-text console message and Praxis's review UI ends up bespoke per portal. A structured payload makes the UI generic, forces the agent to surface actionable info, and gives Praxis a target to build against.
-
-**Size:** 1-2 days — contract changes (SubmitResultBody record + schema), agent-worker population in `MockPayrollAdapter.captureToManifest`, handoff-doc appendix.
-
-**Trigger to pick up:** before first production PARTIAL event (will happen in cycle 1 if any real drift exists between AutoPlanilla and the target portals).
-
----
-
 ### Staging environment plan
 
 **What:** Prefix-based split across all stateful systems — `financeagent/` for prod vs `financeagent-staging/` for staging on Vault mounts, matching RabbitMQ vhosts, worker deployments via env-driven config.

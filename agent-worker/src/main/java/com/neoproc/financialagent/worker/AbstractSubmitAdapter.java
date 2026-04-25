@@ -3,12 +3,20 @@ package com.neoproc.financialagent.worker;
 import com.neoproc.financialagent.common.credentials.PortalCredentials;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.contract.payroll.Audit;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Metrics;
 import com.neoproc.financialagent.contract.payroll.EnvelopeMeta;
 import com.neoproc.financialagent.contract.payroll.PayrollSubmitResult;
+import com.neoproc.financialagent.contract.payroll.RosterDiff;
 import com.neoproc.financialagent.contract.payroll.SubmitResultBody;
 import com.neoproc.financialagent.contract.payroll.SubmitTask;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
+import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -35,6 +43,8 @@ import java.util.UUID;
  * {@link SubmitTask} keeps it off the wire.
  */
 abstract class AbstractSubmitAdapter extends BaseAdapter {
+
+    private static final Logger log = LoggerFactory.getLogger(AbstractSubmitAdapter.class);
 
     @Override
     public final String captureToManifest(Map<String, String> scraped,
@@ -123,7 +133,49 @@ abstract class AbstractSubmitAdapter extends BaseAdapter {
 
         Path envelopeFile = runDir.resolve("payroll-submit-result.v1.json");
         EnvelopeIo.write(record, envelopeFile);
+
+        recordSubmitMetrics(outcome);
+
+        manifest.envelopeId = envelope.envelopeId();
+        manifest.businessKey = envelope.businessKey();
+        MDC.put("envelopeId", envelope.envelopeId());
+        MDC.put("businessKey", envelope.businessKey());
+        log.info("envelope emitted file={} status={}", envelopeFile.getFileName(), outcome.status());
         manifest.step("envelope", envelopeFile.getFileName()
                 + " (envelopeId=" + envelope.envelopeId() + ", encrypted)");
+    }
+
+    private static void recordSubmitMetrics(SubmitOutcome outcome) {
+        String portal = outcome.targetPortalId();
+        String status = outcome.status();
+
+        // Absolute reconciliation gap from the TOTAL_GAP signal; 0 for SUCCESS runs.
+        BigDecimal gap = BigDecimal.ZERO;
+        SubmitResultBody.Review review = outcome.body().review();
+        if (review != null) {
+            gap = review.signals().stream()
+                    .filter(s -> "TOTAL_GAP".equals(s.type()) && s.gap() != null)
+                    .map(SubmitResultBody.Signal::gap)
+                    .map(BigDecimal::abs)
+                    .findFirst()
+                    .orElse(BigDecimal.ZERO);
+        }
+        DistributionSummary.builder("agent_reconciliation_gap_colones")
+                .tags("portal", portal, "status", status)
+                .register(Metrics.globalRegistry)
+                .record(gap.doubleValue());
+
+        // Roster diff counters — one increment per employee in each bucket per run.
+        RosterDiff diff = outcome.body().rosterDiff();
+        if (diff != null) {
+            Counter.builder("agent_roster_diff_size")
+                    .tags("portal", portal, "bucket", "missingFromPortal")
+                    .register(Metrics.globalRegistry)
+                    .increment(diff.missingFromPortal().size());
+            Counter.builder("agent_roster_diff_size")
+                    .tags("portal", portal, "bucket", "missingFromPayroll")
+                    .register(Metrics.globalRegistry)
+                    .increment(diff.missingFromPayroll().size());
+        }
     }
 }

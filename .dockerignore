@@ -1,0 +1,17 @@
+.git/
+.github/
+.idea/
+*.iml
+**/.DS_Store
+
+# Build outputs
+**/target/
+
+# Source trees not in the agent-worker sub-reactor (their pom.xml files are
+# COPYed explicitly in the Dockerfile; their src trees are never compiled).
+mcp-payroll-server/src/
+agent-gateway/src/
+testing-harness/src/
+
+# Docs
+*.md

@@ -427,7 +427,71 @@ Government portals will throttle us aggressively once we submit at scale across 
 
 ---
 
-## 9. Integration testing plan
+## 9. Workstream H — Supervision
+
+**Goal:** catch the classes of failure that per-run observability alone cannot — specifically, work that was supposed to happen and didn't. Flowable guarantees every *started* process instance reaches a terminal state; this workstream guarantees every *expected* process instance gets started, and that the operator has a single place to see issues accumulate.
+
+Adds a supervision surface sitting above the BPMN orchestration from §5 and the observability contract from §6. Praxis-side scope unless otherwise noted; agent-worker dependencies are enumerated in §H.5 and tracked in [ImplementationPlan.md § P1](ImplementationPlan.md).
+
+### H.1 Cycle-coverage reconciler
+
+- [ ] Scheduled Flowable timer job (daily, or 24h after each cycle's expected start) that asserts: *for every firm with `payroll-agents-enabled=true`, a `payroll-cycle` process instance exists for the current period.* Firms with no instance → emit a high-severity alert and create a tenant-admin user task.
+- [ ] Catches: timer-trigger failures, onboarding-flag misconfiguration, missing per-firm KMS alias, missing `FirmPortalIdentifier` for shared-creds portals, firms silently dropped during enablement.
+- [ ] **Acceptance:** disable the `payroll-agents-enabled` flag on a test firm after the cycle timer fires. The reconciler flags it within 24h, creates the tenant-admin user task, and the dashboard (H.2) surfaces it under a "Missing" view.
+- [ ] Size: ~1 eng-day.
+
+### H.2 Supervisor dashboard
+
+- [ ] New React screen in the Praxis app reading from Flowable process state + RabbitMQ queue metrics + the results exchange.
+- [ ] Views:
+  - **In-flight:** every envelope not in a terminal state, grouped by firm / portal, with age and current BPMN activity.
+  - **Recent:** last N cycles of `PayrollSubmitResult`, filterable by status (`SUCCESS` / `PARTIAL` / `MISMATCH` / `FAILED`) and firm.
+  - **HITL inbox:** pending user tasks with `review` payload (from §8), sortable by SLA-to-acknowledgment.
+  - **System health:** DLQ depth per queue, worker replica status, RabbitMQ consumer lag, cycle-coverage reconciler results.
+- [ ] Tenant-admin scope sees all firms; per-firm admins see only their firm.
+- [ ] Depends on §8 (`review` payload shape) for the HITL inbox view.
+- [ ] Size: ~3 eng-days.
+
+### H.3 Alerting
+
+Three tiers over the Prometheus metrics from §6.3 plus the reconciler output:
+
+| Tier | Signal | Action |
+|---|---|---|
+| **P0 (page)** | DLQ depth > 0; KMS or Secrets Manager auth failure; RabbitMQ consumer lag > threshold; H.1 reconciler flags ≥ 1 firm; H.4 canary fails | on-call page |
+| **P1 (ticket)** | `FAILED` envelope; portal 5xx burst (≥ 3 in 10 min); Read-Back `MISMATCH` rate above rolling baseline | ops queue |
+| **P2 (dashboard only)** | `PARTIAL` result (already routes to HITL user task); rate-limit saturation | dashboard only |
+
+- [ ] Recommend CloudWatch alarms over the Prometheus metrics — stack-native on AWS, ~$0.10/alarm/month, no new ops surface. Grafana Cloud free tier is equivalent if already in use. Self-hosted Prometheus + Alertmanager is deferred until multi-product scale.
+- [ ] Size: ~1 eng-day.
+
+### H.4 Synthetic canary
+
+- [ ] Praxis-side scheduler publishes a `mock-payroll` envelope every 30 minutes. Result must arrive on `financeagent.results` within SLA or P0 fires.
+- [ ] Exercises: RabbitMQ path, KMS encrypt/decrypt, Secrets Manager read, worker liveness, BPMN Receive Task signaling — in the same code paths as production traffic.
+- [ ] Agent-worker dependency: keep the `mock-payroll` portal descriptor in the production image and its queue consumable (not gated behind a dev-only flag). See §H.5.
+- [ ] Size: ~half eng-day.
+
+### H.5 Agent-worker dependencies
+
+What the worker must expose so Praxis can build H.1–H.4. Tracked on the worker side under [ImplementationPlan.md § P1 "Supervision hooks"](ImplementationPlan.md):
+
+- Prometheus metrics per §6.3 exposed on `/actuator/prometheus`.
+- Correlation-ID (envelopeId / businessKey / issuerRunId) on every log line via MDC.
+- Structured terminal-state log entry per run: one INFO line with final status + the correlation triple, for log-based alerting without metrics scraping.
+- `mock-payroll` descriptor shippable in the production image, queue consumable in prod.
+
+No new Praxis-facing contract. No envelope-schema changes. Purely ops-surface additions on the worker side.
+
+### H.6 Acceptance
+
+- [ ] Deliberately disable `payroll-agents-enabled` on a test firm after the cycle timer fires → H.1 reconciler flags it within 24h; tenant-admin user task created; dashboard shows it under "Missing".
+- [ ] Kill a worker pod mid-run → dashboard surfaces the stuck envelope; CloudWatch alarm fires on consumer lag; canary fails within 30m.
+- [ ] A deliberately drifted `mock-payroll` run (via [demo/test-roster-drift.sh](demo/test-roster-drift.sh)) populates the HITL inbox with the `review` payload; dashboard shows SLA-to-acknowledgment ticking.
+
+---
+
+## 10. Integration testing plan
 
 How to validate the full pipeline before touching any real government portal.
 
@@ -462,7 +526,7 @@ These prove the worker and the contract are correct in isolation.
 
 ---
 
-## 10. Rollout plan
+## 11. Rollout plan
 
 Once Phase 1 is green in staging:
 
@@ -473,7 +537,7 @@ Once Phase 1 is green in staging:
 
 ---
 
-## 11. Open questions (please confirm or redirect)
+## 12. Open questions (please confirm or redirect)
 
 These are assumptions I've made that Praxis may want to adjust. Each is tagged **BLOCKING** (decision must land before Phase 1 development can start in earnest) or **NON-BLOCKING** (decision can be made while other workstreams are in flight, as long as it's settled before the dependent workstream's acceptance test).
 
@@ -488,7 +552,7 @@ These are assumptions I've made that Praxis may want to adjust. Each is tagged *
 
 ---
 
-## 12. Estimation (rough)
+## 13. Estimation (rough)
 
 | Workstream | Praxis-side effort | Agent-worker-side effort | Parallelizable? |
 |---|---|---|---|
@@ -499,7 +563,8 @@ These are assumptions I've made that Praxis may want to adjust. Each is tagged *
 | E. Observability | ~1 eng-day | ~1 eng-day | yes |
 | F. Packaging | ~2 eng-days (ECS Fargate + IAM setup) | ~1 eng-day (Dockerfile) | yes |
 | G. HITL review | ~2 eng-days (user task + review UI) | ~1 eng-day (review payload) | yes, once Q4 resolved |
+| H. Supervision (reconciler + dashboard + alerts + canary) | ~5 eng-days | ~half eng-day | yes; H.2 depends on G |
 | Integration testing | ~2 eng-days | ~1 eng-day | no (depends on all above) |
-| **Total** | **~15 eng-days** | **~11 eng-days** | |
+| **Total** | **~20 eng-days** | **~12 eng-days** | |
 
 With focused parallelism and no surprises, the critical path is ~3 weeks end-to-end. Phase 2 (the three real portal descriptors) can run alongside starting the week after.

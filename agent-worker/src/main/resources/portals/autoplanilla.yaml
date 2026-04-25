@@ -12,6 +12,11 @@ shadowMode: true
 # the per-firm client selection happens via params.planillaName.
 credentialScope: shared
 
+# Shared login — one active session at a time, 5-second gap between runs.
+rateLimit:
+  maxConcurrent: 1
+  minIntervalSeconds: 5.0
+
 # Sessions buy us speed on repeated runs. 30 min is a conservative default
 # for a SaaS login — narrow it if AutoPlanilla's server-side session is
 # shorter.

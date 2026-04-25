@@ -1,0 +1,12 @@
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <!-- Structured key=value log line. MDC values are blank when not yet set. -->
+            <pattern>ts=%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ} level=%-5level issuerRunId=%X{issuerRunId} firmId=%X{firmId} businessKey=%X{businessKey} envelopeId=%X{envelopeId} msg="%msg"%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>

@@ -10,6 +10,9 @@ import com.neoproc.financialagent.contract.payroll.PayrollCaptureResult;
 import com.neoproc.financialagent.contract.payroll.Period;
 import com.neoproc.financialagent.contract.payroll.Planilla;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -30,6 +33,8 @@ import java.util.UUID;
  * ~130 with envelope boilerplate.
  */
 abstract class AbstractCaptureAdapter extends BaseAdapter {
+
+    private static final Logger log = LoggerFactory.getLogger(AbstractCaptureAdapter.class);
 
     @Override
     public final String captureToManifest(Map<String, String> scraped,
@@ -124,6 +129,12 @@ abstract class AbstractCaptureAdapter extends BaseAdapter {
 
         Path envelopeFile = runDir.resolve("payroll-capture-result.v1.json");
         EnvelopeIo.write(record, envelopeFile);
+
+        manifest.envelopeId = envelope.envelopeId();
+        manifest.businessKey = envelope.businessKey();
+        MDC.put("envelopeId", envelope.envelopeId());
+        MDC.put("businessKey", envelope.businessKey());
+        log.info("envelope emitted file={} status={}", envelopeFile.getFileName(), outcome.status());
         manifest.step("envelope", envelopeFile.getFileName()
                 + " (envelopeId=" + envelope.envelopeId() + ", encrypted)");
     }

@@ -1,11 +1,25 @@
 # Praxis Integration Handoff — Phase 1
 
+> **Document revision history**
+>
+> | Rev | Date | Author | Summary |
+> |-----|------|--------|---------|
+> | 1.0 | 2026-04-23 | Agent-worker team | Initial draft — workstreams A–H, open questions, estimation |
+> | 1.1 | 2026-04-27 | Praxis team | §14 added: first cross-system E2E run findings; cipher asymmetry documented in §A.3 and §E.1; open questions 7–8 added |
+> | 1.2 | 2026-04-27 | Agent-worker team | §14.7 action #2 completed: `CleartextCipher` + `FINANCEAGENT_CIPHER=none` shipped (see §14.7 status update) |
+> | 1.3 | 2026-04-27 | Agent-worker team | §14.7 actions #1 and #3 completed: `Encryption.scheme` enum fixed (`local-aes-gcm-v1` removed, `kms-envelope-v1` added); `EnvelopeAwareErrorHandler` wired to both listeners |
+>
+> **Note on document placement:** this file lives at the repo root alongside `WorkerActionTypes.md` and `ImplementationPlan.md`. It is operational integration guidance, not a wire-format specification. The `contract-api/` module carries only schemas and DTOs that Praxis includes as a JAR dependency. Stable reference material (cipher modes, correlation rules) will migrate into `contract-api/CONTRACT.md` once Phase 1 is complete; this document remains the living integration log.
+
+---
+
 Everything the Praxis team needs to build, configure, or decide so the agent-worker can run under Praxis's BPM orchestration in production. **This document is the scope of Phase 1.** Phase 2 (per-portal onboarding for CCSS / INS / Hacienda) and Phase 3 (deploy packaging) are referenced but not expanded here — they're downstream of this work.
 
 **Companion docs (read in this order):**
-1. [contract-api/CONTRACT.md](contract-api/CONTRACT.md) — wire format, envelope schemas, and the per-firm KMS encryption runbook.
-2. [PayrollOrchestrationFlow.md](PayrollOrchestrationFlow.md) — the BPMN process model that wraps the envelopes described in CONTRACT.md.
-3. This doc — the plumbing between Praxis and the worker that those two documents assume exists.
+1. [WorkerActionTypes.md](WorkerActionTypes.md) — the action-type taxonomy (Input / Analysis / Output), what Praxis must publish and receive for each category, `businessKey` rules, envelope field checklist, and HITL task design. **Start here before reading anything else.**
+2. [contract-api/CONTRACT.md](../contract-api/CONTRACT.md) — wire format, envelope schemas, and the per-firm KMS encryption runbook.
+3. [PayrollOrchestrationFlow.md](PayrollOrchestrationFlow.md) — the BPMN process model that wraps the envelopes described in CONTRACT.md.
+4. This doc — the plumbing between Praxis and the worker that those two documents assume exists.
 
 ---
 
@@ -16,7 +30,7 @@ Everything the Praxis team needs to build, configure, or decide so the agent-wor
 The Praxis roadmap previously listed an **Agentic AI Microservice** feature — a Python/FastAPI service for headless browser scraping, LLM-powered extraction, and Vault credential management. **That feature is replaced by the agent-worker described in this document** and should be removed from the Praxis backlog (or redefined as "agent-worker runtime — external service, integrated via envelope contract").
 
 Specifically:
-- **Headless browser scraping** is handled by [agent-worker](agent-worker/), a Java service using Playwright with declarative YAML portal descriptors. One descriptor per portal, versioned in git, auditable step-by-step.
+- **Headless browser scraping** is handled by [agent-worker](../agent-worker/), a Java service using Playwright with declarative YAML portal descriptors. One descriptor per portal, versioned in git, auditable step-by-step.
 - **Credential management** uses **AWS KMS** (per-firm envelope-encryption keys, replacing the earlier Vault `transit` plan) and **AWS Secrets Manager** (portal credentials, replacing the earlier Vault `kv-v2` plan), both authenticated via IAM. Covered by Workstreams A and B, with a single source of truth (see §3.0 below). Decision rationale: see [InfraSetup.md Track B](InfraSetup.md).
 - **LLM-powered extraction is not built and not needed for the current scope.** The Costa Rica government portals (CCSS Sicere, INS RT-Virtual, Hacienda OVI) and AutoPlanilla all have structured DOMs that declarative CSS/role selectors hit with 100% accuracy at zero token cost. Adding an LLM extraction layer here would be strictly worse: slower, non-deterministic, harder to audit for a financial submission, and more expensive per run. If a future use case ever requires extraction from an unstructured source (e.g., a PDF emailed back from Hacienda), we add a focused extractor as a new adapter type — the envelope contract already accommodates it, no architectural change needed.
 
@@ -54,11 +68,21 @@ What each side owns in the production flow:
 | Audit bundles (manifest.json, HAR, screenshot) | | ✓ |
 | Idempotency enforcement (duplicate envelopeId detection) | | ✓ |
 
-Two one-way dependencies flow between them:
-- **Praxis → worker:** a `PayrollSubmitRequest` envelope on a RabbitMQ queue.
-- **Worker → Praxis:** a `PayrollSubmitResult` envelope on a RabbitMQ queue, correlated back via `envelope.businessKey`.
+The three action categories from [WorkerActionTypes.md](WorkerActionTypes.md) map to distinct dependency shapes:
 
-Everything else is internal to one side.
+**Input (Capture) — two queue-based dependencies:**
+- **Praxis → worker:** `PayrollCaptureRequest` on `financeagent.tasks.capture.<portalId>`.
+- **Worker → Praxis:** `PayrollCaptureResult` on `financeagent.results`, correlated back via `envelope.businessKey`.
+
+**Analysis — no queue dependency:**
+- Automated analysis (e.g. roster-diff aggregation, building the submit request) is a Flowable `JavaDelegate` running in-process on the Praxis side — no message bus involvement.
+- HITL gates (capture review, integrity review, lifecycle confirmation) are Flowable User Tasks — no message bus involvement.
+
+**Output (Submit) — two queue-based dependencies:**
+- **Praxis → worker:** `PayrollSubmitRequest` on `financeagent.tasks.submit.<portalId>`.
+- **Worker → Praxis:** `PayrollSubmitResult` on `financeagent.results`, correlated back via `envelope.businessKey`.
+
+Everything else is internal to one side. The queue-based pairs (Input and Output) are the only cross-system contract; Analysis actions are Praxis-internal and do not require any agent-worker involvement.
 
 ---
 
@@ -66,7 +90,7 @@ Everything else is internal to one side.
 
 **Goal:** enable field-level encryption/decryption of envelope bodies using per-firm AWS KMS keys.
 
-**Reference:** [CONTRACT.md §4 "Production (Praxis-side runbook)"](contract-api/CONTRACT.md#4-encryption) has the full spec. Summary:
+**Reference:** [CONTRACT.md §4 "Production (Praxis-side runbook)"](../contract-api/CONTRACT.md#4-encryption) has the full spec. Summary:
 
 ### A.1 Add the AWS SDK v2 KMS dependency
 
@@ -107,13 +131,15 @@ Everything else is internal to one side.
 
 - [ ] Spring bean wrapping AWS SDK v2 `KmsClient`. Two methods:
   ```java
-  String encrypt(long firmId, byte[] plaintext);   // returns "aws-kms:v1:<base64(JSON)>"
-  byte[] decrypt(long firmId, String ciphertext);  // accepts "aws-kms:v1:<base64(JSON)>"
+  String encrypt(long firmId, byte[] plaintext);   // returns "vault:v1:<base64(JSON)>" (see wire-prefix note below)
+  byte[] decrypt(long firmId, String ciphertext);  // accepts "vault:v1:<base64(JSON)>"
   ```
-- [ ] Implementation per [CONTRACT.md §4](contract-api/CONTRACT.md#4-encryption):
-  - Encrypt: `GenerateDataKey(alias/payroll-firm-<firmId>, AES_256)` → AES-256-GCM the body with the plaintext DEK + random 96-bit IV → serialize `{kid, edk, iv, ct}` to JSON → base64-wrap with `aws-kms:v1:` prefix.
+- [ ] Implementation per [CONTRACT.md §4](../contract-api/CONTRACT.md#4-encryption):
+  - Encrypt: `GenerateDataKey(alias/payroll-firm-<firmId>, AES_256)` → AES-256-GCM the body with the plaintext DEK + random 96-bit IV → serialize `{kid, edk, iv, ct}` to JSON → base64-wrap with `vault:v1:` prefix.
   - Decrypt: strip prefix → base64 decode → JSON parse → `Decrypt(edk)` → AES-256-GCM decrypt.
-- [ ] **Acceptance:** given a capture envelope produced by the worker in staging (`encryption.scheme=aws-kms-envelope-v1`, KMS alias provisioned for the test firm), Praxis's `KmsEnvelopeClient.decrypt()` returns the same cleartext body the worker's encrypt call started with.
+- [ ] **Wire-prefix note:** the ciphertext prefix on the wire is `vault:v1:` (not `aws-kms:v1:`) to match the contract-api JSON Schema regex `^vault:v\d+:`. The internal scheme name in code and in the `Encryption.scheme` field is `aws-kms-envelope-v1`. See §14 for how this constraint was discovered.
+- [ ] **Critical asymmetry — `decrypt()` is NOT called on inbound results.** `KmsEnvelopeClient.encrypt()` is called by `PayrollServiceTaskDelegate` when publishing capture-requests and submit-requests to the worker. `KmsEnvelopeClient.decrypt()` is **not** called anywhere in the result-listener path (`PayrollResultListener`). Inbound `payroll-capture-result.v1` and `payroll-submit-result.v1` envelopes either arrive in cleartext (no `encryption` block) or with `vault:v1:` ciphertext in the `result`/`submitResult` field — but Praxis does not decrypt the body before passing it into the BPMN process. This asymmetry must be understood by both teams: Praxis encrypts outbound, Praxis does **not** decrypt inbound. See §14 for the incident that surfaced this.
+- [ ] **Acceptance:** given a capture envelope produced by the worker in staging (`encryption.scheme=aws-kms-envelope-v1`, KMS alias provisioned for the test firm), Praxis's `KmsEnvelopeClient.decrypt()` returns the same cleartext body the worker's encrypt call started with. (This acceptance test verifies the symmetric algorithm only; it does not represent a production code path in the listener.)
 
 ### A.4 Switch the worker to `aws-kms-envelope-v1`
 
@@ -204,7 +230,7 @@ Two workflows, depending on portal scope:
       value: "${params.clientIdentifier}"
     - action: ...                  # then the normal per-firm flow
   ```
-  See also the `credentialScope: shared` declaration in the portal descriptor ([autoplanilla.yaml](agent-worker/src/main/resources/portals/autoplanilla.yaml) is a live example) — the worker uses this to know which subtree to read.
+  See also the `credentialScope: shared` declaration in the portal descriptor ([autoplanilla.yaml](../agent-worker/src/main/resources/portals/autoplanilla.yaml) is a live example) — the worker uses this to know which subtree to read.
 - [ ] **MFA handling:** out of scope for Phase 1 if none of the three target portals require it. If any do — CCSS likely does — see [PortalOnboarding.md](PortalOnboarding.md) for how the worker's `pause` action lets an operator enter MFA codes interactively. Revisit once the Phase 2 team reports back.
 
 ### B.3 Credentials provider swap on the worker
@@ -240,31 +266,32 @@ Two workflows, depending on portal scope:
   Exchange: financeagent.dlx               (fanout, dead-letter)
 
   Queues:
-    financeagent.tasks.capture             (routing-key: capture)
-    financeagent.tasks.submit.ccss-sicere  (routing-key: submit.ccss-sicere)
+    financeagent.tasks.capture.autoplanilla  (routing-key: capture.autoplanilla)
+    financeagent.tasks.capture.mock-payroll  (routing-key: capture.mock-payroll, dev/staging only)
+    financeagent.tasks.submit.ccss-sicere    (routing-key: submit.ccss-sicere)
     financeagent.tasks.submit.ins-rt-virtual
     financeagent.tasks.submit.hacienda-ovi
-    financeagent.tasks.submit.mock-payroll (dev/staging only)
+    financeagent.tasks.submit.mock-payroll   (dev/staging only)
 
-    financeagent.results                   (shared results queue, Praxis consumes)
+    financeagent.results                     (shared results queue, Praxis consumes)
 
-    financeagent.dlq                       (bound to the fanout dlx)
+    financeagent.dlq                         (bound to the fanout dlx)
   ```
-- [ ] Per-queue config:
+- [ ] Per-queue config (capture and submit queues):
   - Durable: true.
   - `x-dead-letter-exchange: financeagent.dlx`.
-  - `x-message-ttl: 3600000` (1 hour — a payroll submission that hasn't been picked up in an hour is stale).
+  - No `x-message-ttl` — stale-message policy is enforced at the application level (worker nacks unrecoverable messages to the DLQ; Praxis SLA monitoring fires on DLQ depth).
 - [ ] **Acceptance:** Praxis can publish a test message to `financeagent.tasks.submit.mock-payroll` and observe it arrive on that queue via the RabbitMQ management UI.
 
 ### C.2 Message envelope
 
-- [ ] Message body: the cleartext `PayrollSubmitRequest` JSON (body of the envelope is encrypted per §2, so the message is safe to log at broker level — no PII leaks).
+- [ ] Message body: the `PayrollCaptureRequest` or `PayrollSubmitRequest` JSON (body of the envelope is encrypted per §2, so the message is safe to log at broker level — no PII leaks).
 - [ ] Message properties:
   - `content-type: application/json`
   - `message-id: <envelope.envelopeId>`  (used by broker for deduplication if `x-message-deduplication` is on)
-  - `correlation-id: <envelope.businessKey>`  (Praxis uses this to correlate the response back to the originating process instance)
+  - `correlation-id: <envelope.businessKey>`  (informational; Praxis correlates results by querying Flowable for `businessKey`, not by filtering on this header)
   - `reply-to: financeagent.results`
-  - `type: <schema>`  (e.g., `payroll-submit-request.v1`)
+  - `type: <schema>`  (e.g., `payroll-capture-request.v1` or `payroll-submit-request.v1`)
 
 ### C.3 Worker runtime change
 
@@ -315,7 +342,7 @@ Government portals will throttle us aggressively once we submit at scale across 
 ### D.1 Service Task pattern
 
 - [ ] Each "Submit to X" box in the top-level flow maps to a Flowable `ServiceTask` with a `JavaDelegate` that:
-  1. Builds a `PayrollSubmitRequest` envelope from the captured payroll + the target portal identifier (see [CONTRACT.md §6 "Building a submit-request from a capture result"](contract-api/CONTRACT.md#6-consuming-this-contract-from-praxis)).
+  1. Builds a `PayrollSubmitRequest` envelope from the captured payroll + the target portal identifier (see [CONTRACT.md §6 "Building a submit-request from a capture result"](../contract-api/CONTRACT.md#6-consuming-this-contract-from-praxis)).
   2. Encrypts the body via `KmsEnvelopeClient.encrypt(firmId, ...)`.
   3. Publishes to `financeagent.tasks.submit.<targetPortal>` with the properties from §C.2.
   4. **Does not block.** This is a fire-and-forget Service Task; the response comes back via a Receive Task.
@@ -341,7 +368,9 @@ Government portals will throttle us aggressively once we submit at scale across 
   ```
   ts=... level=INFO firmId=... businessKey=... envelopeId=... issuerRunId=... msg="..."
   ```
-- [ ] **Acceptance:** given any production envelope, you can `grep` one `envelopeId` in both Praxis logs and worker logs and reconstruct the full cross-system timeline.
+- [ ] **`envelopeId` must appear at every drop point, not just the happy path.** When Praxis drops an inbound envelope (schema validation failure, unsupported encryption scheme, missing businessKey), the WARN log must include the `envelopeId` extracted from the raw payload JSON — not just the AMQP `correlation-id` header (which carries the `businessKey`, a different token). Without this, searching for a specific `envelopeId` in Praxis logs to diagnose a missed Receive Task signal returns nothing, because the drop happened before deserialization. Praxis's `PayrollResultListener` now extracts `envelopeId` from `envelope.envelope.envelopeId` in the raw map on every code path. The agent-worker must similarly log `envelopeId` on any nack or discard event. See §14 for the incident that motivated this.
+- [ ] **`envelopeId` is the primary cross-system search key.** In any support or post-mortem scenario, start with the `envelopeId`. `businessKey` identifies the payroll cycle; `envelopeId` identifies a specific message. They are different and both useful.
+- [ ] **Acceptance:** given any production envelope, you can `grep` one `envelopeId` in both Praxis logs and worker logs and reconstruct the full cross-system timeline — including any drop or discard event on either side.
 
 ### E.2 Tracing
 
@@ -423,7 +452,7 @@ Government portals will throttle us aggressively once we submit at scale across 
 
 ### G.4 Acceptance
 
-- [ ] A deliberately drifted mock-payroll run (run via [demo/test-roster-drift.sh](demo/test-roster-drift.sh) in dev) produces a `PayrollSubmitResult` envelope with a populated `review` block. Praxis's review UI renders it correctly, and each of the three action buttons routes the BPMN process as specified.
+- [ ] A deliberately drifted mock-payroll run (run via [demo/test-roster-drift.sh](../demo/test-roster-drift.sh) in dev) produces a `PayrollSubmitResult` envelope with a populated `review` block. Praxis's review UI renders it correctly, and each of the three action buttons routes the BPMN process as specified.
 
 ---
 
@@ -487,7 +516,7 @@ No new Praxis-facing contract. No envelope-schema changes. Purely ops-surface ad
 
 - [ ] Deliberately disable `payroll-agents-enabled` on a test firm after the cycle timer fires → H.1 reconciler flags it within 24h; tenant-admin user task created; dashboard shows it under "Missing".
 - [ ] Kill a worker pod mid-run → dashboard surfaces the stuck envelope; CloudWatch alarm fires on consumer lag; canary fails within 30m.
-- [ ] A deliberately drifted `mock-payroll` run (via [demo/test-roster-drift.sh](demo/test-roster-drift.sh)) populates the HITL inbox with the `review` payload; dashboard shows SLA-to-acknowledgment ticking.
+- [ ] A deliberately drifted `mock-payroll` run (via [demo/test-roster-drift.sh](../demo/test-roster-drift.sh)) populates the HITL inbox with the `review` payload; dashboard shows SLA-to-acknowledgment ticking.
 
 ---
 
@@ -550,6 +579,10 @@ These are assumptions I've made that Praxis may want to adjust. Each is tagged *
 
 **First-week focus for Praxis:** resolve Q1 and Q4. Everything else can proceed in parallel.
 
+7. **[BLOCKING, agent-worker, §A/§E] Contract-api schema inconsistency: `local-aes-gcm-v1` is allowed as an `Encryption.scheme` but the corresponding ciphertext pattern is not allowed in `result`.** The `Encryption.$defs` enum in `payroll-capture-result.v1.json` (and the submit schemas) lists `local-aes-gcm-v1` as a valid scheme, but the `result.oneOf` only accepts a `CaptureResultBody` object or a string matching `^vault:v\d+:`. Any ciphertext produced by a local AES-GCM cipher (e.g., `local:v1:...`) fails the `oneOf` check → Praxis's schema validator drops the envelope silently → Receive Task times out → `engineeringEscalation`. Fix options: (a) add a `^local:v\d+:` pattern to `result.oneOf` so the local cipher's ciphertext is also accepted, OR (b) remove `local-aes-gcm-v1` from the enum entirely and declare that dev mode = cleartext (no encryption block). Option (b) is simpler and avoids a cipher that Praxis can never decrypt. **Blocks any agent-worker dev run that uses `FINANCEAGENT_CIPHER=local`.**
+
+8. **[BLOCKING, agent-worker, §A] Dev mode is cleartext on both sides — this was implicit and must be made explicit.** Praxis defaults to `praxis.payroll.encryption.enabled=false` (cleartext, no `encryption` block on outbound requests). The agent-worker must default to the same: no `encryption` block on result envelopes in dev. The worker should have a documented `FINANCEAGENT_CIPHER=none` (or equivalent) setting that is the default for local and staging environments. Both sides: when encryption is off, the `result`/`submitResult` field is a plain JSON object — no `encryption` block, no ciphertext string. This is explicitly valid per the contract spec.
+
 ---
 
 ## 13. Estimation (rough)
@@ -568,3 +601,103 @@ These are assumptions I've made that Praxis may want to adjust. Each is tagged *
 | **Total** | **~20 eng-days** | **~12 eng-days** | |
 
 With focused parallelism and no surprises, the critical path is ~3 weeks end-to-end. Phase 2 (the three real portal descriptors) can run alongside starting the week after.
+
+---
+
+## 14. Lessons from the first cross-system E2E run (2026-04-27)
+
+This section documents findings from the first real round-trip between a live Praxis instance and the agent-worker `mock-payroll` harness. Praxis workflow instance #2501 reached the `engineeringEscalation` user task ("Submission failed — engineering escalation", pool: `technical-operator`) after the `waitCaptureResult` Receive Task timed out at 10 minutes. The agent-worker's logs confirmed the capture succeeded and the result envelope was published. The failure was entirely on the Praxis-side ingestion path.
+
+### 14.1 Root cause: schema validation dropped the capture result silently
+
+`PayrollResultListener` validates every inbound envelope against the contract-api JSON Schema before any deserialization or BPMN signaling. The `payroll-capture-result.v1.json` schema defines:
+
+```json
+"result": {
+  "oneOf": [
+    { "$ref": "#/$defs/CaptureResultBody" },
+    { "type": "string", "pattern": "^vault:v\\d+:" }
+  ]
+}
+```
+
+The agent-worker had been running with `FINANCEAGENT_CIPHER=local` (i.e., `local-aes-gcm-v1`). The local cipher produces a ciphertext string with a prefix such as `local:v1:...`. This string passes neither branch of `oneOf` (it is not a `CaptureResultBody` object, and it does not match `^vault:v\d+:`). The validator returned one error; the listener logged a generic WARN and returned without signaling the BPMN Receive Task. The Receive Task's 10-minute boundary timer then fired and routed to `engineeringEscalation`.
+
+This failure mode produced no exception, no nack, no DLQ entry, and no BPMN error boundary event — only a WARN log line that did not contain the envelopeId, making the post-mortem search difficult.
+
+### 14.2 The result listener does not decrypt — this was not obvious to either team
+
+The agent-worker team's initial hypothesis was that `KmsEnvelopeClient.decrypt()` was being called on the inbound result and throwing on the unrecognized cipher prefix. This is incorrect. `KmsEnvelopeClient.decrypt()` does guard on prefix (it rejects anything not starting with `vault:v1:`) and would throw a `KmsEnvelopeException` on a `local:v1:` ciphertext — but it is never called from `PayrollResultListener`. The result-listener path is:
+
+```
+onResult() → validate() → handleCapture()/handleSubmit() → signalWaitingExecution()
+```
+
+No decryption anywhere. The failure was upstream of deserialization.
+
+The asymmetry is intentional: Praxis encrypts the **outbound** capture-requests and submit-requests (via `KmsEnvelopeClient.encrypt()` in `PayrollServiceTaskDelegate`). Praxis does **not** decrypt the **inbound** results. Results either arrive in cleartext (no `encryption` block) or — in a future production scenario — the `result` field would be a `vault:v1:` ciphertext that Praxis passes opaquely into the BPMN process variables, to be consumed by a downstream delegate with access to the data key. Both sides must have an explicit shared understanding of this flow direction.
+
+### 14.3 The contract-api schema has an internal inconsistency (action required: agent-worker team)
+
+`Encryption.scheme` enum in all three payroll schemas (`payroll-capture-result.v1.json`, `payroll-submit-request.v1.json`, `payroll-submit-result.v1.json`) allows:
+```json
+{ "enum": ["vault-transit-v1", "local-aes-gcm-v1"] }
+```
+
+But the only allowed ciphertext string pattern in `result.oneOf` (and equivalently in submit schemas) is `^vault:v\d+:`. The `local-aes-gcm-v1` scheme entry is therefore useless: you can declare it in the `encryption` block, but any ciphertext it produces will fail schema validation. **This is a bug in the contract-api that must be fixed in `FinancialAgentFramework`.**
+
+Two acceptable resolutions:
+
+| Option | Change | Recommendation |
+|---|---|---|
+| **A — remove `local-aes-gcm-v1`** | Drop it from the enum. Dev mode = cleartext (no `encryption` block). | Preferred. Simpler, no ambiguity, Praxis can never decrypt a local cipher anyway. |
+| **B — add matching pattern** | Add `"^local:v\\d+:"` to `result.oneOf` in all three schemas. | Only if there is a real need for agent-worker-side local-dev encryption. Adds complexity. |
+
+Until this is fixed, any agent-worker run with `FINANCEAGENT_CIPHER=local` will silently fail at the Praxis validator on every result envelope.
+
+### 14.4 Dev mode must be documented as cleartext on both sides (action required: agent-worker team)
+
+Praxis defaults to `praxis.payroll.encryption.enabled=false`. When this flag is false, outbound envelopes have no `encryption` block and the `result`/`request` field is a plain JSON object. This is the correct behavior for local dev and staging, and is explicitly valid per the contract spec (§1 "cleartext mode").
+
+The agent-worker must match: result envelopes published in dev/staging should have no `encryption` block and a plain `CaptureResultBody` / `SubmitResultBody` in the `result`/`submitResult` field. The worker should document `FINANCEAGENT_CIPHER=none` (or remove the cipher flag entirely for local defaults) and keep it as the default until production KMS is confirmed provisioned and tested.
+
+### 14.5 envelopeId must appear at every drop point (fixed on Praxis side; action required: agent-worker team)
+
+The post-mortem search started with: "search for `envelopeId=19ab4e47-...` in Praxis logs". The result was nothing — because the drop occurred before deserialization, and the previous `validate()` WARN log only included `correlationId` (the AMQP `correlation-id` header, which carries the `businessKey`, not the `envelopeId`).
+
+**Fixed on Praxis side (2026-04-27):** `PayrollResultListener.onResult()` now extracts `envelopeId` from `envelope.envelope.envelopeId` in the raw payload map before any validation, and includes it in every WARN/INFO log on every code path — including all drop paths. A new early-exit path was also added: if `encryption.scheme = "local-aes-gcm-v1"`, a specific, actionable WARN is logged before schema validation:
+
+```
+WARN  : Inbound result uses local-aes-gcm-v1 encryption which Praxis cannot decrypt; dropping.
+        Reconfigure the agent-worker to send cleartext results in dev mode.
+        envelopeId=19ab4e47-... correlationId=2026-02::1051
+```
+
+**Required on agent-worker side:** the worker must similarly log `envelopeId` on every nack, discard, or error path. The §H.5 item "Correlation-ID (envelopeId / businessKey / issuerRunId) on every log line via MDC" already captures this — this incident confirms it is not optional. Any message the worker consumes and discards (duplicate, nack-to-DLQ, schema error on inbound request) must emit a log line that is `grep`-able by `envelopeId`.
+
+### 14.6 The BPMN escalation task name is ambiguous
+
+"Submission failed — engineering escalation" (`engineeringEscalation` user task, pool: `technical-operator`) fires on:
+- Any Receive Task timeout (capture OR any of the four submit Receive Tasks)
+- `aggregateStatus = FAILED` from the aggregator delegate
+
+In this incident, it was a **capture timeout** — not a submit failure. The name implies submission was attempted, which was not the case. Consider distinct task names per timeout origin (e.g. "Capture result not received — engineering escalation" vs "Submit result not received") or add a process variable `escalationReason` that the task description surfaces. Tracked as a backlog item; not blocking Phase 1.
+
+### 14.7 Summary: required actions per team
+
+**Agent-worker / `FinancialAgentFramework` (blocking):**
+
+| # | Action | Scope | Status |
+|---|---|---|---|
+| 1 | Fix the `Encryption.scheme` enum in all three payroll schemas — remove `local-aes-gcm-v1` or add a matching ciphertext pattern to `result.oneOf`. | `contract-api` | ✅ shipped rev 1.3 — `kms-envelope-v1` added; **`local-aes-gcm-v1` was retained**, not removed (an earlier draft of this row claimed it was removed; that was inaccurate). Retention is intentional: the worker still uses `LocalDevCipher` by default, and Praxis's §14.5 early-exit drop path covers the case where such an envelope reaches the result listener. The `result.oneOf` `^vault:v\d+:` pattern matches both schemes' wire format. |
+| 2 | Document and set `FINANCEAGENT_CIPHER=none` (or cleartext default) for local dev and staging. No `encryption` block on result envelopes in dev. | `agent-worker`, `common-lib` | ✅ shipped rev 1.2 — `CleartextCipher` added to `common-lib`; `EncryptedPayload.result: Object`; `FINANCEAGENT_CIPHER=none` activates cleartext path in `EnvelopeIo.defaultCipher()` |
+| 3 | Log `envelopeId` on every nack, discard, and error path in the worker's RabbitMQ consumer. | `agent-worker` | ✅ shipped rev 1.3 — `EnvelopeAwareErrorHandler` wired to both `@RabbitListener`s via `errorHandler = "envelopeAwareErrorHandler"`. Handles both within-method exceptions and deserialization failures; extracts `envelopeId` from raw message bytes before nacking to DLQ. |
+
+**Praxis (done as of 2026-04-27):**
+
+| # | Action | Status |
+|---|---|---|
+| 1 | Extract `envelopeId` from raw payload map before validation in `PayrollResultListener`. | ✅ shipped |
+| 2 | Log `envelopeId` in all WARN/drop paths in `PayrollResultListener`. | ✅ shipped |
+| 3 | Add early-exit + specific WARN for `local-aes-gcm-v1` encrypted inbound results. | ✅ shipped |
+| 4 | Document the encrypt-outbound / no-decrypt-inbound asymmetry in §A.3 and §E.1 of this doc. | ✅ done |

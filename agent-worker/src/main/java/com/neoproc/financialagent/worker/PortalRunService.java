@@ -93,8 +93,13 @@ public final class PortalRunService {
                           Map<String, String> extraBindings)
             throws IOException, InterruptedException {
 
-        PortalDescriptor descriptor = PortalDescriptorLoader.load(portalId);
-        PortalAdapter adapter = newAdapter(portalId);
+        boolean isCapture = submitRequest == null;
+        String captureDescriptorId = portalId + "-capture";
+        String descriptorId = isCapture && PortalDescriptorLoader.exists(captureDescriptorId)
+                ? captureDescriptorId
+                : portalId;
+        PortalDescriptor descriptor = PortalDescriptorLoader.load(descriptorId);
+        PortalAdapter adapter = newAdapter(portalId, isCapture);
 
         String firmId = extraBindings.getOrDefault("params.firmId", "1");
         CredentialsProvider credentialsProvider = buildCredentialsProvider(descriptor, firmId);
@@ -238,10 +243,10 @@ public final class PortalRunService {
 
     // --- adapter registry ---------------------------------------------------
 
-    static PortalAdapter newAdapter(String portalId) {
+    static PortalAdapter newAdapter(String portalId, boolean isCapture) {
         return switch (portalId) {
             case "mock-portal"  -> new MockPortalAdapter();
-            case "mock-payroll" -> new MockPayrollAdapter();
+            case "mock-payroll" -> isCapture ? new MockPayrollCaptureAdapter() : new MockPayrollAdapter();
             case "autoplanilla" -> new AutoplanillaAdapter();
             default -> throw new IllegalStateException(
                     "No PortalAdapter registered for portal: " + portalId);

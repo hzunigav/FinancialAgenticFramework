@@ -1,0 +1,28 @@
+{
+  "schema": "payroll-submit-request.v1",
+  "envelope": {
+    "envelopeId": "22222222-3333-4444-5555-666666666666",
+    "businessKey": "2026-01::1051",
+    "firmId": 1351,
+    "locale": "es",
+    "createdAt": "2026-04-27T20:11:30.000Z",
+    "issuer": "praxis-bpm/payroll-cycle",
+    "issuerRunId": "wfi-2751"
+  },
+  "task": {
+    "type": "PAYROLL_SUBMIT",
+    "operation": "SUBMIT_SALARIES",
+    "targetPortal": "mock-payroll",
+    "sourceCaptureEnvelopeId": "d9f5a846-fa8c-4078-aa22-2019cd2e2388"
+  },
+  "encryption": {
+    "scheme": "local-aes-gcm-v1",
+    "keyName": "payroll-firm-1351",
+    "keyVersion": 1,
+    "ciphertextField": "result"
+  },
+  "request": "vault:v1:abc123==",
+  "audit": {
+    "payloadSha256": "0000000000000000000000000000000000000000000000000000000000000001"
+  }
+}

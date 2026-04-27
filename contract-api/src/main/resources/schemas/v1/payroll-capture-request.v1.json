@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoproc.com/financialagent/schemas/payroll-capture-request.v1.json",
+  "title": "PayrollCaptureRequest v1",
+  "description": "Input envelope to a source-portal capture Service Task. Built by the BPM and consumed by the agent-worker capture adapter. Capture jobs are typically parameter-driven (envelope + task identify what to fetch); the optional request body carries portal-specific overrides when needed.",
+  "type": "object",
+  "required": ["schema", "envelope", "task"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "payroll-capture-request.v1" },
+
+    "envelope": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/envelope" },
+
+    "task": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/task" },
+
+    "encryption": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Encryption" },
+
+    "request": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "object" },
+        { "type": "string", "pattern": "^vault:v\\d+:" }
+      ],
+      "description": "Optional capture-side body. null/omitted when the envelope+task are sufficient (most cases). Object for portal-specific overrides; vault:vN:... when encrypted."
+    },
+
+    "audit": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Audit" }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "schema": "payroll-capture-result.v1",
+  "envelope": {
+    "envelopeId": "d9f5a846-fa8c-4078-aa22-2019cd2e2388",
+    "businessKey": "2026-01::1051",
+    "firmId": 1351,
+    "createdAt": "2026-04-27T20:11:28.337Z",
+    "issuer": "agent-worker/mock-payroll",
+    "issuerRunId": "20260427T201126-60dff"
+  },
+  "task": {
+    "type": "PAYROLL_CAPTURE",
+    "operation": "CAPTURE",
+    "sourcePortal": "mock-payroll"
+  },
+  "encryption": {
+    "scheme": "rot13-v0",
+    "keyName": "payroll-firm-1351",
+    "keyVersion": 1,
+    "ciphertextField": "result"
+  },
+  "result": "vault:v1:abc==",
+  "audit": { "payloadSha256": "00" }
+}

@@ -23,6 +23,13 @@
             <groupId>com.neoproc.financialagent</groupId>
             <artifactId>contract-api</artifactId>
         </dependency>
+        <!-- Declared directly so SchemaValidator (used by both listeners) is on the
+             runtime classpath; transitive resolution from contract-api was not
+             reaching spring-boot:run reliably. -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.microsoft.playwright</groupId>
             <artifactId>playwright</artifactId>

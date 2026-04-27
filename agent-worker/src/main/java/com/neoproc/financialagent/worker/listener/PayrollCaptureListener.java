@@ -2,13 +2,11 @@ package com.neoproc.financialagent.worker.listener;
 
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.contract.payroll.Audit;
+import com.neoproc.financialagent.contract.payroll.CaptureResultBody;
+import com.neoproc.financialagent.contract.payroll.CaptureTask;
 import com.neoproc.financialagent.contract.payroll.EnvelopeMeta;
-import com.neoproc.financialagent.contract.payroll.EnvelopeStatus;
-import com.neoproc.financialagent.contract.payroll.PayrollSubmitRequest;
-import com.neoproc.financialagent.contract.payroll.PayrollSubmitResult;
-import com.neoproc.financialagent.contract.payroll.RosterDiff;
-import com.neoproc.financialagent.contract.payroll.SubmitResultBody;
-import com.neoproc.financialagent.contract.payroll.SubmitTask;
+import com.neoproc.financialagent.contract.payroll.PayrollCaptureRequest;
+import com.neoproc.financialagent.contract.payroll.PayrollCaptureResult;
 import com.neoproc.financialagent.contract.validation.SchemaValidator;
 import com.neoproc.financialagent.worker.PortalRunService;
 import com.neoproc.financialagent.worker.RunOutcome;
@@ -24,6 +22,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -32,26 +31,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-/**
- * Consumes {@code payroll-submit-request.v1} messages from the
- * portal-keyed task queue, executes the portal interaction via
- * {@link PortalRunService}, and publishes a
- * {@code payroll-submit-result.v1} envelope to the results exchange.
- *
- * <p>Ack/nack semantics ({@code spring.rabbitmq.listener.simple.acknowledge-mode=auto}
- * + {@code default-requeue-rejected=false}):
- * <ul>
- *   <li>Listener returns normally → Spring acks (message removed from queue).</li>
- *   <li>Listener throws any exception → Spring nacks with requeue=false
- *       → message flows to DLQ. This only happens when even the error-result
- *       publish fails; all other failures produce a {@code FAILED} result
- *       envelope before acking.</li>
- * </ul>
- */
 @Component
-public class PayrollTaskListener {
+public class PayrollCaptureListener {
 
-    private static final Logger log = LoggerFactory.getLogger(PayrollTaskListener.class);
+    private static final Logger log = LoggerFactory.getLogger(PayrollCaptureListener.class);
 
     private final PortalRunService portalRunService;
     private final IdempotencyStore idempotencyStore;
@@ -66,33 +49,30 @@ public class PayrollTaskListener {
     @Value("${agent.worker.results-routing-key:}")
     private String resultsRoutingKey;
 
-    public PayrollTaskListener(PortalRunService portalRunService,
-                                IdempotencyStore idempotencyStore,
-                                RabbitTemplate rabbitTemplate) {
+    public PayrollCaptureListener(PortalRunService portalRunService,
+                                   IdempotencyStore idempotencyStore,
+                                   RabbitTemplate rabbitTemplate) {
         this.portalRunService = portalRunService;
         this.idempotencyStore = idempotencyStore;
         this.rabbitTemplate = rabbitTemplate;
     }
 
-    @RabbitListener(queues = "${agent.worker.submit-queue}",
+    @RabbitListener(queues = "${agent.worker.capture-queue}",
                     errorHandler = "envelopeAwareErrorHandler")
-    public void onSubmitRequest(PayrollSubmitRequest request, Message rawMessage) {
+    public void onCaptureRequest(PayrollCaptureRequest request, Message rawMessage) {
+        String envelopeId = request.envelope().envelopeId();
+        String businessKey = request.envelope().businessKey();
+
         setupMdc(request);
+        log.info("receive portalId={} envelopeId={}", portalId, envelopeId);
 
-        String envelopeId = null;
-        String businessKey = null;
         try {
-            envelopeId = request.envelope().envelopeId();
-            businessKey = request.envelope().businessKey();
-
-            // Defend against malformed envelopes from upstream — schema-validate the
-            // raw bytes (catches additionalProperties / enum violations that
+            // Defend against malformed envelopes from upstream — schema-validate
+            // the raw bytes (catches additionalProperties / enum violations that
             // lenient deserialization would silently drop).
-            SchemaValidator.validate(rawMessage.getBody(), SchemaValidator.SUBMIT_REQUEST);
+            SchemaValidator.validate(rawMessage.getBody(), SchemaValidator.CAPTURE_REQUEST);
 
-            log.info("receive portalId={} envelopeId={}", portalId, envelopeId);
-
-            PayrollSubmitResult result;
+            PayrollCaptureResult result;
 
             if (!idempotencyStore.tryRecord(envelopeId)) {
                 log.warn("duplicate envelopeId={} — acking without portal re-execution", envelopeId);
@@ -124,80 +104,65 @@ public class PayrollTaskListener {
 
     // -----------------------------------------------------------------------
 
-    private PayrollSubmitResult executeRun(PayrollSubmitRequest request)
-            throws Exception {
+    private PayrollCaptureResult executeRun(PayrollCaptureRequest request) throws Exception {
         Map<String, String> bindings = extractBindings(request);
-        RunOutcome outcome = portalRunService.run(portalId, request, bindings);
+        RunOutcome outcome = portalRunService.run(portalId, null, bindings);
 
-        Path resultFile = outcome.runDir().resolve("payroll-submit-result.v1.json");
+        Path resultFile = outcome.runDir().resolve("payroll-capture-result.v1.json");
         if (Files.exists(resultFile)) {
-            return EnvelopeIo.read(resultFile, PayrollSubmitResult.class);
+            return EnvelopeIo.read(resultFile, PayrollCaptureResult.class);
         }
-        // Capture-only adapters and SHADOW_HALT runs don't write a submit-result file.
         return buildMinimalResult(request, outcome.status());
     }
 
-    private void publishResult(PayrollSubmitResult result, String correlationId) {
-        // Schema-validate the outgoing envelope. A failure is a worker bug —
-        // we'd rather DLQ the message than send Praxis something it cannot
-        // correlate. The catch in onSubmitRequest will turn this into a
-        // FAILED result with category=SCHEMA_VIOLATION.
-        SchemaValidator.validate(result, SchemaValidator.SUBMIT_RESULT);
+    private void publishResult(PayrollCaptureResult result, String correlationId) {
+        // Schema-validate the outgoing envelope. Failure surfaces a producer
+        // bug at the wire boundary instead of letting Praxis silently reject.
+        SchemaValidator.validate(result, SchemaValidator.CAPTURE_RESULT);
         rabbitTemplate.convertAndSend(resultsExchange, resultsRoutingKey, result, msg -> {
             msg.getMessageProperties().setCorrelationId(correlationId);
             msg.getMessageProperties().setContentType("application/json");
-            msg.getMessageProperties().setType(PayrollSubmitResult.SCHEMA);
+            msg.getMessageProperties().setType(PayrollCaptureResult.SCHEMA);
             return msg;
         });
     }
 
-    /**
-     * Builds a {@code FAILED} result envelope for error and duplicate cases.
-     * Uses the same cipher path as normal runs so Praxis can always decrypt
-     * results uniformly.
-     */
-    private PayrollSubmitResult buildFailedResult(PayrollSubmitRequest request,
-                                                   String category,
-                                                   String message) {
-        SubmitResultBody body = new SubmitResultBody(
-                EnvelopeStatus.FAILED,
-                null, zeroTotals(), List.of(),
-                new RosterDiff(List.of(), List.of()),
-                new SubmitResultBody.ErrorDetail(
-                        PayrollTaskListener.class.getName(), category, message),
-                null);
-        return wrapResult(request, body);
+    private PayrollCaptureResult buildFailedResult(PayrollCaptureRequest request,
+                                                    String category,
+                                                    String message) {
+        log.warn("capture failed category={} message={}", category, message);
+        return wrapResult(request, new CaptureResultBody("FAILED", zeroTotals(), List.of()));
     }
 
-    private PayrollSubmitResult buildMinimalResult(PayrollSubmitRequest request, String status) {
-        SubmitResultBody body = new SubmitResultBody(
-                status, null, zeroTotals(), List.of(),
-                new RosterDiff(List.of(), List.of()), null, null);
-        return wrapResult(request, body);
+    private PayrollCaptureResult buildMinimalResult(PayrollCaptureRequest request, String status) {
+        return wrapResult(request, new CaptureResultBody(status, zeroTotals(), List.of()));
     }
 
-    // Schema requires totals; null fails validation. Zero placeholder for
-    // FAILED/minimal envelopes that don't have real reconciliation data.
-    private static SubmitResultBody.Totals zeroTotals() {
-        return new SubmitResultBody.Totals("CRC", java.math.BigDecimal.ZERO, 0);
+    // Schema requires totals to be a fully-populated object; null totals fails
+    // validation even on FAILED envelopes. Zero placeholder is the minimum that
+    // round-trips through validate-on-publish.
+    private static CaptureResultBody.Totals zeroTotals() {
+        return new CaptureResultBody.Totals("CRC", BigDecimal.ZERO, null, 0);
     }
 
-    private PayrollSubmitResult wrapResult(PayrollSubmitRequest request, SubmitResultBody body) {
+    private PayrollCaptureResult wrapResult(PayrollCaptureRequest request, CaptureResultBody body) {
         long firmId = request.envelope().firmId();
         EnvelopeCipher cipher = EnvelopeIo.defaultCipher();
         EnvelopeIo.EncryptedPayload encrypted = EnvelopeIo.encryptBody(body, cipher, firmId);
 
-        SubmitTask task = request.task() != null
+        CaptureTask task = request.task() != null
                 ? request.task()
-                : SubmitTask.forSalaries(portalId, null, null, null);
+                : CaptureTask.of(portalId, null, null);
 
-        return new PayrollSubmitResult(
-                PayrollSubmitResult.SCHEMA,
+        String locale = request.envelope().locale() != null ? request.envelope().locale() : "es";
+
+        return new PayrollCaptureResult(
+                PayrollCaptureResult.SCHEMA,
                 new EnvelopeMeta(
                         UUID.randomUUID().toString(),
                         request.envelope().businessKey(),
                         firmId,
-                        request.envelope().locale(),
+                        locale,
                         Instant.now(),
                         "agent-worker/" + portalId,
                         request.envelope().issuerRunId()),
@@ -209,16 +174,16 @@ public class PayrollTaskListener {
 
     // -----------------------------------------------------------------------
 
-    private static Map<String, String> extractBindings(PayrollSubmitRequest request) {
+    private static Map<String, String> extractBindings(PayrollCaptureRequest request) {
         EnvelopeMeta env = request.envelope();
         Map<String, String> b = new LinkedHashMap<>();
         b.put("params.firmId", String.valueOf(env.firmId()));
         if (env.businessKey() != null)  b.put("params.businessKey", env.businessKey());
         if (env.issuerRunId() != null)  b.put("params.issuerRunId", env.issuerRunId());
-        SubmitTask task = request.task();
+        CaptureTask task = request.task();
         if (task != null) {
-            if (task.clientIdentifier() != null)
-                b.put("params.clientIdentifier", task.clientIdentifier());
+            if (task.sourcePortal() != null)
+                b.put("params.sourcePortal", task.sourcePortal());
             if (task.period() != null) {
                 b.put("params.from", task.period().from().toString());
                 b.put("params.to",   task.period().to().toString());
@@ -229,7 +194,7 @@ public class PayrollTaskListener {
         return b;
     }
 
-    private static void setupMdc(PayrollSubmitRequest request) {
+    private static void setupMdc(PayrollCaptureRequest request) {
         EnvelopeMeta env = request.envelope();
         if (env == null) return;
         if (env.issuerRunId() != null) MDC.put("issuerRunId", env.issuerRunId());
@@ -238,8 +203,8 @@ public class PayrollTaskListener {
         if (env.envelopeId() != null)  MDC.put("envelopeId", env.envelopeId());
     }
 
-    private static String extractStatus(PayrollSubmitResult result) {
-        if (result.result() instanceof SubmitResultBody body) return body.status();
+    private static String extractStatus(PayrollCaptureResult result) {
+        if (result.result() instanceof CaptureResultBody body) return body.status();
         return "ENCRYPTED";
     }
 }

@@ -126,4 +126,4 @@ mvn -pl agent-worker exec:java \
   -Dfixture.capture=true
 ```
 
-The resulting `artifacts/<runId>/fixtures/<portalId>-post-steps.html` is the fully-rendered DOM at scrape time. Copy it into `agent-worker/src/test/resources/fixtures/<portalId>/` and write a JUnit test using [DescriptorFixture](agent-worker/src/test/java/com/neoproc/financialagent/worker/portal/DescriptorFixture.java) to assert the scrape values. That test then catches future selector regressions without needing the portal available.
+The resulting `artifacts/<runId>/fixtures/<portalId>-post-steps.html` is the fully-rendered DOM at scrape time. Copy it into `agent-worker/src/test/resources/fixtures/<portalId>/` and write a JUnit test using [DescriptorFixture](../agent-worker/src/test/java/com/neoproc/financialagent/worker/portal/DescriptorFixture.java) to assert the scrape values. That test then catches future selector regressions without needing the portal available.

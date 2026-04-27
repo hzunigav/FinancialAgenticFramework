@@ -1,0 +1,36 @@
+{
+  "schema": "payroll-capture-result.v1",
+  "envelope": {
+    "envelopeId": "d9f5a846-fa8c-4078-aa22-2019cd2e2388",
+    "businessKey": "2026-01::1051",
+    "firmId": 1351,
+    "locale": "es",
+    "createdAt": "2026-04-27T20:11:28.337Z",
+    "issuer": "agent-worker/mock-payroll",
+    "issuerRunId": "20260427T201126-60dff"
+  },
+  "task": {
+    "type": "PAYROLL_CAPTURE",
+    "operation": "CAPTURE",
+    "sourcePortal": "mock-payroll",
+    "period": { "from": "2026-01-01", "to": "2026-01-31" },
+    "planilla": { "id": null, "name": "Planilla Enero 2026" }
+  },
+  "result": {
+    "status": "SUCCESS",
+    "totals": {
+      "currency": "CRC",
+      "grossSalaries": "13870000.00",
+      "renta": "0.00",
+      "employeeCount": 15
+    },
+    "employees": [
+      { "id": "E-001", "displayName": "Ada Lovelace",      "grossSalary": "1000000.00" },
+      { "id": "E-002", "displayName": "Alan Turing",        "grossSalary": "1200000.00" }
+    ]
+  },
+  "audit": {
+    "manifestPath": "manifest.json",
+    "payloadSha256": "4d241d56e6e02cb89ea47066a6264ccdd599d6579aefae15e108a42cd3b74b01"
+  }
+}

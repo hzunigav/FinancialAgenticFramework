@@ -24,9 +24,11 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class RabbitMqConfig {
 
-    /** Injected from {@code agent.worker.submit-queue} → {@code financeagent.tasks.submit.<portalId>}. */
     @Value("${agent.worker.submit-queue}")
     private String submitQueueName;
+
+    @Value("${agent.worker.capture-queue}")
+    private String captureQueueName;
 
     // -----------------------------------------------------------------------
     // Submit queue (per-portal, durable, TTL 1 h, routes stale/failed to DLQ)
@@ -36,7 +38,13 @@ public class RabbitMqConfig {
     Queue submitQueue() {
         return QueueBuilder.durable(submitQueueName)
                 .deadLetterExchange("financeagent.dlx")
-                .ttl(3_600_000)   // 1 h — stale messages are a data hazard
+                .build();
+    }
+
+    @Bean
+    Queue captureQueue() {
+        return QueueBuilder.durable(captureQueueName)
+                .deadLetterExchange("financeagent.dlx")
                 .build();
     }
 
@@ -49,6 +57,12 @@ public class RabbitMqConfig {
     Binding submitQueueBinding(Queue submitQueue, DirectExchange tasksExchange,
                                 @Value("${portal.id}") String portalId) {
         return BindingBuilder.bind(submitQueue).to(tasksExchange).with("submit." + portalId);
+    }
+
+    @Bean
+    Binding captureQueueBinding(Queue captureQueue, DirectExchange tasksExchange,
+                                 @Value("${portal.id}") String portalId) {
+        return BindingBuilder.bind(captureQueue).to(tasksExchange).with("capture." + portalId);
     }
 
     // -----------------------------------------------------------------------

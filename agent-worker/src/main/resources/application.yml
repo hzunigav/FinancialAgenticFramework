@@ -22,6 +22,7 @@ agent:
   worker:
     artifacts-dir: ${ARTIFACTS_DIR:artifacts}
     submit-queue: financeagent.tasks.submit.${portal.id}
+    capture-queue: financeagent.tasks.capture.${portal.id}
     results-exchange: financeagent.results
     results-routing-key: ""
 
@@ -33,11 +34,11 @@ management:
   endpoint:
     health:
       show-details: always
-  metrics:
-    export:
-      prometheus:
+  prometheus:
+    metrics:
+      export:
         enabled: true
 
 logging:
   level:
-    com.neoproc.financialagent: INFO
+    "[com.neoproc.financialagent]": INFO

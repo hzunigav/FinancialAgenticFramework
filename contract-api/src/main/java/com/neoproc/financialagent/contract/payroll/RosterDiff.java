@@ -1,5 +1,6 @@
 package com.neoproc.financialagent.contract.payroll;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.math.BigDecimal;
@@ -23,6 +24,10 @@ public record RosterDiff(
         missingFromPayroll = missingFromPayroll == null ? List.of() : List.copyOf(missingFromPayroll);
     }
 
+    // Without @JsonIgnore, Jackson treats this as a getter for a boolean
+    // property "empty" and serializes it — which the schema's
+    // additionalProperties:false on roster_diff then rejects on validate.
+    @JsonIgnore
     public boolean isEmpty() {
         return missingFromPortal.isEmpty() && missingFromPayroll.isEmpty();
     }

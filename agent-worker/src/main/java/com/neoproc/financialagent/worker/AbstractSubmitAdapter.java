@@ -128,7 +128,7 @@ abstract class AbstractSubmitAdapter extends BaseAdapter {
                 envelope,
                 task,
                 encrypted.meta(),
-                encrypted.ciphertext(),
+                encrypted.result(),
                 audit);
 
         Path envelopeFile = runDir.resolve("payroll-submit-result.v1.json");

@@ -26,29 +26,39 @@
 
     "task": {
       "type": "object",
-      "required": ["type", "operation", "sourcePortal", "period", "planilla"],
+      "required": ["type", "operation", "sourcePortal"],
       "additionalProperties": false,
       "properties": {
         "type":         { "const": "PAYROLL_CAPTURE" },
         "operation":    { "type": "string", "enum": ["CAPTURE"] },
         "sourcePortal": { "type": "string", "minLength": 1 },
         "period": {
-          "type": "object",
-          "required": ["from", "to"],
-          "additionalProperties": false,
-          "properties": {
-            "from": { "type": "string", "format": "date" },
-            "to":   { "type": "string", "format": "date" }
-          }
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["from", "to"],
+              "additionalProperties": false,
+              "properties": {
+                "from": { "type": "string", "format": "date" },
+                "to":   { "type": "string", "format": "date" }
+              }
+            }
+          ]
         },
         "planilla": {
-          "type": "object",
-          "required": ["name"],
-          "additionalProperties": false,
-          "properties": {
-            "id":   { "type": ["string", "null"] },
-            "name": { "type": "string", "minLength": 1 }
-          }
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["name"],
+              "additionalProperties": false,
+              "properties": {
+                "id":   { "type": ["string", "null"] },
+                "name": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
         }
       }
     },
@@ -66,6 +76,13 @@
   },
 
   "$defs": {
+    "Money": {
+      "description": "Monetary value. Accepts either a JSON string (canonical wire form, e.g. '13870000.00') or a JSON number (Jackson default for BigDecimal). Both are equivalent on the wire; consumers should treat them as decimal.",
+      "oneOf": [
+        { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+        { "type": "number" }
+      ]
+    },
     "CaptureResultBody": {
       "type": "object",
       "required": ["status", "totals", "employees"],
@@ -78,8 +95,14 @@
           "additionalProperties": false,
           "properties": {
             "currency":       { "type": "string", "pattern": "^[A-Z]{3}$" },
-            "grossSalaries":  { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
-            "renta":          { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+            "grossSalaries":  { "$ref": "#/$defs/Money" },
+            "renta":          {
+              "description": "Income tax withheld. Null when the source portal does not report renta (e.g. mock-payroll, some legacy portals); always populated for AutoPlanilla captures.",
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "#/$defs/Money" }
+              ]
+            },
             "employeeCount":  { "type": "integer", "minimum": 0 }
           }
         },
@@ -92,7 +115,7 @@
             "properties": {
               "id":          { "type": "string", "minLength": 1 },
               "displayName": { "type": "string", "minLength": 1 },
-              "grossSalary": { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+              "grossSalary": { "$ref": "#/$defs/Money" },
               "attributes":  { "type": "object", "additionalProperties": { "type": "string" } }
             }
           }
@@ -105,7 +128,7 @@
       "required": ["scheme", "keyName", "keyVersion", "ciphertextField"],
       "additionalProperties": false,
       "properties": {
-        "scheme":          { "type": "string", "enum": ["vault-transit-v1", "local-aes-gcm-v1"] },
+        "scheme":          { "type": "string", "enum": ["vault-transit-v1", "kms-envelope-v1", "local-aes-gcm-v1"] },
         "keyName":         { "type": "string", "minLength": 1 },
         "keyVersion":      { "type": "integer", "minimum": 1 },
         "ciphertextField": { "type": "string", "enum": ["result"] }

@@ -1,0 +1,32 @@
+{
+  "schema": "payroll-capture-result.v1",
+  "envelope": {
+    "envelopeId": "d9f5a846-fa8c-4078-aa22-2019cd2e2388",
+    "businessKey": "2026-01::1051",
+    "firmId": 1351,
+    "locale": "es",
+    "createdAt": "2026-04-27T20:11:28.337Z",
+    "issuer": "agent-worker/mock-payroll",
+    "issuerRunId": "20260427T201126-60dff"
+  },
+  "task": {
+    "type": "PAYROLL_CAPTURE",
+    "operation": "CAPTURE",
+    "sourcePortal": "mock-payroll",
+    "period": null,
+    "planilla": null
+  },
+  "encryption": {
+    "scheme": "local-aes-gcm-v1",
+    "keyName": "payroll-firm-1351",
+    "keyVersion": 1,
+    "ciphertextField": "result"
+  },
+  "result": "vault:v1:QCpts8sJvdy5g3KIl4EKLmDPuMsiGRIZrmSum8eN9CwH",
+  "audit": {
+    "manifestPath": "manifest.json",
+    "harSha256": null,
+    "screenshotSha256": null,
+    "payloadSha256": "4d241d56e6e02cb89ea47066a6264ccdd599d6579aefae15e108a42cd3b74b01"
+  }
+}

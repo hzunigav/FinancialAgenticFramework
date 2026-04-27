@@ -1,0 +1,23 @@
+{
+  "schema": "payroll-capture-request.v1",
+  "envelope": {
+    "envelopeId": "11111111-2222-3333-4444-555555555555",
+    "businessKey": "2026-01::1051",
+    "firmId": 1351,
+    "locale": "es",
+    "createdAt": "2026-04-27T20:11:26.000Z",
+    "issuer": "praxis-bpm/payroll-cycle",
+    "issuerRunId": "wfi-2751"
+  },
+  "task": {
+    "type": "PAYROLL_CAPTURE",
+    "operation": "CAPTURE",
+    "sourcePortal": "mock-payroll"
+  },
+  "audit": {
+    "manifestPath": null,
+    "harSha256": null,
+    "screenshotSha256": null,
+    "payloadSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

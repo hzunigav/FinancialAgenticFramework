@@ -121,7 +121,7 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 
 ### Descriptor DSL: `when`, `expect`, `while`
 
-**Shipped:** conditional branches, assertions, and pagination loops are now declarative. `when` / `expect` / `while` added to [PortalEngine](agent-worker/src/main/java/com/neoproc/financialagent/worker/portal/PortalEngine.java) with 9 new tests in [PortalEngineControlFlowTest](agent-worker/src/test/java/com/neoproc/financialagent/worker/portal/PortalEngineControlFlowTest.java). Unblocks Phase 2 portal authoring — CCSS/INS/Hacienda can now handle ToS prompts, post-submit assertions, and paginated result sets without adapter-side Java forks.
+**Shipped:** conditional branches, assertions, and pagination loops are now declarative. `when` / `expect` / `while` added to [PortalEngine](../agent-worker/src/main/java/com/neoproc/financialagent/worker/portal/PortalEngine.java) with 9 new tests in [PortalEngineControlFlowTest](../agent-worker/src/test/java/com/neoproc/financialagent/worker/portal/PortalEngineControlFlowTest.java). Unblocks Phase 2 portal authoring — CCSS/INS/Hacienda can now handle ToS prompts, post-submit assertions, and paginated result sets without adapter-side Java forks.
 
 **Not shipped (deferred):** per-step `timeoutMs` / `retries` overrides. Lower priority; revisit when a specific Phase 2 portal needs a non-default timeout.
 
@@ -129,7 +129,7 @@ Each entry is sized and motivated in under a paragraph. If an entry is trivially
 
 ### `AbstractCaptureAdapter` / `AbstractSubmitAdapter` base classes
 
-**Shipped:** envelope plumbing (metadata, encryption, audit hashing, file write) extracted into two abstract templates; common helpers into `BaseAdapter`. Concrete adapters now implement one hook (`buildCaptureOutcome` or `buildSubmitOutcome`). [AutoplanillaAdapter](agent-worker/src/main/java/com/neoproc/financialagent/worker/AutoplanillaAdapter.java) shrank from 132 to 73 lines (45% reduction); [MockPayrollAdapter](agent-worker/src/main/java/com/neoproc/financialagent/worker/MockPayrollAdapter.java) from 381 to 334 (envelope boilerplate gone — the remaining lines are genuine adapter logic). New Phase 2 adapters land at ~50-100 lines each rather than copying envelope plumbing per portal.
+**Shipped:** envelope plumbing (metadata, encryption, audit hashing, file write) extracted into two abstract templates; common helpers into `BaseAdapter`. Concrete adapters now implement one hook (`buildCaptureOutcome` or `buildSubmitOutcome`). [AutoplanillaAdapter](../agent-worker/src/main/java/com/neoproc/financialagent/worker/AutoplanillaAdapter.java) shrank from 132 to 73 lines (45% reduction); [MockPayrollAdapter](../agent-worker/src/main/java/com/neoproc/financialagent/worker/MockPayrollAdapter.java) from 381 to 334 (envelope boilerplate gone — the remaining lines are genuine adapter logic). New Phase 2 adapters land at ~50-100 lines each rather than copying envelope plumbing per portal.
 
 ---
 

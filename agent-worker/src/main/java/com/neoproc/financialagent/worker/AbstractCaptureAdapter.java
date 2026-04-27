@@ -124,7 +124,7 @@ abstract class AbstractCaptureAdapter extends BaseAdapter {
                 envelope,
                 task,
                 encrypted.meta(),
-                encrypted.ciphertext(),
+                encrypted.result(),
                 audit);
 
         Path envelopeFile = runDir.resolve("payroll-capture-result.v1.json");

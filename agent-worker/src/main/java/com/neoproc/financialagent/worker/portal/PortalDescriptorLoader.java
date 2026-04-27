@@ -12,6 +12,10 @@ public final class PortalDescriptorLoader {
 
     private PortalDescriptorLoader() {}
 
+    public static boolean exists(String portalId) {
+        return PortalDescriptorLoader.class.getResource("/portals/" + portalId + ".yaml") != null;
+    }
+
     public static PortalDescriptor load(String portalId) throws IOException {
         String path = "/portals/" + portalId + ".yaml";
         try (InputStream in = PortalDescriptorLoader.class.getResourceAsStream(path)) {

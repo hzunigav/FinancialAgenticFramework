@@ -1,0 +1,44 @@
+id: mock-payroll-capture
+description: Capture-side read of the mock payroll harness — login, navigate to /employees, scrape current roster.
+baseUrl: http://localhost:3000
+
+shadowMode: false
+credentialScope: per-firm
+
+session:
+  ttlMinutes: 5
+
+authSteps:
+  - action: navigate
+    target: /login
+  - action: fill
+    selector: "input[name='username']"
+    value: "${credentials.username}"
+  - action: fill
+    selector: "input[name='password']"
+    value: "${credentials.password}"
+    redact: true
+  - action: click
+    selector: "button[type='submit']"
+  - action: waitForUrl
+    target: "**/report"
+
+steps:
+  - action: navigate
+    target: /employees
+  - action: waitForSelector
+    selector: "tr.employee-row"
+
+scrape:
+  fields: []
+  rows:
+    selector: "tr.employee-row"
+    columns:
+      id: ".id-cell"
+      name: ".name-cell"
+      currentSalary: "value:input.salary-input"
+
+securityContext:
+  scrubHarFields:
+    - urlPattern: "**/login"
+      bodyFields: [password]

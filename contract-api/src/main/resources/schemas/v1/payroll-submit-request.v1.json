@@ -4,7 +4,7 @@
   "title": "PayrollSubmitRequest v1",
   "description": "Input envelope to a target-portal submit Service Task (CCSS Sicere, INS RT-Virtual, Hacienda OVI, mock-payroll). Built by the BPM by composing the capture result with a target-portal flag. Consumed by the agent-worker's adapter.beforeSteps.",
   "type": "object",
-  "required": ["schema", "envelope", "task", "request", "audit"],
+  "required": ["schema", "envelope", "task", "request"],
   "additionalProperties": false,
   "properties": {
     "schema": { "const": "payroll-submit-request.v1" },
@@ -13,7 +13,7 @@
 
     "task": {
       "type": "object",
-      "required": ["type", "operation", "targetPortal", "period", "planilla"],
+      "required": ["type", "operation", "targetPortal"],
       "additionalProperties": false,
       "properties": {
         "type":         { "const": "PAYROLL_SUBMIT" },
@@ -55,7 +55,7 @@
             "properties": {
               "id":          { "type": "string", "minLength": 1 },
               "displayName": { "type": "string", "minLength": 1 },
-              "salary":      { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+              "salary":      { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" },
               "attributes":  { "type": "object", "additionalProperties": { "type": "string" } }
             }
           }

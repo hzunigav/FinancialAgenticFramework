@@ -86,7 +86,7 @@ Sequencing: **Tracks A, B, C start in parallel.** Track C's *infrastructure stan
 
 This replaces the earlier Vault-based design. KMS provides the per-firm encryption primitive (same role as Vault's `transit` engine); Secrets Manager holds portal credentials at the same path layout originally planned for Vault `kv-v2`. IAM task roles replace AppRole authentication — no token lifecycle, no `secret_id` to rotate.
 
-**Why the change:** at our scale HCP Vault Plus is ~$700–1400/mo; KMS + Secrets Manager covers the same primitives at ~$15–90/mo and removes a managed-service dependency. See [CONTRACT.md §4](contract-api/CONTRACT.md#4-encryption) for the full encryption spec.
+**Why the change:** at our scale HCP Vault Plus is ~$700–1400/mo; KMS + Secrets Manager covers the same primitives at ~$15–90/mo and removes a managed-service dependency. See [CONTRACT.md §4](../contract-api/CONTRACT.md#4-encryption) for the full encryption spec.
 
 ### B.1 KMS — no upfront keys
 

@@ -2,6 +2,8 @@
 
 How to add a new portal to the framework — from *"here's a URL I want to scrape"* to *"the agent is pulling data from it **on my local machine**."*
 
+**Before recording selectors:** read [WorkerActionTypes.md](WorkerActionTypes.md) first to identify whether you're building an Input (capture), Output (submit), or Analysis action — the action type determines which base class, descriptor shape, and registry entry the portal needs. Come back here once you know what you're building.
+
 **Scope:** this doc covers local descriptor development. Once the descriptor runs cleanly against the real portal from a developer's workstation, production rollout (worker image build, Vault credential provisioning, BPMN wiring, staging rehearsal) is covered separately in [PortalDeployment.md](PortalDeployment.md).
 
 The manual work is a one-shot recording session on your machine using Playwright Codegen. Everything after that is small iteration between you and the agent. This guide is reusable across portals; a worked example (AutoPlanilla) is at the bottom.
@@ -164,9 +166,9 @@ When the descriptor runs cleanly locally and has fixture-test coverage, the prod
 
 Produced during M3a scaffolding. Files to look at:
 
-- [agent-worker/src/main/resources/portals/autoplanilla.yaml](agent-worker/src/main/resources/portals/autoplanilla.yaml) — the descriptor, still `TODO`-marked where codegen hasn't filled in selectors yet.
-- [agent-worker/src/main/java/com/financialagent/worker/AutoplanillaAdapter.java](agent-worker/src/main/java/com/financialagent/worker/AutoplanillaAdapter.java) — the adapter: how scraped strings become a typed `PayrollSummary` on the manifest.
-- [agent-worker/src/main/java/com/financialagent/worker/portal/AutoplanillaMapper.java](agent-worker/src/main/java/com/financialagent/worker/portal/AutoplanillaMapper.java) — the parser for Costa Rica currency and pagination text, with [unit tests](agent-worker/src/test/java/com/financialagent/worker/portal/AutoplanillaMapperTest.java) covering the formats.
-- [common-lib/src/main/java/com/financialagent/common/domain/PayrollSummary.java](common-lib/src/main/java/com/financialagent/common/domain/PayrollSummary.java) — the typed record the adapter emits.
+- [agent-worker/src/main/resources/portals/autoplanilla.yaml](../agent-worker/src/main/resources/portals/autoplanilla.yaml) — the descriptor, still `TODO`-marked where codegen hasn't filled in selectors yet.
+- [agent-worker/src/main/java/com/financialagent/worker/AutoplanillaAdapter.java](../agent-worker/src/main/java/com/financialagent/worker/AutoplanillaAdapter.java) — the adapter: how scraped strings become a typed `PayrollSummary` on the manifest.
+- [agent-worker/src/main/java/com/financialagent/worker/portal/AutoplanillaMapper.java](../agent-worker/src/main/java/com/financialagent/worker/portal/AutoplanillaMapper.java) — the parser for Costa Rica currency and pagination text, with [unit tests](../agent-worker/src/test/java/com/financialagent/worker/portal/AutoplanillaMapperTest.java) covering the formats.
+- [common-lib/src/main/java/com/financialagent/common/domain/PayrollSummary.java](../common-lib/src/main/java/com/financialagent/common/domain/PayrollSummary.java) — the typed record the adapter emits.
 
 Four files per portal: descriptor (YAML), adapter (Java, one class), mapper if parsing is non-trivial (Java, one class + a test class), domain record (Java, `common-lib`). The generic pieces — engine, credentials provider, session store, Read-Back verifier, HAR scrubber — don't change per portal.

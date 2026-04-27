@@ -62,8 +62,10 @@
           "additionalProperties": false,
           "properties": {
             "currency":   { "type": "string", "pattern": "^[A-Z]{3}$" },
-            "grandTotal": { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$",
-                            "description": "Post-submit grand total visible on the portal (sum of all salaries, changed and unchanged). Reconciles against the sum of all salaries pulled from the source-of-truth; any drift flips the run to MISMATCH, with rosterDiff naming the employees that explain the gap." },
+            "grandTotal": {
+              "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money",
+              "description": "Post-submit grand total visible on the portal (sum of all salaries, changed and unchanged). Reconciles against the sum of all salaries pulled from the source-of-truth; any drift flips the run to MISMATCH, with rosterDiff naming the employees that explain the gap."
+            },
             "updatedCount": { "type": "integer", "minimum": 0,
                               "description": "Diagnostic: how many rows the agent actually changed on this submit. Not used for reconciliation." }
           }
@@ -79,7 +81,7 @@
             "properties": {
               "id":          { "type": "string" },
               "displayName": { "type": "string" },
-              "salary":      { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" }
+              "salary":      { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
             }
           }
         },
@@ -100,7 +102,7 @@
                 "properties": {
                   "id":             { "type": "string" },
                   "name":           { "type": "string" },
-                  "expectedSalary": { "type": "string", "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+                  "expectedSalary": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" },
                   "attributes":     { "type": "object", "additionalProperties": { "type": "string" } }
                 }
               }
@@ -115,7 +117,12 @@
                 "properties": {
                   "id":              { "type": "string" },
                   "displayName":     { "type": "string" },
-                  "lastKnownSalary": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" }
+                  "lastKnownSalary": {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
+                    ]
+                  }
                 }
               }
             }
@@ -127,9 +134,52 @@
           "description": "Populated when status=FAILED. Engineering escalation path uses this to triage.",
           "additionalProperties": false,
           "properties": {
-            "errorClass":   { "type": "string", "enum": ["TRANSIENT", "PERMANENT"] },
-            "category":     { "type": "string", "enum": ["NETWORK", "SELECTOR", "CREDENTIALS", "PORTAL_REJECTED", "OTHER"] },
+            "errorClass":   { "type": "string",
+                              "description": "Either a coarse classification (TRANSIENT|PERMANENT) or the fully-qualified Java class of the originating component, depending on producer." },
+            "category":     { "type": "string",
+                              "enum": ["NETWORK", "SELECTOR", "CREDENTIALS", "PORTAL_REJECTED",
+                                       "DUPLICATE_ENVELOPE", "UNCAUGHT_EXCEPTION", "SCHEMA_VIOLATION",
+                                       "OTHER"] },
             "message":      { "type": "string" }
+          }
+        },
+
+        "review": {
+          "type": ["object", "null"],
+          "description": "Populated for MISMATCH/PARTIAL runs. Renders in the Praxis HITL task form: signals shown grouped by type, allowedActions rendered as buttons.",
+          "additionalProperties": false,
+          "required": ["severity", "summary"],
+          "properties": {
+            "severity":       { "type": "string", "enum": ["INFO", "WARN", "ERROR"] },
+            "summary":        { "type": "string" },
+            "signals":        {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type"],
+                "properties": {
+                  "type":            { "type": "string",
+                                       "enum": ["TOTAL_GAP", "MISSING_FROM_PORTAL", "MISSING_FROM_PAYROLL"] },
+                  "canonical":       { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+                  "portal":          { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+                  "gap":             { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+                  "id":              { "type": ["string", "null"] },
+                  "name":            { "type": ["string", "null"] },
+                  "expectedSalary":  { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+                  "lastKnownSalary": {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
+                    ]
+                  }
+                }
+              }
+            },
+            "allowedActions": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
           }
         }
       }

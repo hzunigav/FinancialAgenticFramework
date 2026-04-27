@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.neoproc.financialagent.common.crypto.CleartextCipher;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.common.crypto.KmsEnvelopeCipher;
 import com.neoproc.financialagent.common.crypto.LocalDevCipher;
@@ -27,6 +28,9 @@ import java.util.HexFormat;
  * <ul>
  *   <li>{@code FINANCEAGENT_CIPHER=kms} → {@link KmsEnvelopeCipher} (production, AWS KMS).</li>
  *   <li>{@code FINANCEAGENT_CIPHER=vault} → {@link VaultTransitCipher} (throws until wired).</li>
+ *   <li>{@code FINANCEAGENT_CIPHER=none} → {@link CleartextCipher}: skips encryption entirely;
+ *       {@code encryption} block is omitted and {@code result} is the plain body object.
+ *       Use when Praxis runs with {@code praxis.payroll.encryption.enabled=false}.</li>
  *   <li>{@code FINANCEAGENT_CIPHER=local} or unset → {@link LocalDevCipher}
  *       with key dir at {@code ~/.financeagent/cipher-keys/}.</li>
  * </ul>
@@ -51,6 +55,9 @@ public final class EnvelopeIo {
         }
         if ("vault".equalsIgnoreCase(which)) {
             return new VaultTransitCipher();
+        }
+        if ("none".equalsIgnoreCase(which)) {
+            return new CleartextCipher();
         }
         return new LocalDevCipher();
     }
@@ -81,6 +88,9 @@ public final class EnvelopeIo {
      */
     public static EncryptedPayload encryptBody(Object body, EnvelopeCipher cipher, long firmId) {
         String json = serialize(body);
+        if ("none".equals(cipher.schemeName())) {
+            return new EncryptedPayload(null, body, sha256Hex(json));
+        }
         String keyName = "payroll-firm-" + firmId;
         String ciphertext = cipher.encrypt(json, keyName);
         int keyVersion = parseKeyVersion(ciphertext);
@@ -131,5 +141,5 @@ public final class EnvelopeIo {
         return Integer.parseInt(vaultCiphertext.substring(vIdx, colon));
     }
 
-    public record EncryptedPayload(Encryption meta, String ciphertext, String payloadSha256) {}
+    public record EncryptedPayload(Encryption meta, Object result, String payloadSha256) {}
 }

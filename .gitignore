@@ -39,4 +39,5 @@ Thumbs.db
 # Audit artifacts (per-run agent bundles + portal access logs)
 agent-worker/artifacts/
 artifacts/
+logs/
 testing-harness/logs/

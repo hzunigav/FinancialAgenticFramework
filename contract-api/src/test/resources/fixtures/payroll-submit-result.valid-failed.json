@@ -1,0 +1,31 @@
+{
+  "schema": "payroll-submit-result.v1",
+  "envelope": {
+    "envelopeId": "44444444-5555-6666-7777-888888888888",
+    "businessKey": "2026-01::1051",
+    "firmId": 1351,
+    "locale": "es",
+    "createdAt": "2026-04-27T20:11:36.000Z",
+    "issuer": "agent-worker/mock-payroll",
+    "issuerRunId": "20260427T201136-bbbbb"
+  },
+  "task": {
+    "type": "PAYROLL_SUBMIT",
+    "operation": "SUBMIT_SALARIES",
+    "targetPortal": "mock-payroll"
+  },
+  "result": {
+    "status": "FAILED",
+    "totals": { "currency": "CRC", "grandTotal": "0", "updatedCount": 0 },
+    "submittedRows": [],
+    "roster_diff": { "missingFromPortal": [], "missingFromPayroll": [] },
+    "errorDetail": {
+      "errorClass": "com.neoproc.financialagent.worker.listener.PayrollTaskListener",
+      "category": "UNCAUGHT_EXCEPTION",
+      "message": "NullPointerException: foo"
+    }
+  },
+  "audit": {
+    "payloadSha256": "0000000000000000000000000000000000000000000000000000000000000003"
+  }
+}

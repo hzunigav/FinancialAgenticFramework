@@ -5,119 +5,97 @@ self-contained so it can be lifted into a Linear/Jira ticket as-is.
 
 ---
 
-## OI-001 — BPMN result listener consumes from off-spec queue (workflow stalls forever)
+## OI-001 — Worker dev default emits a cipher scheme Praxis cannot read (workflow stalls forever)
 
-**Status:** open, blocking end-to-end Payroll Cycle runs.
+**Status:** worker-side fix landed 2026-04-28 (default cipher flipped to
+cleartext, schema enum tightened, runbook updated). Documented here as the
+diagnosis-of-record and to flag the schema change for Praxis's next contract sync.
 
 **Found:** 2026-04-28 during local smoke test of the AutoPlanilla capture
-flow against this Praxis instance.
+flow against this Praxis instance. Initial diagnosis blamed RabbitMQ queue
+wiring (drift between worker-side and Praxis-side queue naming); that was a
+red herring — Praxis's response correctly identified the actual cause as a
+wire-cipher mismatch.
 
 ### Symptom
 
 A `Payroll Cycle` workflow instance stays on **"Wait for capture result"**
 indefinitely after the worker publishes a successful `payroll-capture-result.v1`
-envelope. No errors surface anywhere — no DLQ activity, no Praxis exception
-log, no worker error. The result queue shows zero messages because something
-is draining and acking them, but the BPMN engine never advances.
+envelope. No errors anywhere — no DLQ activity, no Praxis exception log, no
+worker error. The result queue is empty because Praxis's listener is
+acking-and-discarding the message.
 
-Reproduced on workflow instances **#3604** and **#3605** with two independently
-correct capture results.
+Reproduced on workflow instances **#3604** and **#3605**.
 
-### Evidence
+### Root cause
 
-RabbitMQ queue stats (vhost `/`) at the time of the stall:
+The worker's local-dev default cipher (`FINANCEAGENT_CIPHER=local` →
+`LocalDevCipher`) emits `Encryption.scheme = "local-aes-gcm-v1"` on the wire.
+Per [PraxisIntegrationHandoff.md §A.3](PraxisIntegrationHandoff.md#a3-implement-kmsenvelopeclient-in-praxis):
+
+> **Critical asymmetry — `decrypt()` is NOT called on inbound results.**
+> Inbound `payroll-capture-result.v1` and `payroll-submit-result.v1` envelopes
+> either arrive in cleartext (no `encryption` block) or with `vault:v1:`
+> ciphertext in the `result` field — but Praxis does not decrypt the body
+> before passing it into the BPMN process.
+
+So Praxis only handles **cleartext** or **`kms-envelope-v1`** on inbound
+results. `local-aes-gcm-v1` is a worker-internal at-rest scheme, never a wire
+format. With encrypted opaque ciphertext where Praxis expects to navigate
+into a structured `result` object, the BPMN process silently fails to bind
+the result to the workflow variable and the Receive Task never advances.
+
+### Why the queue evidence misled the first diagnosis
+
+RabbitMQ stats at the time of the stall:
 
 | Queue                       | publish | deliver | ack | consumers |
 | --------------------------- | ------- | ------- | --- | --------- |
 | `financeagent.results`      | 7       | 7       | 7   | 1         |
 | `praxis.agent.result.queue` | 0       | 0       | 0   | 1         |
 
-Bindings:
+The first interpretation was that Praxis's BPMN listener was bound to the
+non-spec `praxis.agent.result.queue` and a no-op consumer was draining the
+spec queue. The corrected interpretation: the BPMN listener IS the consumer
+on `financeagent.results` (matching the spec), it just acks-and-drops because
+the body is unreadable. `praxis.agent.result.queue` is unrelated to this
+flow — likely a different Praxis-internal subsystem.
 
-```
-financeagent.results (exchange, direct)
-  └─ financeagent.results (queue, routing-key: "")        ← worker publishes here
+### Worker-side fix (landed 2026-04-28)
 
-praxis.agent.result (exchange, declared by Praxis)
-  └─ praxis.agent.result.queue (routing-key: "agent.result")  ← Praxis BPMN listens here
-```
+1. **`EnvelopeIo.defaultCipher()`** — the unset default is now
+   `CleartextCipher`, not `LocalDevCipher`. `FINANCEAGENT_CIPHER=cleartext` is
+   accepted as a synonym for the existing `=none`. `=local` is still
+   accepted but its scope is narrowed to offline/CLI runs; the javadoc on
+   `LocalDevCipher` now explicitly flags it as not-wire-compatible with
+   Praxis.
+2. **`payroll-capture-result.v1.json`** — `local-aes-gcm-v1` removed from
+   the `Encryption.scheme` enum, completing the cleanup the changelog at v1.3
+   of `PraxisIntegrationHandoff.md` claimed was already done.
+3. **Runbook + onboarding docs** updated to use
+   `FINANCEAGENT_CIPHER=cleartext` for any local dev where Praxis is the
+   consumer, with an explicit "don't use `=local` when Praxis is in the loop"
+   troubleshooting row.
 
-Both consumers come from the same Praxis container connection
-(`172.20.0.1:50508`). The consumer on `financeagent.results` is acking
-messages but does not advance the BPMN process — it appears to be a no-op
-drain or a leftover bridge. The consumer on `praxis.agent.result.queue`
-is the BPMN result handler, but no messages ever arrive there because
-no producer is bound to publish onto the `praxis.agent.result` exchange.
+### Praxis-side asks
 
-### Contract reference
-
-[PraxisIntegrationHandoff.md §C.1](PraxisIntegrationHandoff.md#c1-broker--topology) specifies the topology:
-
-> ```
-> Exchange: financeagent.results           (direct)
-> Queues:
->   financeagent.results                     (shared results queue, Praxis consumes)
-> ```
-
-[§C.2](PraxisIntegrationHandoff.md#c2-message-envelope) specifies the AMQP
-properties on the inbound request, including `reply-to: financeagent.results`.
-
-[§C.3 step 5](PraxisIntegrationHandoff.md#c3-worker-runtime-change):
-
-> Publish `PayrollSubmitResult` to `financeagent.results` with `correlation-id`
-> set to the incoming envelope's `businessKey`.
-
-[§C.3 acceptance](PraxisIntegrationHandoff.md#c3-worker-runtime-change):
-
-> Praxis publishes a `payroll-submit-request.v1` for mock-payroll, the worker
-> processes it, and Praxis observes a `payroll-submit-result.v1` on
-> `financeagent.results` with matching correlation-id.
-
-The contract names `financeagent.results` (queue) as the shared consumption
-point in three independent places. The worker is publishing exactly there.
-Praxis has introduced a non-spec exchange (`praxis.agent.result`) and queue
-(`praxis.agent.result.queue`) that are not in the handoff and that the worker
-side has no contract to publish to.
-
-### Fix (Praxis-side; pick one)
-
-**Option A (preferred — strict spec compliance):** move the BPMN result
-listener to consume directly from queue `financeagent.results`. Remove the
-off-spec `praxis.agent.result` exchange and `praxis.agent.result.queue`.
-
-**Option B (compatible with existing internal naming):** keep
-`praxis.agent.result.queue` as an internal implementation detail of the
-listener, but bind it to the spec exchange `financeagent.results` with
-routing key `""`:
-
-```
-praxis.agent.result.queue
-  ├─ binding to "" (default)              with routing-key: praxis.agent.result.queue
-  ├─ binding to praxis.agent.result        with routing-key: agent.result   (off-spec; can stay or be removed)
-  └─ binding to financeagent.results       with routing-key: ""             ← ADD THIS
-```
-
-Either way, also remove (or fix the wiring of) whatever consumer is currently
-acking messages on the `financeagent.results` queue without routing them into
-the BPMN engine — that's the silent failure mode that hid this for a day.
+1. **Confirm contract sync.** The `Encryption.scheme` enum on
+   `payroll-capture-result.v1` is now `["vault-transit-v1", "kms-envelope-v1"]`.
+   The handoff changelog already claimed this; the schema file just hadn't
+   been updated. No code change should be needed on Praxis's side, but if
+   any Praxis validator was tolerating `local-aes-gcm-v1` for development
+   compatibility, it can drop that allowance now.
+2. **Optional — surface the silent drop.** When Praxis's result listener
+   receives a `result` field it cannot deserialize as the expected schema
+   (cleartext object) and is not a recognised `vault:v1:` ciphertext, the
+   message is currently acked and discarded with no visible signal. Logging
+   a warning (or routing to a dedicated DLQ) would have shortened today's
+   debug loop from hours to minutes.
 
 ### Acceptance test
 
-After the fix, the §C.3 acceptance test from the handoff should pass: a
-`payroll-submit-request.v1` published by Praxis for `mock-payroll` results in
-the agent-worker emitting a `payroll-submit-result.v1`, and the corresponding
-Receive Task in the BPMN workflow advances within seconds.
-
-### Workaround until fixed
-
-Add the §C.1-compliant binding from `financeagent.results` exchange to
-`praxis.agent.result.queue` via the RabbitMQ Management UI:
-
-```
-PUT /api/bindings/%2F/e/financeagent.results/q/praxis.agent.result.queue
-{ "routing_key": "", "arguments": {} }
-```
-
-This is a runtime-only broker state change (will be lost if the broker
-container is recreated without persistent volumes). It is **not** a
-substitute for the Praxis-side fix.
+After the worker fix and any Praxis-side schema sync, the §C.3 acceptance
+test from the handoff should pass: a `payroll-submit-request.v1` published
+by Praxis for `mock-payroll` results in the agent-worker emitting a
+`payroll-submit-result.v1`, and the corresponding Receive Task in the BPMN
+workflow advances within seconds.

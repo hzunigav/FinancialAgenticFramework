@@ -45,7 +45,8 @@ class PortalEngineControlFlowTest {
         return new PortalDescriptor.Step(
                 action, selector, null, null, null, null, null, null,
                 null, null, then,
-                exists, orElse, containsText, matchesRegex, hasCount, maxIterations);
+                exists, orElse, containsText, matchesRegex, hasCount, maxIterations,
+                null);
     }
 
     private static PortalDescriptor.Step auditOnlyStep(String tag) {
@@ -55,7 +56,8 @@ class PortalEngineControlFlowTest {
                 PortalDescriptor.Action.pause,
                 null, null, null, null, tag, "noop", null,
                 null, null, null,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null,
+                null);
     }
 
     @Test
@@ -278,7 +280,8 @@ class PortalEngineControlFlowTest {
                     PortalDescriptor.Action.click,
                     ".next:first-of-type", null, null, null, null, null, null,
                     null, null, null,
-                    null, null, null, null, null, null);
+                    null, null, null, null, null, null,
+                    null);
             PortalDescriptor.Step whileStep = step(
                     PortalDescriptor.Action.whileLoop,
                     ".next",
@@ -312,7 +315,8 @@ class PortalEngineControlFlowTest {
                     PortalDescriptor.Action.pause,
                     null, null, null, null, "tick", "ignored", null,
                     null, null, null,
-                    null, null, null, null, null, null);
+                    null, null, null, null, null, null,
+                    null);
             PortalDescriptor.Step whileStep = step(
                     PortalDescriptor.Action.whileLoop,
                     ".next",

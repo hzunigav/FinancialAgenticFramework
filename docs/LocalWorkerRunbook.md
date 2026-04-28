@@ -67,7 +67,7 @@ portal's `capture.<id>` *and* `submit.<id>` queues — no need to start two.
 | `RABBITMQ_PORT`             | `5672`               | Default AMQP port.                                    |
 | `RABBITMQ_USERNAME`         | `guest`              | Default mgmt creds in compose.                        |
 | `RABBITMQ_PASSWORD`         | `guest`              |                                                       |
-| `FINANCEAGENT_CIPHER`       | `local`              | Use the file-backed cipher key, not KMS.              |
+| `FINANCEAGENT_CIPHER`       | `cleartext` (or unset) | No envelope encryption on the wire. Required when Praxis is the consumer — Praxis only handles cleartext or `kms-envelope-v1` on inbound results (PraxisIntegrationHandoff §A.3). The `=local` value is a worker-only at-rest scheme; **don't use it when Praxis is in the loop** — it produces `local-aes-gcm-v1` ciphertext Praxis cannot read, and the workflow stalls silently. |
 | `FINANCEAGENT_CREDENTIALS`  | `local`              | Read creds from `~/.financeagent/secrets.properties` instead of AWS Secrets Manager. |
 | `SERVER_PORT` *(optional)*  | `8081` if 8080 busy  | Spring Boot HTTP port for `/actuator/*`.              |
 
@@ -85,7 +85,7 @@ PORTAL_ID=autoplanilla \
 SERVER_PORT=8081 \
 RABBITMQ_HOST=localhost RABBITMQ_PORT=5672 \
 RABBITMQ_USERNAME=guest RABBITMQ_PASSWORD=guest \
-FINANCEAGENT_CIPHER=local FINANCEAGENT_CREDENTIALS=local \
+FINANCEAGENT_CIPHER=cleartext FINANCEAGENT_CREDENTIALS=local \
 java -Dportal.headless=false -Djava.awt.headless=true \
   -jar agent-worker/target/agent-worker-1.0.0-SNAPSHOT.jar \
   > logs/agent-worker-autoplanilla.log 2>&1 &
@@ -174,6 +174,7 @@ start.
 | `select` step times out with `did not find some options`    | Selecting by visible label, but the option text was renamed or never matched. | Switch the descriptor's `select` step to `match: value` and bind to the underlying `<option value="...">` (typically a stable id from the envelope). |
 | Post-login `waitForSelector` times out, only when `sessionReused=true` in the manifest | Portal stores auth in `sessionStorage` / in-memory JWT; `storageState()` captures nothing useful. | Set `session.ttlMinutes: 0` in the descriptor; delete `~/.financeagent/sessions/<portalId>.enc`; rebuild and restart. |
 | Selector / binding change in YAML didn't take effect after restart | Descriptor YAML lives under `agent-worker/src/main/resources/portals/` and is bundled into the fat JAR at build time. | Rebuild before restarting: `mvn -pl agent-worker -am package -DskipTests -q`. |
+| Praxis workflow stuck on "Wait for capture/submit result" but worker logged `result published` | Wire-cipher mismatch: worker is emitting `local-aes-gcm-v1` ciphertext that Praxis cannot decrypt and silently drops. | Set `FINANCEAGENT_CIPHER=cleartext` (or unset, which now defaults to cleartext). `local` is a worker-only at-rest scheme — never use it when Praxis is the consumer. See [docs/PraxisOpenIssues.md OI-001](PraxisOpenIssues.md). |
 
 ---
 

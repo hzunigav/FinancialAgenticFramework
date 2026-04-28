@@ -28,11 +28,15 @@ import java.util.HexFormat;
  * <ul>
  *   <li>{@code FINANCEAGENT_CIPHER=kms} → {@link KmsEnvelopeCipher} (production, AWS KMS).</li>
  *   <li>{@code FINANCEAGENT_CIPHER=vault} → {@link VaultTransitCipher} (throws until wired).</li>
- *   <li>{@code FINANCEAGENT_CIPHER=none} → {@link CleartextCipher}: skips encryption entirely;
- *       {@code encryption} block is omitted and {@code result} is the plain body object.
- *       Use when Praxis runs with {@code praxis.payroll.encryption.enabled=false}.</li>
- *   <li>{@code FINANCEAGENT_CIPHER=local} or unset → {@link LocalDevCipher}
- *       with key dir at {@code ~/.financeagent/cipher-keys/}.</li>
+ *   <li>{@code FINANCEAGENT_CIPHER=cleartext} (alias: {@code none}) or <b>unset</b>
+ *       → {@link CleartextCipher}: no encryption block; {@code result} is the plain
+ *       body object. Wire-compatible with Praxis when running without KMS, since
+ *       Praxis only handles cleartext or {@code kms-envelope-v1} on inbound results
+ *       (PraxisIntegrationHandoff §A.3).</li>
+ *   <li>{@code FINANCEAGENT_CIPHER=local} → {@link LocalDevCipher}, an opt-in
+ *       <b>at-rest-only</b> scheme for run-dir artifacts. <b>Not wire-compatible
+ *       with Praxis</b> — Praxis cannot decrypt {@code local-aes-gcm-v1}. Only
+ *       use this for offline/CLI runs where there is no broker peer.</li>
  * </ul>
  */
 public final class EnvelopeIo {
@@ -56,10 +60,14 @@ public final class EnvelopeIo {
         if ("vault".equalsIgnoreCase(which)) {
             return new VaultTransitCipher();
         }
-        if ("none".equalsIgnoreCase(which)) {
-            return new CleartextCipher();
+        if ("local".equalsIgnoreCase(which)) {
+            return new LocalDevCipher();
         }
-        return new LocalDevCipher();
+        // Cleartext is the safe default for any peer that is not the worker
+        // itself: Praxis can read it, fixtures can read it, schema validation
+        // accepts it. local-aes-gcm-v1 is opt-in via FINANCEAGENT_CIPHER=local
+        // for offline/CLI runs that want at-rest encryption of run-dir artifacts.
+        return new CleartextCipher();
     }
 
     /** Writes the envelope (cleartext or encrypted) to the given file as pretty JSON. */

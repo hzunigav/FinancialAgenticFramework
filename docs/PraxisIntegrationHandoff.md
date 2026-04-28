@@ -8,6 +8,7 @@
 > | 1.1 | 2026-04-27 | Praxis team | §14 added: first cross-system E2E run findings; cipher asymmetry documented in §A.3 and §E.1; open questions 7–8 added |
 > | 1.2 | 2026-04-27 | Agent-worker team | §14.7 action #2 completed: `CleartextCipher` + `FINANCEAGENT_CIPHER=none` shipped (see §14.7 status update) |
 > | 1.3 | 2026-04-27 | Agent-worker team | §14.7 actions #1 and #3 completed: `Encryption.scheme` enum fixed (`local-aes-gcm-v1` removed, `kms-envelope-v1` added); `EnvelopeAwareErrorHandler` wired to both listeners |
+> | 1.4 | 2026-04-28 | Agent-worker team | §15 added: per-client portals (ccss-sicere) — new `per-client` credential scope, secret-path layout, status mapping, error category vocabulary, save-only operation model, and Praxis punch list. **Reclassifies CCSS Sicere from per-firm to per-client.** |
 >
 > **Note on document placement:** this file lives at the repo root alongside `WorkerActionTypes.md` and `ImplementationPlan.md`. It is operational integration guidance, not a wire-format specification. The `contract-api/` module carries only schemas and DTOs that Praxis includes as a JAR dependency. Stable reference material (cipher modes, correlation rules) will migrate into `contract-api/CONTRACT.md` once Phase 1 is complete; this document remains the living integration log.
 
@@ -283,14 +284,14 @@ Two workflows, depending on portal scope:
   - No `x-message-ttl` — stale-message policy is enforced at the application level (worker nacks unrecoverable messages to the DLQ; Praxis SLA monitoring fires on DLQ depth).
 - [ ] **Acceptance:** Praxis can publish a test message to `financeagent.tasks.submit.mock-payroll` and observe it arrive on that queue via the RabbitMQ management UI.
 
-> ⚠ **Known divergence (2026-04-28):** the running Praxis instance has wired
-> its BPMN result listener to a non-spec queue `praxis.agent.result.queue`
-> bound to a non-spec exchange `praxis.agent.result`, while leaving a no-op
-> consumer on the spec queue `financeagent.results` that drains and acks
-> messages without advancing the BPMN process. End-to-end runs stall
-> indefinitely on "Wait for capture/submit result" with no errors anywhere.
-> See [PraxisOpenIssues.md OI-001](PraxisOpenIssues.md#oi-001--bpmn-result-listener-consumes-from-off-spec-queue-workflow-stalls-forever)
-> for the full diagnosis and the Praxis-side fix.
+> ℹ **Resolved 2026-04-28:** an earlier note here flagged a queue-wiring
+> divergence as the cause of stuck workflows. That diagnosis was wrong —
+> the queue topology in the running instance is actually spec-compliant
+> (Praxis's BPMN listener IS on `financeagent.results`). The real cause was
+> a wire-cipher mismatch (worker emitting `local-aes-gcm-v1` Praxis cannot
+> read); the worker default has been flipped to cleartext.
+> See [PraxisOpenIssues.md OI-001](PraxisOpenIssues.md#oi-001--worker-dev-default-emits-a-cipher-scheme-praxis-cannot-read-workflow-stalls-forever)
+> for the full incident.
 
 ### C.2 Message envelope
 
@@ -710,3 +711,119 @@ In this incident, it was a **capture timeout** — not a submit failure. The nam
 | 2 | Log `envelopeId` in all WARN/drop paths in `PayrollResultListener`. | ✅ shipped |
 | 3 | Add early-exit + specific WARN for `local-aes-gcm-v1` encrypted inbound results. | ✅ shipped |
 | 4 | Document the encrypt-outbound / no-decrypt-inbound asymmetry in §A.3 and §E.1 of this doc. | ✅ done |
+
+---
+
+## 15. Per-client portals — ccss-sicere prep work (rev 1.4)
+
+This section covers an upcoming portal (`ccss-sicere`) that introduces a **third credential scope** alongside the per-firm and shared scopes from §3. It is additive to Workstream B and does not change anything already shipped.
+
+**Reclassification of CCSS Sicere.** The Workstream B scope table (§3) classified CCSS Sicere as `per-firm`. That classification was correct under the implicit assumption that one Praxis tenant (firm) corresponds to one client. In production, a Praxis tenant routinely owns multiple clients, each with its own corporate-ID-bound portal login. CCSS Sicere is therefore reclassified as `per-client`; the descriptor will declare `credentialScope: per-client`.
+
+### 15.0 Modularity & scalability stance
+
+Everything in §15 is framework-generic, not ccss-sicere-specific. The intent is that onboarding the *next* per-client portal — and every per-client portal after that — is YAML + adapter work only:
+
+- **`per-client` is a first-class scope** alongside `per-firm` and `shared`. Any future portal that needs per-(tenant × client) credential scoping declares `credentialScope: per-client` in its descriptor and inherits the secret-path resolution from §15.2 with **zero code changes**.
+- **The error category vocabulary in §15.5 is portfolio-wide.** It applies to every submit portal, not just ccss-sicere. New portals must use this vocabulary; new categories require a contract revision (not a per-portal extension).
+- **The save-only operation model in §15.6 is a descriptor property, not a portal hard-code.** Any portal that needs save-without-final-submit semantics expresses it by omitting the final-submit step from its YAML; the contract surface (status mapping, mandatory HITL final-submit task) is the same for all such portals.
+- **Praxis-side BPMN routing on `result.status` and `result.errorDetail.category`** should be implemented once as a reusable subprocess / call activity, not duplicated per portal. The same routing logic services every submit portal that adopts this contract.
+
+This stance is the standing rule for Phase 2+ portal onboardings: extending the framework with a generic mechanism is preferred over adding a portal-specific code path. If a portal genuinely needs bespoke logic, it lives in that portal's adapter — never in the engine, the credential resolver, the listeners, or the contract.
+
+### 15.1 New scope: per-client
+
+| Scope | Example | Real-world meaning |
+|---|---|---|
+| **per-client** | ccss-sicere (and any future portal that scopes by corporate ID below the firm level) | One portal login per (tenant × client). Each client of a Praxis tenant has its own corporate-ID-bound credentials. Used when the portal scopes access by corporate ID and a single tenant operates multiple corporate entities. |
+
+### 15.2 Secret path and JSON value
+
+Secrets Manager layout for any per-client portal:
+
+```
+Secret name:   financeagent/firms/<firmId>/portals/<portalId>/<corporateId>
+Secret value:  {"username": "<login>", "password": "<password>"}
+```
+
+For ccss-sicere specifically:
+```
+financeagent/firms/<firmId>/portals/ccss-sicere/<corporateId>
+```
+
+**Required string equality.** The `<corporateId>` segment in the path must equal byte-for-byte the value Praxis places on `task.clientIdentifier` in the submit envelope. The agent-worker resolves credentials by string equality on this segment; any divergence (whitespace, dashes, casing) misses and the run fails with `errorDetail.category=CREDENTIALS_INVALID`.
+
+**Migration of the existing NeoProc entry.** If the current Praxis-side entry follows the format `portals.ccss-sicere.credentials.username` / `…password` for NeoProc, it must be relocated to the path/JSON shape above before the worker can read it. The flat-key prefix `portals.ccss-sicere.credentials.` is encoded in the secret name; the JSON value carries only `username` and `password` at the root.
+
+### 15.3 Submit envelope — what Praxis must populate
+
+For every per-client submit-request envelope (ccss-sicere is the first; the rule applies to every portal that adopts `per-client` scope):
+
+- `task.clientIdentifier` — corporate ID of the client whose payroll is being updated. Required for credential resolution. Must equal the `<corporateId>` segment in the secret path (§15.2).
+- `task.payload.employees[]` — canonical employee list. Each element:
+  - `id` — national ID, matched against the portal column.
+  - `displayName` — used for sanity-check name comparison; mismatches are logged but do not block the save.
+  - `salary` — value to populate on the matched portal row.
+
+The `task.clientIdentifier` field already exists in the envelope schema (added in §B.2 for shared-creds portals). For per-client portals it carries the same string but is used for credential resolution as well as portal-side client selection (if applicable). One field, two consumers — no schema change.
+
+### 15.4 Result-envelope routing — status mapping
+
+For save-only submit portals (see §15.6), the agent-worker emits exactly three statuses. `MISMATCH` is **not** used (no totals re-scrape happens):
+
+| Status | Meaning | Praxis routing |
+|---|---|---|
+| `SUCCESS` | All canonical employees were saved on the portal AND no portal employees were missing from input. | Proceed to HITL final-submit user task. |
+| `PARTIAL` | Either: at least one canonical employee was not found on the portal, OR at least one portal employee had no salary provided in input. (Both conditions can be true simultaneously.) | HITL must review `result.rosterDiff.missingFromPortal` and `result.rosterDiff.missingFromPayroll` before deciding to final-submit. |
+| `FAILED` | Unrecoverable error during the run. `result.errorDetail.category` is populated. | Branch on the category (§15.5); do not retry blindly. |
+
+A canonical employee whose portal row was found but whose per-row save failed for a non-systemic reason (validation rejection, transient write error on that one row) is reported in `rosterDiff.missingFromPortal` — the operational outcome is identical from the HITL reviewer's perspective ("this employee did not get its salary saved").
+
+### 15.5 Error category vocabulary
+
+When `status=FAILED` on any submit portal (this vocabulary is portfolio-wide, not ccss-sicere-specific), the worker populates `result.errorDetail.category` with one of:
+
+| Category | Meaning | Suggested Praxis action |
+|---|---|---|
+| `CREDENTIALS_INVALID` | Login rejected — wrong username/password. | Notify ops to update secret; no auto-retry. |
+| `CREDENTIALS_EXPIRED` | Login succeeded but portal forced password change. | Notify ops; pause the BPMN process for that client. |
+| `PORTAL_UNREACHABLE` | Network/DNS/timeout reaching the portal. | Backoff + retry on next schedule (transient). |
+| `PORTAL_AUTH_BLOCKED` | CAPTCHA / SMS step-up / anti-bot challenge encountered. | HITL re-auth or descriptor adjustment. |
+| `UNEXPECTED` | Anything else. | Alert; manual triage. |
+
+Praxis BPMN should `switch` deterministically on this string. The worker commits to using only these five values across all submit portals; any new category requires a contract revision, not a per-portal addition. Implement the switch once as a reusable subprocess and reuse it for every submit portal.
+
+### 15.6 Save-only operation model
+
+Some portals support "save without final submit" — populating values that persist on the portal as a draft, requiring a separate human action to actually submit. ccss-sicere is the first portal in this mode, but the contract applies generically to any portal that opts in.
+
+**Descriptor opt-in.** A portal whose descriptor deliberately omits the final-submit step is a save-only portal. There is no flag — it's a property of which steps the YAML declares.
+
+**BPMN consequences (apply to all save-only portals):**
+- Do **not** design the process under the assumption the agent-worker has submitted.
+- The HITL final-submit user task is mandatory, not optional, for every run regardless of status.
+- A future enhancement may automate the final submit per portal; until that is contracted, treat `SUCCESS` as "saved but not submitted".
+
+The mandatory-HITL-submit subprocess should be a reusable BPMN call activity that any save-only portal's main flow invokes, not duplicated per portal.
+
+### 15.7 Praxis punch list (parallelizable)
+
+Work Praxis can start now without waiting for the agent-worker prep PR (§15.8). Each item is generic where possible — the underlying mechanism (secret-path layout, status routing, error vocabulary, save-only subprocess) should be implemented once and reused for every per-client / save-only portal that follows.
+
+1. **[BLOCKING] Decide secret provisioning approach** — write directly to AWS Secrets Manager, or via your existing translation layer — and produce secrets in the path/JSON shape from §15.2. Begin with NeoProc's existing entry as a test fixture. The provisioning code path must be parameterized on `(firmId, portalId, corporateId)`, not hard-coded for ccss-sicere.
+2. **[BLOCKING] Populate `task.clientIdentifier`** in BPMN process variables wherever any per-client submit task is launched, threading it onto the submit envelope. Implement once as a shared envelope-builder helper, not per portal.
+3. **[BLOCKING] Add BPMN routing branches** on `result.status` ∈ {SUCCESS, PARTIAL, FAILED} and on `result.errorDetail.category` ∈ the five values from §15.5. Implement as a reusable subprocess / call activity that every submit portal flow invokes.
+4. **[BLOCKING] Confirm corporate-ID string format end-to-end** — the literal value placed in the secret-path segment must equal the value placed on `task.clientIdentifier`. Trim, dash, casing — must match byte-for-byte.
+5. **[BLOCKING] Wire the HITL final-submit user task** for save-only portals into the BPMN per §15.6. Implement once as a reusable call activity; ccss-sicere is the first invoker.
+
+### 15.8 Agent-worker prep PR (in flight)
+
+The agent-worker is shipping these contract additions. All are framework-generic; no ccss-sicere-specific code lands in this PR.
+
+- `PortalDescriptor.credentialScope` gains a third value: `per-client`.
+- `CredentialsProvider.get()` is extended to accept an optional `clientId` (existing callers pass null; no source change for shared/per-firm portals).
+- `AwsSecretsManagerCredentialsProvider` builds the per-client path from §15.2 when scope is `per-client`.
+- `PortalRunService` reads `params.clientIdentifier` (already extracted by the listener) and forwards it to the credential resolver.
+- The error category vocabulary from §15.5 is applied at all failure sites.
+
+ccss-sicere itself lands in a follow-up PR as a YAML descriptor + a `CcssSicereSubmitAdapter`, with no further engine, contract, or resolver changes — proving the modularity of the prep PR.

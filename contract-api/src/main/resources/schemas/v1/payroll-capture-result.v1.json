@@ -128,7 +128,7 @@
       "required": ["scheme", "keyName", "keyVersion", "ciphertextField"],
       "additionalProperties": false,
       "properties": {
-        "scheme":          { "type": "string", "enum": ["vault-transit-v1", "kms-envelope-v1", "local-aes-gcm-v1"] },
+        "scheme":          { "type": "string", "enum": ["vault-transit-v1", "kms-envelope-v1"] },
         "keyName":         { "type": "string", "minLength": 1 },
         "keyVersion":      { "type": "integer", "minimum": 1 },
         "ciphertextField": { "type": "string", "enum": ["result"] }

@@ -15,21 +15,31 @@ import java.security.SecureRandom;
 import java.util.Base64;
 
 /**
- * Dev-only {@link EnvelopeCipher} backed by a per-key AES-256-GCM secret
- * stored on disk. Same {@code vault:vN:...} wire format as the
- * production Vault transit cipher so envelopes captured in dev decrypt
- * correctly when replayed against a Vault-backed reader (after the key
- * is mirrored into Vault's transit engine).
+ * Worker-internal at-rest {@link EnvelopeCipher} backed by a per-key
+ * AES-256-GCM secret stored on disk. Same {@code vault:vN:...} wire
+ * format as the production Vault transit cipher so envelopes captured
+ * in dev decrypt correctly when replayed against a Vault-backed reader
+ * (after the key is mirrored into Vault's transit engine).
  *
  * <p>Keys live at {@code ~/.financeagent/cipher-keys/<keyName>}. Files
  * are created with {@code 600} perms (POSIX) or owner-only ACL
  * (Windows). Each key is a single AES-256 secret; key versioning is
  * always v1 in dev — rotation is a Vault concern.
  *
+ * <p><strong>Not wire-compatible with Praxis.</strong> The
+ * {@code local-aes-gcm-v1} scheme this cipher emits is not in the
+ * Praxis-decryptable set (PraxisIntegrationHandoff §A.3 — Praxis only
+ * handles cleartext or {@code kms-envelope-v1} on inbound results), and
+ * it is not in the JSON-schema enum for the {@code Encryption.scheme}
+ * field on result envelopes. Use this cipher only for offline/CLI runs
+ * where there is no broker peer; for any run that publishes to Praxis,
+ * use {@code FINANCEAGENT_CIPHER=cleartext} (dev) or {@code =kms}
+ * (production).
+ *
  * <p><strong>Not for production.</strong> The on-disk key file is
  * single-secret; if the laptop is compromised, every envelope ever
  * encrypted with this key is compromised. Production must swap to
- * {@link VaultTransitCipher}.
+ * {@link KmsEnvelopeCipher}.
  */
 public final class LocalDevCipher implements EnvelopeCipher {
 

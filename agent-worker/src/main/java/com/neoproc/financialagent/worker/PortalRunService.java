@@ -152,7 +152,7 @@ public final class PortalRunService {
         try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
              Playwright playwright = Playwright.create();
              Browser browser = playwright.chromium().launch(
-                     new BrowserType.LaunchOptions().setHeadless(true));
+                     new BrowserType.LaunchOptions().setHeadless(headless()));
              BrowserContext context = browser.newContext(newContextOptions(runDir, savedSession))) {
 
             context.tracing().start(new Tracing.StartOptions()
@@ -330,5 +330,14 @@ public final class PortalRunService {
 
     private static String version(String fromManifest) {
         return fromManifest != null ? fromManifest : "dev";
+    }
+
+    // Visible Chromium for local debugging. Defaults to true so containerised
+    // and CI runs stay headless; set -Dportal.headless=false (or env
+    // PORTAL_HEADLESS=false) to watch the run in a window.
+    private static boolean headless() {
+        String prop = System.getProperty("portal.headless");
+        if (prop == null) prop = System.getenv("PORTAL_HEADLESS");
+        return prop == null || !prop.equalsIgnoreCase("false");
     }
 }

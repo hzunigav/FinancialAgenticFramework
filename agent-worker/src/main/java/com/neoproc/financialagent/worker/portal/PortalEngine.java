@@ -103,8 +103,15 @@ public final class PortalEngine {
             case select -> {
                 String resolvedSelector = resolve(step.selector());
                 String resolved = resolve(step.value());
-                audit("select", resolvedSelector + " = " + resolved);
-                page.locator(resolvedSelector).selectOption(new SelectOption().setLabel(resolved));
+                String mode = step.match() == null ? "label" : step.match().toLowerCase();
+                audit("select", resolvedSelector + " " + mode + "=" + resolved);
+                SelectOption opt = switch (mode) {
+                    case "label" -> new SelectOption().setLabel(resolved);
+                    case "value" -> new SelectOption().setValue(resolved);
+                    default -> throw new IllegalStateException(
+                            "select.match must be 'label' or 'value', got: " + step.match());
+                };
+                page.locator(resolvedSelector).selectOption(opt);
             }
             case pause -> {
                 String bindTo = step.bindTo();

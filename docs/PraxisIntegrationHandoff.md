@@ -283,6 +283,15 @@ Two workflows, depending on portal scope:
   - No `x-message-ttl` — stale-message policy is enforced at the application level (worker nacks unrecoverable messages to the DLQ; Praxis SLA monitoring fires on DLQ depth).
 - [ ] **Acceptance:** Praxis can publish a test message to `financeagent.tasks.submit.mock-payroll` and observe it arrive on that queue via the RabbitMQ management UI.
 
+> ⚠ **Known divergence (2026-04-28):** the running Praxis instance has wired
+> its BPMN result listener to a non-spec queue `praxis.agent.result.queue`
+> bound to a non-spec exchange `praxis.agent.result`, while leaving a no-op
+> consumer on the spec queue `financeagent.results` that drains and acks
+> messages without advancing the BPMN process. End-to-end runs stall
+> indefinitely on "Wait for capture/submit result" with no errors anywhere.
+> See [PraxisOpenIssues.md OI-001](PraxisOpenIssues.md#oi-001--bpmn-result-listener-consumes-from-off-spec-queue-workflow-stalls-forever)
+> for the full diagnosis and the Praxis-side fix.
+
 ### C.2 Message envelope
 
 - [ ] Message body: the `PayrollCaptureRequest` or `PayrollSubmitRequest` JSON (body of the envelope is encrypted per §2, so the message is safe to log at broker level — no PII leaks).

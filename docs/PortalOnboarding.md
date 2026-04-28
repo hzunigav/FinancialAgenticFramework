@@ -122,6 +122,59 @@ Username can stay or go — not load-bearing. TOTP seeds, API keys, anything els
 
 ---
 
+## Descriptor design pitfalls
+
+These three traps cost real time on AutoPlanilla; documenting them so the next portal doesn't repeat the lesson.
+
+### Use the listener-supplied bindings — don't invent new names
+
+When the worker runs broker-driven (Praxis publishes a capture/submit envelope), the listener auto-populates a fixed set of `params.*` bindings from the envelope. The descriptor and the adapter must read those names exactly — making up a new name (e.g. `params.fechaInicio` because the portal is in Spanish) produces `IllegalStateException: Unresolved portal binding` at the first step that references it.
+
+| Binding                  | Source                                | Available on            |
+|--------------------------|---------------------------------------|-------------------------|
+| `params.firmId`          | `envelope.firmId`                     | capture + submit        |
+| `params.businessKey`     | `envelope.businessKey`                | capture + submit        |
+| `params.issuerRunId`     | `envelope.issuerRunId`                | capture + submit        |
+| `params.sourcePortal`    | `task.sourcePortal`                   | capture                 |
+| `params.from`            | `task.period.from` (ISO date)         | capture + submit        |
+| `params.to`              | `task.period.to` (ISO date)           | capture + submit        |
+| `params.planillaId`      | `task.planilla.id`                    | capture + submit        |
+| `params.planillaName`    | `task.planilla.name`                  | capture + submit        |
+| `params.clientIdentifier`| `task.clientIdentifier`               | submit                  |
+| `params.source.submitRequest` | full submit envelope path (file)| submit (set by `PortalRunService`) |
+
+If a portal needs a value that isn't in this list, raise it before authoring — either the contract envelope grows a field, or you add the binding in the listener with a clear name. The CLI dev mode (`mvn exec:java -Dparams.<key>=<value>`) accepts arbitrary names, but those names then become a contract the broker-driven path has to honour. Pick something that maps cleanly back to a contract field.
+
+### Prefer `match: value` over label for stable dropdowns
+
+The `select` action defaults to `match: label`, which calls `selectOption(SelectOption.setLabel(...))` — the visible option text must match exactly. That's fragile for any portal where operators can rename items in the UI: a planilla called "Quincenal USD" today might be "Quincenal Dolares" tomorrow.
+
+When the underlying `<option value="...">` carries a stable identifier, switch the step to `match: value` and bind to that identifier instead:
+
+```yaml
+- action: select
+  selector: 'select[data-cy="payrollId"]'
+  match: value          # binds to <option value="..."> not the visible text
+  value: "${params.planillaId}"
+```
+
+The portal's element inspector will show whether `<option>` tags carry meaningful `value=` attributes. If they're just `value="0"` / `value="1"` positional indices, label-matching is the only choice — but flag this in the descriptor so future-you knows the brittleness.
+
+### Verify session reuse before enabling it
+
+Adding a `session: { ttlMinutes: <N> }` block tells the engine to save Playwright's `storageState()` after auth and reuse it on subsequent runs. That works for portals storing auth in **cookies** or **localStorage** — but `storageState()` does **not** capture `sessionStorage` or in-memory tokens. Many SPA-based portals (anything with a JWT held in a Redux store / `sessionStorage` / a service worker) fall into this second category.
+
+Symptom of session reuse on an incompatible portal: the saved file is suspiciously small (a fresh AutoPlanilla session was 152 bytes, vs ~360 for cookie-based portals), and reused runs fail at the first post-login `waitForSelector` because the page lands logged-out.
+
+Validation procedure for any new portal before enabling session reuse:
+
+1. Run once with `session: { ttlMinutes: 30 }` and the descriptor authored.
+2. Inspect `~/.financeagent/sessions/<portalId>.enc` size — under 200 bytes is suspicious.
+3. Run a second time and check the manifest: `sessionReused=true` followed by a successful post-login step is the green flag.
+4. If step 3 fails consistently, set `ttlMinutes: 0` and document the reason inline — every run will re-authenticate. The 2-3s login cost is a fair price for not chasing a phantom auth bug later.
+
+---
+
 ## Troubleshooting during codegen
 
 - **Selector looks fragile** (long `:nth-child` chains, hashed class names like `.MuiXxx-abc123`): click the Inspector's "Pick locator" button and let it suggest a role/label/text alternative. Paste both if unsure — I'll pick the more stable one.

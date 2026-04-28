@@ -62,6 +62,11 @@ public record PortalDescriptor(
             String selector,
             String target,
             String value,
+            // For action=select: "label" (default) or "value". Pick by visible
+            // option text vs the underlying <option value="..."> attribute.
+            // Use "value" when the visible label is operator-renameable but the
+            // value is a stable id.
+            String match,
             @JsonAlias("redact") Boolean redactValue,
             String prompt,
             String bindTo,

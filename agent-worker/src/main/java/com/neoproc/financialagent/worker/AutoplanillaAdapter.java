@@ -29,11 +29,11 @@ final class AutoplanillaAdapter extends AbstractCaptureAdapter {
                                                  PortalCredentials credentials,
                                                  RunManifest manifest) {
         String planilla = require(bindings, "params.planillaName");
-        LocalDate fechaInicio = LocalDate.parse(require(bindings, "params.fechaInicio"));
-        LocalDate fechaFinal = LocalDate.parse(require(bindings, "params.fechaFinal"));
+        LocalDate from = LocalDate.parse(require(bindings, "params.from"));
+        LocalDate to = LocalDate.parse(require(bindings, "params.to"));
 
         PayrollSummary summary = AutoplanillaMapper.toSummary(
-                scraped, scrapedRows, planilla, fechaInicio, fechaFinal);
+                scraped, scrapedRows, planilla, from, to);
         manifest.scraped = summary;
         manifest.step("capture",
                 "planilla=" + planilla
@@ -53,8 +53,8 @@ final class AutoplanillaAdapter extends AbstractCaptureAdapter {
                         .map(AutoplanillaAdapter::toContractRow)
                         .toList());
 
-        String businessKey = fechaInicio.getYear() + "-"
-                + String.format("%02d", fechaInicio.getMonthValue())
+        String businessKey = from.getYear() + "-"
+                + String.format("%02d", from.getMonthValue())
                 + "::" + planilla;
 
         return new CaptureOutcome(
@@ -63,7 +63,7 @@ final class AutoplanillaAdapter extends AbstractCaptureAdapter {
                 "autoplanilla",
                 businessKey,
                 "agent-worker/autoplanilla",
-                new Period(fechaInicio, fechaFinal),
+                new Period(from, to),
                 new Planilla(null, planilla));
     }
 

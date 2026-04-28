@@ -17,20 +17,27 @@ rateLimit:
   maxConcurrent: 1
   minIntervalSeconds: 5.0
 
-# Sessions buy us speed on repeated runs. 30 min is a conservative default
-# for a SaaS login — narrow it if AutoPlanilla's server-side session is
-# shorter.
+# Session reuse disabled: AutoPlanilla holds auth in sessionStorage / JWT,
+# not cookies or localStorage, so Playwright's storageState() captures
+# nothing useful and reuse always lands logged-out (verified empirically
+# 2026-04-28 — saved storageState was 152 bytes, reused runs failed the
+# post-login waitForSelector). Every run logs in fresh; the ~3s cost is
+# acceptable given the descriptor's 5s rate-limit gap.
 session:
-  ttlMinutes: 30
+  ttlMinutes: 0
 
 # Runtime parameters the operator passes via -Dparams.<key>=<value>:
-#   params.planillaName = visible label in the "Please select the payroll"
-#                          dropdown (e.g. "NeoProc Quincenal USD").
-#                          The engine's `select` action matches by label,
-#                          not by underlying option value.
-#   params.fechaInicio   = ISO date, e.g. 2026-04-01 (the Start Date input
-#                          accepts ISO via .fill()).
-#   params.fechaFinal    = ISO date, e.g. 2026-04-30.
+#   params.planillaId    = stable AutoPlanilla payroll id, e.g. "1051".
+#                          Matched against <option value="..."> on the planilla
+#                          <select> — operators rename labels, ids never change.
+#   params.planillaName  = visible label, only used in the run manifest /
+#                          capture envelope for human-readable context. NOT
+#                          used to drive the dropdown.
+#   params.from          = ISO start date, e.g. 2026-04-01 (the Start Date
+#                          input accepts ISO via .fill()). Bound from
+#                          task.period.from in the capture envelope.
+#   params.to            = ISO end date, e.g. 2026-04-30. Bound from
+#                          task.period.to.
 
 authSteps:
   # Selectors below come from the operator's Playwright codegen recording
@@ -67,25 +74,23 @@ steps:
   - action: click
     selector: 'role=menuitem[name="CCSS Report"]'
 
-  # Native <select> (Playwright's selectOption confirms this in the
-  # recording). Engine uses SelectOption.setLabel, so params.planillaName
-  # must match the visible option text, e.g. "NeoProc Quincenal USD".
-  # Playwright Java lacks the `label=` locator engine, and MUI wrapping
-  # can hide the element from role=combobox lookups, so we target the
-  # native <select> directly. The CCSS Report page has one such element
-  # (the planilla chooser); if another select is ever added, narrow
-  # this with a stable attribute.
+  # Native <select id="payrollId" name="payrollId" data-cy="payrollId">.
+  # Match by <option value="..."> (the stable AutoPlanilla payroll id) —
+  # users can rename a planilla in the AutoPlanilla UI but the underlying
+  # id is permanent. The data-cy attribute disambiguates if another <select>
+  # is added to the page in the future.
   - action: select
-    selector: 'select'
-    value: "${params.planillaName}"
+    selector: 'select[data-cy="payrollId"]'
+    match: value
+    value: "${params.planillaId}"
 
   - action: fill
     selector: 'role=textbox[name="Start Date"]'
-    value: "${params.fechaInicio}"
+    value: "${params.from}"
 
   - action: fill
     selector: 'role=textbox[name="End Date"]'
-    value: "${params.fechaFinal}"
+    value: "${params.to}"
 
   - action: click
     selector: 'role=button[name="Generate Report"]'

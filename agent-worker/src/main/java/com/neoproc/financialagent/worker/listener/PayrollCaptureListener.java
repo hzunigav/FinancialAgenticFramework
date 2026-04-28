@@ -188,8 +188,12 @@ public class PayrollCaptureListener {
                 b.put("params.from", task.period().from().toString());
                 b.put("params.to",   task.period().to().toString());
             }
-            if (task.planilla() != null && task.planilla().name() != null)
-                b.put("params.planillaName", task.planilla().name());
+            if (task.planilla() != null) {
+                if (task.planilla().id() != null)
+                    b.put("params.planillaId", task.planilla().id());
+                if (task.planilla().name() != null)
+                    b.put("params.planillaName", task.planilla().name());
+            }
         }
         return b;
     }

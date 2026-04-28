@@ -103,14 +103,22 @@ abstract class AbstractSubmitAdapter extends BaseAdapter {
         EnvelopeIo.EncryptedPayload encrypted = EnvelopeIo.encryptBody(
                 outcome.body(), cipher, firmId);
 
+        // Praxis's Receive Task correlates results to the running workflow by
+        // businessKey — it MUST equal the businessKey on the inbound request,
+        // otherwise the result is silently dropped and the BPMN waits forever.
+        // The adapter's outcome.businessKey() is only the fallback for CLI
+        // runs where there is no inbound envelope.
+        String businessKey = bindings.getOrDefault("params.businessKey", outcome.businessKey());
+        String issuerRunId = bindings.getOrDefault("params.issuerRunId", runId);
+
         EnvelopeMeta envelope = new EnvelopeMeta(
                 UUID.randomUUID().toString(),
-                outcome.businessKey(),
+                businessKey,
                 firmId,
                 "es",
                 Instant.now(),
                 outcome.issuer(),
-                runId);
+                issuerRunId);
 
         SubmitTask task = SubmitTask.forSalaries(
                 outcome.targetPortalId(),

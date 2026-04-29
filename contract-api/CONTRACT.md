@@ -42,14 +42,24 @@ When `encryption` is present, the matching payload field is a `vault:vN:...` cip
 | `envelope.issuer` | Identifies the producer software, e.g. `agent-worker/autoplanilla` or `praxis-bpm/payroll-process`. |
 | `envelope.issuerRunId` | Producer-side correlation. For agent envelopes this is the run directory name in `artifacts/`. For BPM envelopes it's the process instance id. |
 | `task.sourceCaptureEnvelopeId` (submit envelopes only) | Links a submit run back to the capture envelope it derived from. Required for audit chain-of-custody. |
-| `task.clientIdentifier` (optional) | **Shared-creds portals only.** The portal-side identifier (cédula jurídica, internal client code, etc.) that selects which client to act on after NeoProc's shared login. Not a secret; lives on the firm record in Praxis as a `FirmPortalIdentifier` entity, not in Secrets Manager. BPM must populate this when dispatching to any portal whose descriptor declares `credentialScope: shared`. Omit for per-firm portals. |
+| `task.clientIdentifier` (optional) | **Shared-creds and per-client portals.** (a) Shared-creds: the portal-side identifier (cédula jurídica, internal client code, etc.) that selects which client to act on after NeoProc's shared login. Lives on the firm record in Praxis as a `FirmPortalIdentifier` entity, not in Secrets Manager. (b) Per-client: the corporate id used as the secret-path segment for credential resolution (`financeagent/firms/<firmId>/portals/<portalId>/<clientIdentifier>`); the worker rejects per-client envelopes that lack it. BPM must populate this for any portal whose descriptor declares `credentialScope: shared` or `credentialScope: per-client`. Omit for per-firm portals. |
 
 **BPM commitments to honor:**
 
 1. Treat unknown `result.status` values as escalation. Don't silently advance the process.
 2. Echo `envelope.businessKey` back on any callback so the worker can correlate.
 3. Pass the upstream capture envelope verbatim into the submit task payload — no transformation. The worker re-verifies via `audit.payloadSha256`.
-4. For shared-creds portals, BPM must include `task.clientIdentifier` in the submit envelope. Workers reject shared-portal envelopes that lack it rather than guess. See [PraxisIntegrationHandoff.md §3 B.4](../PraxisIntegrationHandoff.md#b4-scoping-enforcement) for the scoping rationale.
+4. For shared-creds and per-client portals, BPM must include `task.clientIdentifier` in the submit envelope. Workers reject envelopes that lack it rather than guess. See [PraxisIntegrationHandoff.md §3 B.4](../PraxisIntegrationHandoff.md#b4-scoping-enforcement) for shared-creds rationale, and [PraxisIntegrationHandoff.md §15.2](../PraxisIntegrationHandoff.md#152-secret-path-and-json-value) for per-client.
+
+**Submit-result `totals` fields:**
+
+| Field | Required | Meaning |
+|---|---|---|
+| `totals.currency` | yes | ISO-4217 currency code. Always `CRC` today. |
+| `totals.grandTotal` | yes | Post-submit grand total visible on the portal. The legacy reconciliation field; `MISMATCH` fires when it drifts from `expected`. |
+| `totals.updatedCount` | yes | Diagnostic — how many rows the agent changed this run. |
+| `totals.expected` | optional | Sum of every canonical-input salary the run intended to put on the portal. Surfaced as a process variable for BPMN gating: `expected != grandTotal` (or `!= portalReported`) is the deterministic mismatch signal. |
+| `totals.portalReported` | optional | Portal's saved/reported total — distinct from `grandTotal` only on portals that distinguish a working/draft total from a saved/reported total (CCSS Sicere's `Total de Salarios Reportados`). When non-null, BPMN should gate on `expected != portalReported` rather than `grandTotal`. |
 
 ---
 
@@ -58,11 +68,70 @@ When `encryption` is present, the matching payload field is a `vault:vN:...` cip
 ```
 SUCCESS  → end success
 PARTIAL  → inclusive gateway → register-hires / deregister-terminations subprocess(es)
+         → OR HITL identity review (when only NAME_DRIFT signals fire, rosterDiff empty)
 MISMATCH → user task: data integrity review
 FAILED   → user task: engineering escalation
 ```
 
 See [PayrollOrchestrationFlow.md §4](../PayrollOrchestrationFlow.md#4-status-vocabulary--routing) for full semantics.
+
+---
+
+## 3.1 Review block — structured HITL diagnostics
+
+`SubmitResultBody.Review` is populated for `MISMATCH` / `PARTIAL` runs and carries the structured signals that the Praxis HITL task form renders. `null` for `SUCCESS` / `FAILED`.
+
+```
+review.severity:       "INFO" | "WARN" | "ERROR"
+review.summary:        free-text human summary
+review.signals:        Signal[]
+review.allowedActions: string[]   (e.g. ["FINAL_SUBMIT", "RESUBMIT", "ESCALATE"])
+```
+
+`severity` is a small enum **distinct from envelope status** — `INFO`/`WARN`/`ERROR`, not `SUCCESS`/`PARTIAL`/`MISMATCH`/`FAILED`. The `Review` compact constructor enforces this; passing a status string into the severity slot throws `IllegalArgumentException` at construction. Standard adapter mapping: `MISMATCH → ERROR`, `PARTIAL → WARN`.
+
+### Signal types
+
+`Signal.type` is a discriminator. Different fields are populated depending on the type:
+
+| `type` | Populated fields | Emitted when |
+|---|---|---|
+| `TOTAL_GAP` | `canonical`, `portal`, `gap` | Reconciliation totals diverge — `expected ≠ portalReported`. Routes to `MISMATCH`. |
+| `MISSING_FROM_PORTAL` | `id`, `name`, `expectedSalary` | Canonical employee not found on portal (likely new hire). Drives `register-hires` subprocess. |
+| `MISSING_FROM_PAYROLL` | `id`, `name`, `lastKnownSalary` | Portal row not in canonical payroll (likely termination). Drives `deregister-terminations` subprocess. |
+| `NAME_DRIFT` | `id`, `name` (canonical), `portalName` | Cédula matched **uniquely** but canonical and portal names diverge (operator typo, married-name update, transliteration). Salary IS applied; HITL confirms identity before final-submit. Routes to `PARTIAL` with empty `rosterDiff` — register/dereg subprocesses do **not** run. |
+
+Money-shaped fields (`canonical`, `portal`, `gap`, `expectedSalary`, `lastKnownSalary`) accept JSON string (canonical wire form) **or** JSON number (Jackson default for `BigDecimal`). Both validate; producers don't need a custom `@JsonSerialize`. See `feedback_strict_string_money_serializer` for the schema-side history.
+
+### NAME_DRIFT example
+
+A `payroll-submit-result.v1` envelope where the AutoPlanilla canonical had `EVELYN GODINES` (operator typo) and CCSS Sicere had `GODINEZ BOZA EVELYN NATALIA` (legal-registry spelling); cédula `207630807` was unique on both sides:
+
+```json
+{
+  "result": {
+    "status": "PARTIAL",
+    "totals": { "currency": "CRC", "grandTotal": "...", "expected": "...", "portalReported": "..." },
+    "submittedRows": [ /* includes the matched row — salary WAS applied */ ],
+    "roster_diff": { "missingFromPortal": [], "missingFromPayroll": [] },
+    "review": {
+      "severity": "WARN",
+      "summary": "1 name disagreement(s) — cédula matched, names differ (HITL review)",
+      "signals": [
+        {
+          "type": "NAME_DRIFT",
+          "id": "207630807",
+          "name": "EVELYN GODINES",
+          "portalName": "GODINEZ BOZA EVELYN NATALIA"
+        }
+      ],
+      "allowedActions": ["FINAL_SUBMIT", "RESUBMIT", "ESCALATE"]
+    }
+  }
+}
+```
+
+Praxis BPMN should branch on signal **types**, not just on envelope status: `PARTIAL + only NAME_DRIFT signals` is a different BPMN gate than `PARTIAL + non-empty rosterDiff`. The first needs an identity-review user task; the second needs the register/dereg lifecycle subprocesses.
 
 ---
 

@@ -187,8 +187,20 @@ public class PayrollTaskListener {
         EnvelopeCipher cipher = EnvelopeIo.defaultCipher();
         EnvelopeIo.EncryptedPayload encrypted = EnvelopeIo.encryptBody(body, cipher, firmId);
 
-        SubmitTask task = request.task() != null
-                ? request.task()
+        // payroll-submit-result.v1 declares additionalProperties: false on the
+        // task block and does not allow period / planilla — those belong only
+        // to the request side. Echoing the request's task verbatim into a
+        // result (e.g. for FAILED / DUPLICATE_ENVELOPE / minimal envelopes)
+        // would fail schema validation and DLQ the message, leaving Praxis
+        // stuck on Wait. Build a result-side task that carries only the
+        // schema-allowed identifiers.
+        SubmitTask reqTask = request.task();
+        SubmitTask task = reqTask != null
+                ? SubmitTask.forSalaries(
+                        reqTask.targetPortal(),
+                        reqTask.sourceCaptureEnvelopeId(),
+                        reqTask.clientIdentifier(),
+                        null, null)
                 : SubmitTask.forSalaries(portalId, null, null, null);
 
         return new PayrollSubmitResult(

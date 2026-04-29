@@ -22,7 +22,7 @@
         "sourceCaptureEnvelopeId": { "type": "string", "format": "uuid",
           "description": "envelopeId of the upstream capture envelope this submission derives from. Lets the agent and BPM trace cause-and-effect." },
         "clientIdentifier": { "type": "string",
-          "description": "Shared-creds portals only: the portal-side identifier (cédula jurídica, internal client code, etc.) that selects which client to act on after NeoProc's shared login. Required by the worker when the target portal's descriptor declares credentialScope: shared; omit for per-firm portals." },
+          "description": "Required for shared-creds and per-client portals. (a) shared-creds: the portal-side identifier (cédula jurídica, internal client code, etc.) that selects which client to act on after NeoProc's shared login. (b) per-client: the corporate id used both as the secret-path segment for credential resolution (financeagent/firms/<firmId>/portals/<portalId>/<clientIdentifier>) and, where applicable, for portal-side verification. Omit for per-firm portals." },
         "period":   { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/task/properties/period" },
         "planilla": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/task/properties/planilla" }
       }

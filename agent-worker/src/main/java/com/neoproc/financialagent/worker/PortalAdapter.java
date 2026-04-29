@@ -53,4 +53,20 @@ interface PortalAdapter {
                              Map<String, String> bindings,
                              PortalCredentials credentials,
                              RunManifest manifest);
+
+    /**
+     * Optional teardown hook. Runs after the result envelope has been
+     * emitted but before the {@code BrowserContext} closes. Adapters use
+     * this to log out gracefully on portals that hold long-lived sessions
+     * (CCSS Sicere being the first; many government portals follow).
+     *
+     * <p>Failures here are logged and swallowed by the caller — the run is
+     * already done, the envelope is already emitted, and a logout failure
+     * is not a reason to flip the status. Default: no-op.
+     */
+    default void afterCapture(Page page,
+                              Map<String, String> bindings,
+                              RunManifest manifest) {
+        // no-op
+    }
 }

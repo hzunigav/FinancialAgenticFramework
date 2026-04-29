@@ -9,6 +9,7 @@
 > | 1.2 | 2026-04-27 | Agent-worker team | §14.7 action #2 completed: `CleartextCipher` + `FINANCEAGENT_CIPHER=none` shipped (see §14.7 status update) |
 > | 1.3 | 2026-04-27 | Agent-worker team | §14.7 actions #1 and #3 completed: `Encryption.scheme` enum fixed (`local-aes-gcm-v1` removed, `kms-envelope-v1` added); `EnvelopeAwareErrorHandler` wired to both listeners |
 > | 1.4 | 2026-04-28 | Agent-worker team | §15 added: per-client portals (ccss-sicere) — new `per-client` credential scope, secret-path layout, status mapping, error category vocabulary, save-only operation model, and Praxis punch list. **Reclassifies CCSS Sicere from per-firm to per-client.** |
+> | 1.5 | 2026-04-28 | Agent-worker team | §15.4 status set restored to four (MISMATCH back); §15.4 totals gain `expected` + `portalReported` for explicit BPMN gating; §15.8 marked landed (one bundled PR including the ccss-sicere descriptor + adapter). |
 >
 > **Note on document placement:** this file lives at the repo root alongside `WorkerActionTypes.md` and `ImplementationPlan.md`. It is operational integration guidance, not a wire-format specification. The `contract-api/` module carries only schemas and DTOs that Praxis includes as a JAR dependency. Stable reference material (cipher modes, correlation rules) will migrate into `contract-api/CONTRACT.md` once Phase 1 is complete; this document remains the living integration log.
 
@@ -769,12 +770,13 @@ The `task.clientIdentifier` field already exists in the envelope schema (added i
 
 ### 15.4 Result-envelope routing — status mapping
 
-For save-only submit portals (see §15.6), the agent-worker emits exactly three statuses. `MISMATCH` is **not** used (no totals re-scrape happens):
+The save-only model does scrape totals after the per-row Aplicar loop, so all four statuses are in play. `result.totals.expected` and `result.totals.portalReported` are surfaced as process variables for BPMN gating (CCSS Sicere's `Total de Salarios Reportados` becomes `portalReported`; the canonical input sum becomes `expected`).
 
 | Status | Meaning | Praxis routing |
 |---|---|---|
-| `SUCCESS` | All canonical employees were saved on the portal AND no portal employees were missing from input. | Proceed to HITL final-submit user task. |
-| `PARTIAL` | Either: at least one canonical employee was not found on the portal, OR at least one portal employee had no salary provided in input. (Both conditions can be true simultaneously.) | HITL must review `result.rosterDiff.missingFromPortal` and `result.rosterDiff.missingFromPayroll` before deciding to final-submit. |
+| `SUCCESS` | All canonical employees were saved on the portal AND no portal employees were missing from input AND `expected == portalReported`. | Proceed to HITL final-submit user task. |
+| `PARTIAL` | Either: at least one canonical employee was not found on the portal, OR at least one portal employee had no salary provided in input. (Both conditions can be true simultaneously.) Status is independent of totals — totals divergence in this state is shown to HITL as additional context. | HITL must review `result.rosterDiff.missingFromPortal` and `result.rosterDiff.missingFromPayroll` before deciding to final-submit. |
+| `MISMATCH` | Roster diff is empty but `expected != portalReported`. Everyone we expected to save was saved, but the portal-side total disagrees with our canonical total — usually an unexpected pre-existing row, or a save that didn't land. | User task: data integrity review. Compare `result.totals.expected` and `result.totals.portalReported` in the form. |
 | `FAILED` | Unrecoverable error during the run. `result.errorDetail.category` is populated. | Branch on the category (§15.5); do not retry blindly. |
 
 A canonical employee whose portal row was found but whose per-row save failed for a non-systemic reason (validation rejection, transient write error on that one row) is reported in `rosterDiff.missingFromPortal` — the operational outcome is identical from the HITL reviewer's perspective ("this employee did not get its salary saved").
@@ -816,14 +818,21 @@ Work Praxis can start now without waiting for the agent-worker prep PR (§15.8).
 4. **[BLOCKING] Confirm corporate-ID string format end-to-end** — the literal value placed in the secret-path segment must equal the value placed on `task.clientIdentifier`. Trim, dash, casing — must match byte-for-byte.
 5. **[BLOCKING] Wire the HITL final-submit user task** for save-only portals into the BPMN per §15.6. Implement once as a reusable call activity; ccss-sicere is the first invoker.
 
-### 15.8 Agent-worker prep PR (in flight)
+### 15.8 Agent-worker prep PR — landed
 
-The agent-worker is shipping these contract additions. All are framework-generic; no ccss-sicere-specific code lands in this PR.
+The agent-worker prep PR landed bundled with the ccss-sicere descriptor and adapter (one PR rather than two — non-production system, optimizing for cycle time). All framework changes are generic and re-usable for the next per-client portal that arrives.
 
-- `PortalDescriptor.credentialScope` gains a third value: `per-client`.
-- `CredentialsProvider.get()` is extended to accept an optional `clientId` (existing callers pass null; no source change for shared/per-firm portals).
-- `AwsSecretsManagerCredentialsProvider` builds the per-client path from §15.2 when scope is `per-client`.
-- `PortalRunService` reads `params.clientIdentifier` (already extracted by the listener) and forwards it to the credential resolver.
-- The error category vocabulary from §15.5 is applied at all failure sites.
+Framework changes:
+- `PortalDescriptor.credentialScope` gains a third value: `per-client`. New helper `hasPerClientCredentials()`.
+- `CredentialsProvider.get(portalId, clientId)` is the new primary method; `get(portalId)` is preserved as a default that delegates with `clientId = null` for shared/per-firm callers.
+- `LocalFileCredentialsProvider` accepts the per-client property format `portals.<portalId>.credentials.<clientId>.<name>=<value>`, mirroring prod's Secrets Manager path layout.
+- `AwsSecretsManagerCredentialsProvider` builds the per-client path from §15.2 when scope is `per-client`; throws `IllegalStateException` if `clientId` is missing.
+- `PortalRunService` reads `params.clientIdentifier` and forwards it to the credential resolver. New `adapter.afterCapture()` lifecycle hook fires after the result envelope is emitted but before the browser context closes — used by ccss-sicere for the `exit_to_app` → `Sí` logout sequence.
+- `payroll-submit-result.v1` schema gains `totals.expected` and `totals.portalReported` (both optional Money). Older adapters omit them; ccss-sicere populates both.
+- `errorDetail.category` enum extended with the §15.5 vocabulary (`CREDENTIALS_INVALID`, `CREDENTIALS_EXPIRED`, `PORTAL_UNREACHABLE`, `PORTAL_AUTH_BLOCKED`, `UNEXPECTED`); the legacy worker-side categories are retained for backwards compatibility.
 
-ccss-sicere itself lands in a follow-up PR as a YAML descriptor + a `CcssSicereSubmitAdapter`, with no further engine, contract, or resolver changes — proving the modularity of the prep PR.
+Portal-specific changes:
+- `agent-worker/src/main/resources/portals/ccss-sicere.yaml` — descriptor with two-step login, empty `steps` (the adapter drives navigation), empty `scrape` (the adapter scrapes totals directly), HAR scrub for the password field.
+- `agent-worker/src/main/java/com/neoproc/financialagent/worker/CcssSicereSubmitAdapter.java` — variation A vs B detection, pagination, per-row Aplicar, totals reconciliation, MISMATCH detection, logout teardown.
+
+The next per-client portal lands as YAML + adapter only.

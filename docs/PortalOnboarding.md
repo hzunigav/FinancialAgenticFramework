@@ -160,6 +160,32 @@ When the underlying `<option value="...">` carries a stable identifier, switch t
 
 The portal's element inspector will show whether `<option>` tags carry meaningful `value=` attributes. If they're just `value="0"` / `value="1"` positional indices, label-matching is the only choice — but flag this in the descriptor so future-you knows the brittleness.
 
+### Match employees by cédula uniqueness; surface name drift, don't reject
+
+Submit-side adapters that match canonical employees against portal rows have **two** sources of truth: the cédula (national ID) and the display name. The cédula is the primary key — unique on a planilla by construction — and the display name is operator-typed text that drifts (typos, married-name updates, surname-order conventions, transliterated diacritics).
+
+Use `EmployeeMatcher.matchWithDrift(canonicalId, canonicalName, ids, names)` rather than the strict `match`. It returns a `MatchResult{index, nameConfirmed}`:
+
+- `nameConfirmed=true` — the cédula matched and the names confirm. Apply the salary, the happy path.
+- `nameConfirmed=false` — the cédula matched **uniquely** but the names diverge (one canonical cédula appears exactly once on the portal side). Apply the salary anyway and emit a `NAME_DRIFT` signal to the result envelope's review block:
+
+  ```java
+  drifts.add(new SubmitResultBody.Signal(
+          "NAME_DRIFT", null, null, null,
+          row.identification(),
+          c.name(),                   // canonical name (what we sent)
+          row.name(),                 // portal name (what the portal shows)
+          null, null));
+  ```
+
+  Status routes to `PARTIAL` so the HITL final-submit task fires before the planilla is billed; `rosterDiff` stays empty so the register/dereg lifecycle subprocesses do **not** run.
+
+- `Optional.empty()` — either the cédula has no portal match (genuine missing employee → `MISSING_FROM_PORTAL`) or the cédula appears more than once on the portal side and the strict name confirm rejected (data corruption / split record → also `MISSING_FROM_PORTAL`, let HITL untangle it).
+
+**Why not strict match?** The 2026-04-29 BPMN E2E exposed the trap: AutoPlanilla had `EVELYN GODINES` (operator typo, S), CCSS Sicere had `GODINEZ BOZA EVELYN NATALIA` (legal-registry spelling, Z). Cédula `207630807` matched uniquely. Strict matcher rejected → row went to `missingFromPortal` → salary never applied → reconciliation totals diverged for one row in 13. The cédula is the primary key on a planilla; strict name-confirm was overcautious for typo'd display names.
+
+The strict `EmployeeMatcher.match` is preserved for callers where cédula collisions are plausible (cross-portal correlation, identifier reuse). For per-planilla submit flows where cédulas are unique by construction, default to `matchWithDrift`.
+
 ### Verify session reuse before enabling it
 
 Adding a `session: { ttlMinutes: <N> }` block tells the engine to save Playwright's `storageState()` after auth and reuse it on subsequent runs. That works for portals storing auth in **cookies** or **localStorage** — but `storageState()` does **not** capture `sessionStorage` or in-memory tokens. Many SPA-based portals (anything with a JWT held in a Redux store / `sessionStorage` / a service worker) fall into this second category.

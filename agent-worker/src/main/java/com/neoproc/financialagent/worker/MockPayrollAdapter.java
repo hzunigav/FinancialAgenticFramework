@@ -349,8 +349,9 @@ final class MockPayrollAdapter extends AbstractSubmitAdapter {
                 m.id(), m.displayName(), null, m.lastKnownSalary())));
 
         String summary = buildReviewSummary(status, canonical, portal, diff);
+        String severity = EnvelopeStatus.MISMATCH.equals(status) ? "ERROR" : "WARN";
         return new SubmitResultBody.Review(
-                status, summary, signals, List.of("RESUBMIT", "ACKNOWLEDGE", "ESCALATE"));
+                severity, summary, signals, List.of("RESUBMIT", "ACKNOWLEDGE", "ESCALATE"));
     }
 
     private static String buildReviewSummary(

@@ -102,8 +102,9 @@ public final class PortalRunService {
         PortalAdapter adapter = newAdapter(portalId, isCapture);
 
         String firmId = extraBindings.getOrDefault("params.firmId", "1");
+        String clientId = extraBindings.get("params.clientIdentifier");
         CredentialsProvider credentialsProvider = buildCredentialsProvider(descriptor, firmId);
-        PortalCredentials credentials = credentialsProvider.get(portalId);
+        PortalCredentials credentials = credentialsProvider.get(portalId, clientId);
 
         Map<String, String> bindings = buildBindings(credentials, extraBindings);
         Map<String, List<Map<String, String>>> listBindings = new HashMap<>();
@@ -212,6 +213,18 @@ public final class PortalRunService {
             manifest.status = adapter.captureToManifest(
                     scraped, scrapedRows, bindings, credentials, manifest);
 
+            // Teardown (logout, etc.) — best-effort. The run is already done
+            // and the envelope is already on disk; a logout failure must not
+            // flip a successful run to FAILED.
+            try {
+                adapter.afterCapture(page, bindings, manifest);
+            } catch (RuntimeException teardownEx) {
+                log.warn("afterCapture failed (non-fatal) portal={} error={}",
+                        descriptor.id(), teardownEx.toString());
+                manifest.step("teardown-failed", teardownEx.getClass().getSimpleName()
+                        + ": " + teardownEx.getMessage());
+            }
+
             context.tracing().stop(new Tracing.StopOptions()
                     .setPath(runDir.resolve("trace.zip")));
 
@@ -248,6 +261,7 @@ public final class PortalRunService {
             case "mock-portal"  -> new MockPortalAdapter();
             case "mock-payroll" -> isCapture ? new MockPayrollCaptureAdapter() : new MockPayrollAdapter();
             case "autoplanilla" -> new AutoplanillaAdapter();
+            case "ccss-sicere"  -> new CcssSicereSubmitAdapter();
             default -> throw new IllegalStateException(
                     "No PortalAdapter registered for portal: " + portalId);
         };

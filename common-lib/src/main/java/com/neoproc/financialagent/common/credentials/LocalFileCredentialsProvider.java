@@ -30,6 +30,14 @@ import java.util.Set;
  * strips the {@code portals.<portalId>.} prefix so consumers see the same
  * flat map whatever the backing store.
  *
+ * <p>For per-client portals the keys carry the client id as an extra
+ * segment: {@code portals.<portalId>.credentials.<clientId>.<name>=<value>}.
+ * Callers pass the client id to {@link #get(String, String)}; the provider
+ * looks up only that client's keys. The dev format mirrors the prod
+ * Secrets-Manager path layout
+ * ({@code financeagent/firms/<firmId>/portals/<portalId>/<clientId>}) so
+ * one mental model covers both environments.
+ *
  * <p>Enforces that the file is not group- or world-readable. On POSIX the
  * check is strict (refuses to load); on Windows, which does not expose
  * POSIX perms, it inspects the ACL and rejects the load if any principal
@@ -54,7 +62,7 @@ public final class LocalFileCredentialsProvider implements CredentialsProvider {
     }
 
     @Override
-    public PortalCredentials get(String portalId) {
+    public PortalCredentials get(String portalId, String clientId) {
         if (!Files.isRegularFile(secretsFile, LinkOption.NOFOLLOW_LINKS)) {
             throw new IllegalStateException(
                     "Credentials file not found: " + secretsFile
@@ -70,7 +78,18 @@ public final class LocalFileCredentialsProvider implements CredentialsProvider {
             throw new IllegalStateException("Failed to read " + secretsFile, e);
         }
 
-        String credPrefix = KEY_PREFIX + portalId + CRED_INFIX;
+        // Per-client portals namespace credentials by clientId; shared and
+        // per-firm portals don't. The dev format mirrors the prod Secrets
+        // Manager path layout (one extra segment for per-client) so the same
+        // mental model covers both environments.
+        //
+        // Praxis emits the cédula-jurídica with dashes ("3-101-680139"); we
+        // store keys in canonical digits-only form. Normalise on lookup so
+        // both wire formats resolve to the same secret.
+        String normalizedClientId = CredentialsProvider.normalizeClientId(clientId);
+        String credPrefix = normalizedClientId == null || normalizedClientId.isBlank()
+                ? KEY_PREFIX + portalId + CRED_INFIX
+                : KEY_PREFIX + portalId + CRED_INFIX + normalizedClientId + ".";
         Map<String, String> values = new LinkedHashMap<>();
         for (String key : props.stringPropertyNames()) {
             if (key.startsWith(credPrefix)) {
@@ -78,9 +97,14 @@ public final class LocalFileCredentialsProvider implements CredentialsProvider {
             }
         }
         if (values.isEmpty()) {
+            String hint = normalizedClientId == null || normalizedClientId.isBlank()
+                    ? "(expected keys starting with " + credPrefix + ")"
+                    : "(expected keys starting with " + credPrefix
+                            + " — check the clientIdentifier on the request envelope)";
             throw new IllegalStateException(
-                    "No credentials found for portal '" + portalId + "' in " + secretsFile
-                            + " (expected keys starting with " + credPrefix + ")");
+                    "No credentials found for portal '" + portalId + "'"
+                            + (clientId == null ? "" : " client '" + clientId + "'")
+                            + " in " + secretsFile + " " + hint);
         }
         return new PortalCredentials(portalId, Map.copyOf(values));
     }

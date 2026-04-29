@@ -1,0 +1,104 @@
+id: ccss-sicere
+description: CCSS Sicere — per-client payroll salary submit (save-only, HITL final-submit).
+baseUrl: https://aissfa.ccss.sa.cr/afiliacion/
+
+# Per-client credential scope (PraxisIntegrationHandoff.md §15.1):
+# one (firm × clientIdentifier) -> one corporate-id-bound login. Secret
+# path: financeagent/firms/<firmId>/portals/ccss-sicere/<clientIdentifier>.
+# `clientIdentifier` rides on the submit envelope and is the byte-for-byte
+# segment in the secret path; mismatches surface as CREDENTIALS_INVALID.
+credentialScope: per-client
+
+# CCSS portals throttle hard on rate-limit, and the per-row Aplicar Salarios
+# loop hits the server N times per planilla (16 employees == 16 round-trips).
+# One concurrent run per client; 2-second floor between worker-driven runs.
+rateLimit:
+  maxConcurrent: 1
+  minIntervalSeconds: 2.0
+
+# Session is bound to a corporate id by the portal. Reusing storageState
+# across runs is brittle (and verifying it works requires the per-client
+# rule from feedback_session_reuse_verify), so every run logs in fresh.
+# Cost: ~3-4 seconds per run, negligible against the per-row Aplicar loop.
+session:
+  ttlMinutes: 0
+
+# Runtime parameters the listener / CLI passes via -Dparams.<key>=<value>:
+#   params.clientIdentifier  = corporate id (cédula jurídica, 10 digits as
+#                              Praxis sends it: e.g. "3101680139"). Drives
+#                              credential lookup; not used to drive the
+#                              portal page (login is corporate-id-bound, so
+#                              the planilla on screen IS this client's).
+#   params.expectedTotal     = sum of the canonical input the run intends
+#                              to save. Optional; the adapter recomputes
+#                              from the submit-request body when present.
+#   params.source.submitRequest = path to the BPM submit envelope. Set by
+#                              PortalRunService when called from the queue
+#                              listener; CLI runs pass it explicitly.
+
+authSteps:
+  # Two-step login: username + Continuar to reveal the password field, then
+  # password + Ingresar. Distinct from AutoPlanilla's single-form login —
+  # don't bake the form-level patterns from autoplanilla.yaml into reusable
+  # auth helpers without checking the portal's actual flow first.
+  - action: navigate
+    target: /
+
+  - action: fill
+    selector: '[id="formInicioSesion:usuario"]'
+    value: "${credentials.username}"
+
+  # PrimeFaces buttons compose icon + text via two child spans; the
+  # button's accessible name then includes the icon span's text content,
+  # which made role=button[name='Continuar'] match unreliably across
+  # locales and icon sets. button:has-text('Continuar') matches the
+  # <button> whose visible descendant text contains 'Continuar', which
+  # is what the operator sees and what stays stable across PrimeFaces
+  # template tweaks. Scoped to the login form id (formInicioSesion)
+  # because the page also renders a hidden frmDlgExpPass (expired-
+  # password) dialog whose button shares the 'Continuar' text. Same
+  # form-scoping for Ingresar.
+  - action: click
+    selector: 'form[id="formInicioSesion"] button:has-text("Continuar")'
+
+  - action: fill
+    selector: '[id="formInicioSesion:clave"]'
+    value: "${credentials.password}"
+    redact: true
+
+  - action: click
+    selector: 'form[id="formInicioSesion"] button:has-text("Ingresar")'
+
+  # Confirm authenticated state by waiting for the post-login top-nav.
+  # The Planilla menu is one of the always-present items for an active
+  # patrono account; an inactive account would land on a different page
+  # and this would time out — surface as CREDENTIALS_INVALID via adapter.
+  - action: waitForSelector
+    selector: 'role=menuitem[name=/Planilla/]'
+
+# `steps` is empty by design — CcssSicereSubmitAdapter.beforeSteps does
+# all the navigation, variation detection (Presentar vs Modificar),
+# pagination, per-row fill + Aplicar Salarios, and totals capture
+# directly via Playwright. PortalScraper-driven YAML steps cannot
+# express the per-row matching loop because it depends on per-employee
+# canonical input that isn't a static `forEach` binding.
+steps: []
+
+# No descriptor-driven scrape — the adapter scrapes totals
+# (Total de Salarios Reportados, Total Salario) into bindings during
+# beforeSteps, after the Aplicar loop completes. This keeps the totals
+# fresh against the post-save state without relying on the standard
+# PortalRunService scrape phase that fires from a non-deterministic
+# pagination position.
+scrape:
+  fields: []
+
+securityContext:
+  scrubHarFields:
+    # PrimeFaces / JSF login form posts; field name is the input's
+    # PrimeFaces id. Update once we've seen a real login HAR.
+    - urlPattern: "**/afiliacion/**"
+      bodyFields:
+        - "formInicioSesion:clave"
+        - password
+        - clave

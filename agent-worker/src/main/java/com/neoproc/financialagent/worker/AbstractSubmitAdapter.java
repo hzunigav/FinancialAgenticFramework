@@ -36,11 +36,12 @@ import java.util.UUID;
  * identifier for shared-creds portals). Encryption, audit hashing, and
  * file write are handled here.
  *
- * <p>The {@code clientIdentifier} field is only populated for portals
- * whose descriptor declares {@code credentialScope: shared} — INS,
- * Hacienda, AutoPlanilla. Per-firm portals like CCSS Sicere leave it
- * {@code null} and the Jackson {@code @JsonInclude(NON_NULL)} on
- * {@link SubmitTask} keeps it off the wire.
+ * <p>The {@code clientIdentifier} field is populated for portals whose
+ * descriptor declares {@code credentialScope: shared} (INS, Hacienda,
+ * AutoPlanilla) or {@code credentialScope: per-client} (CCSS Sicere).
+ * Per-firm portals leave it {@code null} and the Jackson
+ * {@code @JsonInclude(NON_NULL)} on {@link SubmitTask} keeps it off the
+ * wire.
  */
 abstract class AbstractSubmitAdapter extends BaseAdapter {
 

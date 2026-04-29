@@ -450,9 +450,9 @@ PayrollSubmitRequest submitRequest = new PayrollSubmitRequest(
     SubmitTask.forSalaries(
         "ccss-sicere",                                 // or ins-rt-virtual / hacienda-ovi
         capture.envelope().envelopeId(),               // chain-of-custody link
+        firmPortalIdentifierRepo.find(firmId, "ccss-sicere"),  // clientIdentifier (per-client OR shared-creds)
         capture.task().period(),
-        capture.task().planilla(),
-        firmPortalIdentifierRepo.find(firmId, "ccss-sicere")),  // clientIdentifier if shared-creds
+        capture.task().planilla()),
     encryptedSubmitBody,
     new Audit(null, null, null, sha256Of(submitBody)));
 ```
@@ -461,7 +461,7 @@ Key rules:
 - Generate a **new** `envelopeId` per submit request (each target portal is an independent operation).
 - Carry `businessKey` unchanged from the capture envelope — this is the Receive Task correlation key.
 - Set `task.sourceCaptureEnvelopeId` to the capture result's `envelopeId` — audit chain-of-custody.
-- For shared-creds portals (`autoplanilla`, `ins-rt-virtual`, `hacienda-ovi`), include `task.clientIdentifier` from the firm's `FirmPortalIdentifier` entity. Workers reject shared-portal envelopes that lack it.
+- For shared-creds portals (`autoplanilla`, `ins-rt-virtual`, `hacienda-ovi`) AND per-client portals (`ccss-sicere`), include `task.clientIdentifier` from the firm's `FirmPortalIdentifier` entity (or the per-client equivalent for `ccss-sicere`'s corporate id). Workers reject envelopes that lack it. See [PraxisIntegrationHandoff.md §15.2](PraxisIntegrationHandoff.md#152-secret-path-and-json-value) for per-client semantics.
 
 #### What to publish
 
@@ -534,7 +534,7 @@ Before publishing any message, verify these fields are populated:
 - [ ] All envelope fields above (new `envelopeId`, same `businessKey`, same `firmId`)
 - [ ] `task.targetPortal` — portalId of the submit worker (e.g. `ccss-sicere`)
 - [ ] `task.sourceCaptureEnvelopeId` — audit link to the capture result
-- [ ] `task.clientIdentifier` — **required for shared-creds portals** (`ins-rt-virtual`, `hacienda-ovi`, `autoplanilla`); omit for per-firm portals (`ccss-sicere`)
+- [ ] `task.clientIdentifier` — **required for shared-creds portals** (`ins-rt-virtual`, `hacienda-ovi`, `autoplanilla`) **and per-client portals** (`ccss-sicere`, where it is the corporate id used both for credential resolution and portal-side verification); omit for per-firm portals
 - [ ] `encryption.*` — populated by `KmsEnvelopeClient.encrypt()`; `null` in dev with `local-aes-gcm-v1`
 - [ ] `request` — encrypted `SubmitRequestBody` containing the approved `employees[]` list
 - [ ] `audit.payloadSha256` — SHA-256 of the cleartext `SubmitRequestBody` before encryption

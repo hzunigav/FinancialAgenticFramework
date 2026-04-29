@@ -99,3 +99,75 @@ test from the handoff should pass: a `payroll-submit-request.v1` published
 by Praxis for `mock-payroll` results in the agent-worker emitting a
 `payroll-submit-result.v1`, and the corresponding Receive Task in the BPMN
 workflow advances within seconds.
+
+---
+
+## OI-002 — Error-result envelope failed schema validation, silently DLQ'd every submit error
+
+**Status:** worker-side fix landed 2026-04-29 PM. Documented for the diagnosis-of-record and to flag the symmetric "make silent drops loud" ask to Praxis.
+
+**Found:** 2026-04-29 during the first BPMN-driven E2E run (instance #3752, AutoPlanilla → CCSS Sicere). Manifested as the same Wait-stall symptom as OI-001 but with a different root cause. Worker had completed OI-001's cipher fix; the new stall surfaced the next layer of "silent drop" behaviour.
+
+### Symptom
+
+A `Payroll Cycle` workflow stays on **"Wait for CCSS result"** indefinitely after the worker pulls a submit task. RabbitMQ shows `financeagent.tasks.submit.ccss-sicere` drained to 0 (so the worker definitely received the task) but `financeagent.results` shows no new message. Worker log shows:
+
+```
+ERROR run failed envelopeId=<id>
+java.lang.IllegalStateException: No credentials found for portal 'ccss-sicere' client '3-101-680139' ...
+ERROR cannot publish error result — routing to DLQ envelopeId=<id>
+SchemaValidationException: Schema validation failed for payroll-submit-result.v1 (2 errors):
+  $.task: property 'period' is not defined in the schema and the schema does not allow additional properties;
+  $.task: property 'planilla' is not defined in the schema and the schema does not allow additional properties
+WARN  message processing failed — nacking to DLQ
+```
+
+Two stacked bugs: (a) the underlying credential-lookup miss (see OI-003 below), and (b) the error-envelope schema violation that prevented the listener from reporting any failure back to Praxis.
+
+### Root cause
+
+`PayrollTaskListener.wrapResult` echoed the request's `SubmitTask` (with `period` + `planilla`) verbatim into result envelopes for FAILED / DUPLICATE_ENVELOPE / minimal cases. The result schema's `task` block declares `additionalProperties: false` and only allows `type`, `operation`, `targetPortal`, `sourceCaptureEnvelopeId`, `clientIdentifier`. Validate-on-publish rejected the envelope, the listener's `try/catch` fell through to DLQ, and Praxis got no signal at all.
+
+This means error reporting was **broken for every submit-side error**, not just the credential miss that triggered today's run. Every prior submit error since the validate-on-publish path landed had been DLQ'ing too, masked by the fact that adapters had stayed inside the happy path.
+
+### Worker-side fix (landed 2026-04-29 PM)
+
+1. **`PayrollTaskListener.wrapResult`** strips `period` + `planilla` when copying the request's `SubmitTask` into the result envelope. The result-side task carries only `targetPortal`, `sourceCaptureEnvelopeId`, `clientIdentifier`.
+2. **`SchemaValidatorPojoTest`** locks the contract: a positive case asserts the post-fix transformation validates, a negative case asserts that a result with `period`/`planilla` on the task block fails validation (regression lock).
+3. **Memory rule** `feedback_pojo_validation_test_required` extended: error-envelope builders need their own POJO tests, and negative tests are valuable too.
+
+### Praxis-side asks
+
+1. **Optional — surface DLQ activity.** The `financeagent.dlq` queue is shared between worker-side error envelopes and Praxis-side malformed messages. Tooling that surfaces a non-zero DLQ depth (Slack/email/PagerDuty) would have shortened today's debug loop. Same shape as the OI-001 ask.
+
+---
+
+## OI-003 — clientIdentifier dashed-form on the wire was not normalised on lookup
+
+**Status:** worker-side fix landed 2026-04-29 PM. Documented to align Praxis and worker on the canonical wire form.
+
+**Found:** 2026-04-29, same BPMN run as OI-002. Surfaced as "no credentials found" but the secret existed under the dash-free key.
+
+### Symptom
+
+```
+java.lang.IllegalStateException: No credentials found for portal 'ccss-sicere' client '3-101-680139'
+in C:\Users\...\.financeagent\secrets.properties
+(expected keys starting with portals.ccss-sicere.credentials.3-101-680139. — check the clientIdentifier on the request envelope)
+```
+
+`secrets.properties` had `portals.ccss-sicere.credentials.3101680139.username/password` (digits-only). Praxis sent `clientIdentifier="3-101-680139"` (cédula jurídica with dashes). Lookup failed because both `LocalFileCredentialsProvider` and `AwsSecretsManagerCredentialsProvider` did exact-string matches, no normalisation.
+
+### Root cause
+
+The cédula jurídica has two equivalent forms: `3-101-680139` (legal-registry display, with dashes) and `3101680139` (internal id, dash-free). CCSS Sicere uses the dash-free form internally; Praxis sends the dashed legal form on the wire. The secret-storage layer hadn't agreed on a canonical form.
+
+### Worker-side fix (landed 2026-04-29 PM)
+
+1. **`CredentialsProvider.normalizeClientId(String)`** static helper strips ASCII hyphens + whitespace; preserves all other characters verbatim so non-cédula identifiers (UUIDs, alphanumeric tenant ids) pass through unchanged.
+2. Both `LocalFileCredentialsProvider` and `AwsSecretsManagerCredentialsProvider` call it before composing the lookup key (secrets-properties prefix or AWS Secrets Manager path segment).
+3. Either wire form (`3-101-680139` or `3101680139`) now resolves to the same secret. AWS Secrets Manager paths use the dash-free internal id by convention.
+
+### Praxis-side asks
+
+None — the worker now tolerates either form. Praxis can keep emitting the dashed legal form (which is what appears in Costa Rican legal documents) without coordination. Documenting here only so a future Praxis-side change to clientIdentifier formatting doesn't break the contract silently.

@@ -21,7 +21,7 @@
         "targetPortal": { "type": "string", "enum": ["ccss-sicere", "ins-rt-virtual", "hacienda-ovi", "mock-payroll"] },
         "sourceCaptureEnvelopeId": { "type": "string", "format": "uuid" },
         "clientIdentifier": { "type": "string",
-          "description": "Echoed from the submit-request for shared-creds portals; absent for per-firm portals." }
+          "description": "Echoed from the submit-request for shared-creds and per-client portals; absent for per-firm portals." }
       }
     },
 
@@ -67,7 +67,21 @@
               "description": "Post-submit grand total visible on the portal (sum of all salaries, changed and unchanged). Reconciles against the sum of all salaries pulled from the source-of-truth; any drift flips the run to MISMATCH, with rosterDiff naming the employees that explain the gap."
             },
             "updatedCount": { "type": "integer", "minimum": 0,
-                              "description": "Diagnostic: how many rows the agent actually changed on this submit. Not used for reconciliation." }
+                              "description": "Diagnostic: how many rows the agent actually changed on this submit. Not used for reconciliation." },
+            "expected": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
+              ],
+              "description": "Sum of every canonical-input salary the run intended to put on the portal. Surfaced as a process variable for BPMN gating: 'expected != grandTotal' (or 'expected != portalReported' on portals that distinguish working from reported totals) is the deterministic mismatch signal. Optional; older capture-only adapters omit it."
+            },
+            "portalReported": {
+              "oneOf": [
+                { "type": "null" },
+                { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
+              ],
+              "description": "Portal's reported/saved salaries total — distinct from grandTotal on portals that distinguish a working/draft total from a saved/reported total (CCSS Sicere's 'Total de Salarios Reportados'). Optional; portals without that distinction leave it null."
+            }
           }
         },
 
@@ -139,7 +153,11 @@
             "category":     { "type": "string",
                               "enum": ["NETWORK", "SELECTOR", "CREDENTIALS", "PORTAL_REJECTED",
                                        "DUPLICATE_ENVELOPE", "UNCAUGHT_EXCEPTION", "SCHEMA_VIOLATION",
-                                       "OTHER"] },
+                                       "OTHER",
+                                       "CREDENTIALS_INVALID", "CREDENTIALS_EXPIRED",
+                                       "PORTAL_UNREACHABLE", "PORTAL_AUTH_BLOCKED",
+                                       "UNEXPECTED"],
+                              "description": "Adapter-emitted categories follow the §15.5 vocabulary: CREDENTIALS_INVALID (login rejected), CREDENTIALS_EXPIRED (login forced password change), PORTAL_UNREACHABLE (network/DNS/timeout), PORTAL_AUTH_BLOCKED (CAPTCHA / step-up / anti-bot), UNEXPECTED (anything else). The remaining values are listener-side categories (DUPLICATE_ENVELOPE, UNCAUGHT_EXCEPTION, SCHEMA_VIOLATION) and pre-§15 worker-side categories (NETWORK, SELECTOR, CREDENTIALS, PORTAL_REJECTED, OTHER) kept for backwards compatibility. New adapters should use the §15.5 values." },
             "message":      { "type": "string" }
           }
         },
@@ -160,13 +178,41 @@
                 "required": ["type"],
                 "properties": {
                   "type":            { "type": "string",
-                                       "enum": ["TOTAL_GAP", "MISSING_FROM_PORTAL", "MISSING_FROM_PAYROLL"] },
-                  "canonical":       { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
-                  "portal":          { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
-                  "gap":             { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+                                       "enum": ["TOTAL_GAP", "MISSING_FROM_PORTAL", "MISSING_FROM_PAYROLL",
+                                                "NAME_DRIFT"] },
+                  "canonical":       {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
+                    ],
+                    "description": "Canonical-side amount for TOTAL_GAP signals. Money — accepts JSON string (canonical wire form) or JSON number (Jackson default for BigDecimal); both equivalent on the wire."
+                  },
+                  "portal":          {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
+                    ],
+                    "description": "Portal-side amount for TOTAL_GAP signals. Money — string or number."
+                  },
+                  "gap":             {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
+                    ],
+                    "description": "portal - canonical, signed. Money — string or number."
+                  },
                   "id":              { "type": ["string", "null"] },
-                  "name":            { "type": ["string", "null"] },
-                  "expectedSalary":  { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d{1,4})?$" },
+                  "name":            { "type": ["string", "null"],
+                                       "description": "Canonical (source-of-truth) employee name. For NAME_DRIFT, paired with portalName to surface the disagreement." },
+                  "portalName":      { "type": ["string", "null"],
+                                       "description": "Portal-side employee name. Populated for NAME_DRIFT signals so HITL can compare against the canonical name." },
+                  "expectedSalary":  {
+                    "oneOf": [
+                      { "type": "null" },
+                      { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Money" }
+                    ],
+                    "description": "Expected salary for MISSING_FROM_PORTAL signals. Money — string or number."
+                  },
                   "lastKnownSalary": {
                     "oneOf": [
                       { "type": "null" },

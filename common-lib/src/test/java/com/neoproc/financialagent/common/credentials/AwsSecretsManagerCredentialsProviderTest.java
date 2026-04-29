@@ -99,4 +99,82 @@ class AwsSecretsManagerCredentialsProviderTest {
 
         assertThrows(IllegalStateException.class, () -> provider.get(PORTAL_ID));
     }
+
+    @Test
+    void resolves_perClientPath() {
+        var provider = new AwsSecretsManagerCredentialsProvider(
+                FIRM_ID, id -> "per-client", secretsManager);
+
+        var captured = new String[1];
+        when(secretsManager.getSecretValue(any(GetSecretValueRequest.class)))
+                .thenAnswer(inv -> {
+                    captured[0] = ((GetSecretValueRequest) inv.getArgument(0)).secretId();
+                    return GetSecretValueResponse.builder()
+                            .secretString("{\"username\":\"u\",\"password\":\"p\"}")
+                            .build();
+                });
+
+        provider.get("ccss-sicere", "3101680139");
+
+        assertEquals(
+                "financeagent/firms/" + FIRM_ID + "/portals/ccss-sicere/3101680139",
+                captured[0]);
+    }
+
+    @Test
+    void perClient_throws_whenClientIdMissing() {
+        var provider = new AwsSecretsManagerCredentialsProvider(
+                FIRM_ID, id -> "per-client", secretsManager);
+
+        // Single-arg get(portalId) defaults clientId to null — per-client
+        // scope must reject it loudly so the worker fails fast rather than
+        // reading a nonsensical secret path.
+        assertThrows(IllegalStateException.class, () -> provider.get("ccss-sicere"));
+        assertThrows(IllegalStateException.class,
+                () -> provider.get("ccss-sicere", ""));
+        assertThrows(IllegalStateException.class,
+                () -> provider.get("ccss-sicere", "  "));
+    }
+
+    @Test
+    void perClient_stripsDashesFromCedulaJuridica() {
+        // Praxis sends the legal cédula-jurídica form with dashes; the secret
+        // path segment uses the dash-free internal id. The provider must
+        // normalise so both forms hit the same secret.
+        var provider = new AwsSecretsManagerCredentialsProvider(
+                FIRM_ID, id -> "per-client", secretsManager);
+
+        var captured = new String[1];
+        when(secretsManager.getSecretValue(any(GetSecretValueRequest.class)))
+                .thenAnswer(inv -> {
+                    captured[0] = ((GetSecretValueRequest) inv.getArgument(0)).secretId();
+                    return GetSecretValueResponse.builder()
+                            .secretString("{\"username\":\"u\",\"password\":\"p\"}")
+                            .build();
+                });
+
+        provider.get("ccss-sicere", "3-101-680139");
+
+        assertEquals(
+                "financeagent/firms/" + FIRM_ID + "/portals/ccss-sicere/3101680139",
+                captured[0],
+                "dashed form must resolve to the same secret as the digits-only form");
+    }
+
+    @Test
+    void normalizeClientId_helperContract() {
+        // The shared normaliser is the single source of truth for both
+        // providers; lock its behaviour here so both stay aligned.
+        assertEquals("3101680139",
+                CredentialsProvider.normalizeClientId("3-101-680139"));
+        assertEquals("3101680139",
+                CredentialsProvider.normalizeClientId(" 3-101-680139 "));
+        assertEquals("3101680139",
+                CredentialsProvider.normalizeClientId("3101680139"));
+        assertNull(CredentialsProvider.normalizeClientId(null));
+        // Non-cédula identifiers (UUIDs, alphanumeric tenant ids) pass through
+        // unchanged except for hyphen and whitespace stripping.
+        assertEquals("abc123def",
+                CredentialsProvider.normalizeClientId("abc-123-def"));
+    }
 }

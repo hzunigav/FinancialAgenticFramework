@@ -30,7 +30,7 @@ No descriptor changes go to production without a matching worker image and K8s d
 
 The path depends on the descriptor's `credentialScope` ([PraxisIntegrationHandoff.md §3 B.1](PraxisIntegrationHandoff.md#b1-secrets-manager-layout)):
 
-**Per-firm portal (e.g., CCSS Sicere):**
+**Per-firm portal:**
 - [ ] Payroll admin enters the firm's credentials in the Praxis firm-admin UI. UI writes to `financeagent/firms/<firmId>/portals/<portalId>`.
 - [ ] Admin never sees, types, or stores credentials in any file on any machine — not locally, not in a ticket, not in Slack. If the workflow tempts them to, the UI has a gap; file a UX bug rather than working around it.
 
@@ -38,12 +38,19 @@ The path depends on the descriptor's `credentialScope` ([PraxisIntegrationHandof
 - [ ] A tenant-admin (not a payroll admin) enters NeoProc's single login to `financeagent/shared/portals/<portalId>` — one time per portal, not per firm.
 - [ ] For each firm that will use this portal, the payroll admin enters the firm's **client identifier** on that portal (cédula jurídica / internal client code — not a secret) in the firm record. This lands on the envelope's `task.clientIdentifier` at dispatch time.
 
-**Verification** (for both scopes):
+**Per-client portal (e.g., CCSS Sicere):**
+- [ ] For each (firm × corporate id) the firm operates, the payroll admin enters the corporate-id-bound login in the firm-admin UI. UI writes to `financeagent/firms/<firmId>/portals/<portalId>/<clientIdentifier>`.
+- [ ] The same firm typically owns multiple corporate ids (multiple clients), each with its own login — the per-client path's last segment disambiguates them.
+- [ ] On every dispatch, BPM populates `task.clientIdentifier` with the corporate id (10-digit cédula jurídica as Praxis stores it, e.g. `3101680139`). The worker resolves credentials by string equality on this segment; whitespace/dashes/casing must match the secret-path segment byte-for-byte.
+
+**Verification** (for all three scopes):
 ```bash
 # Per-firm
 aws secretsmanager get-secret-value --secret-id financeagent/firms/<firmId>/portals/<portalId>
 # Shared
 aws secretsmanager get-secret-value --secret-id financeagent/shared/portals/<portalId>
+# Per-client
+aws secretsmanager get-secret-value --secret-id financeagent/firms/<firmId>/portals/<portalId>/<clientIdentifier>
 ```
 
 Should return the credential JSON in `SecretString` (password is present in cleartext over TLS — the AWS CLI does not mask it). If it returns `ResourceNotFoundException`, onboarding didn't complete — do not proceed to rollout.

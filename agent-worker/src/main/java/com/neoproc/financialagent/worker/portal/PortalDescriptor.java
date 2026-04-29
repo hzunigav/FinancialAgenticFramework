@@ -28,6 +28,7 @@ public record PortalDescriptor(
 
     public static final String SCOPE_PER_FIRM = "per-firm";
     public static final String SCOPE_SHARED = "shared";
+    public static final String SCOPE_PER_CLIENT = "per-client";
 
     public boolean isShadowMode() {
         return Boolean.TRUE.equals(shadowMode);
@@ -35,10 +36,25 @@ public record PortalDescriptor(
 
     /**
      * How portal credentials are scoped at the source of truth. Drives the
-     * Vault path the credentials provider reads from (per-firm subtree vs
-     * shared subtree). Defaults to per-firm — the safer assumption for a
-     * new portal, since leaking shared credentials to the wrong tenant is
-     * the worse failure mode.
+     * secret path the credentials provider reads from. Three values:
+     * <ul>
+     *   <li>{@code per-firm} — one login per firm. Path:
+     *       {@code financeagent/firms/<firmId>/portals/<portalId>}.</li>
+     *   <li>{@code shared} — one tenant-wide login that fronts every firm.
+     *       Path: {@code financeagent/shared/portals/<portalId>}. The
+     *       per-firm portal-side selector rides on
+     *       {@code task.clientIdentifier}.</li>
+     *   <li>{@code per-client} — one login per (firm × client). The login
+     *       itself is bound to a corporate id, so the same firm can own
+     *       many client logins. Path:
+     *       {@code financeagent/firms/<firmId>/portals/<portalId>/<clientIdentifier>}.
+     *       {@code task.clientIdentifier} is required and used both as the
+     *       secret-path segment and (where applicable) for portal-side
+     *       verification.</li>
+     * </ul>
+     * Defaults to per-firm — the safer assumption for a new portal, since
+     * leaking shared credentials to the wrong tenant is the worse failure
+     * mode.
      */
     public String credentialScope() {
         return credentialScope == null ? SCOPE_PER_FIRM : credentialScope;
@@ -46,6 +62,10 @@ public record PortalDescriptor(
 
     public boolean hasSharedCredentials() {
         return SCOPE_SHARED.equals(credentialScope());
+    }
+
+    public boolean hasPerClientCredentials() {
+        return SCOPE_PER_CLIENT.equals(credentialScope());
     }
 
     public List<Step> authSteps() {

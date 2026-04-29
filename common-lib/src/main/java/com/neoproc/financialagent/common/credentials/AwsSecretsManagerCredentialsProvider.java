@@ -12,25 +12,28 @@ import java.util.function.Function;
 /**
  * Production {@link CredentialsProvider} backed by AWS Secrets Manager.
  *
- * <p>Secret paths follow the convention from CONTRACT.md:
+ * <p>Secret paths follow the convention from CONTRACT.md and
+ * PraxisIntegrationHandoff.md §15.2:
  * <ul>
- *   <li>Per-firm: {@code financeagent/firms/<firmId>/portals/<portalId>}</li>
- *   <li>Shared:   {@code financeagent/shared/portals/<portalId>}</li>
+ *   <li>Per-firm:    {@code financeagent/firms/<firmId>/portals/<portalId>}</li>
+ *   <li>Shared:      {@code financeagent/shared/portals/<portalId>}</li>
+ *   <li>Per-client:  {@code financeagent/firms/<firmId>/portals/<portalId>/<clientId>}</li>
  * </ul>
  *
  * <p>The secret value must be a JSON object whose keys map directly to
  * {@link PortalCredentials} values (e.g. {@code {"username":"…","password":"…"}}).
  *
  * <p>The {@code credentialScopeFor} resolver determines per-portal whether to
- * use the shared or per-firm path. Callers supply this as a lambda so that
- * this class stays independent of the descriptor loader in {@code agent-worker}.
- * In practice: {@code id -> descriptor.credentialScope()}.
+ * use the shared, per-firm, or per-client path. Callers supply this as a
+ * lambda so that this class stays independent of the descriptor loader in
+ * {@code agent-worker}. In practice: {@code id -> descriptor.credentialScope()}.
  *
  * <p>Select this provider at runtime with {@code FINANCEAGENT_CREDENTIALS=aws}.
  */
 public final class AwsSecretsManagerCredentialsProvider implements CredentialsProvider {
 
     private static final String SCOPE_SHARED = "shared";
+    private static final String SCOPE_PER_CLIENT = "per-client";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, String>> MAP_TYPE = new TypeReference<>() {};
 
@@ -52,11 +55,9 @@ public final class AwsSecretsManagerCredentialsProvider implements CredentialsPr
     }
 
     @Override
-    public PortalCredentials get(String portalId) {
+    public PortalCredentials get(String portalId, String clientId) {
         String scope = credentialScopeFor.apply(portalId);
-        String secretId = SCOPE_SHARED.equals(scope)
-                ? "financeagent/shared/portals/" + portalId
-                : "financeagent/firms/" + firmId + "/portals/" + portalId;
+        String secretId = resolveSecretId(scope, portalId, clientId);
 
         String secretJson = secretsManager.getSecretValue(
                 GetSecretValueRequest.builder().secretId(secretId).build()
@@ -74,5 +75,24 @@ public final class AwsSecretsManagerCredentialsProvider implements CredentialsPr
             throw new IllegalStateException(
                     "Secret at " + secretId + " is not a valid JSON key-value map", e);
         }
+    }
+
+    private String resolveSecretId(String scope, String portalId, String clientId) {
+        if (SCOPE_SHARED.equals(scope)) {
+            return "financeagent/shared/portals/" + portalId;
+        }
+        if (SCOPE_PER_CLIENT.equals(scope)) {
+            // Praxis emits the cédula-jurídica with dashes ("3-101-680139");
+            // the secret-path segment uses the dash-free internal id. Normalise
+            // so either wire form resolves to the same secret.
+            String normalizedClientId = CredentialsProvider.normalizeClientId(clientId);
+            if (normalizedClientId == null || normalizedClientId.isBlank()) {
+                throw new IllegalStateException(
+                        "per-client portal '" + portalId + "' requires a clientIdentifier "
+                                + "but the request envelope did not provide one");
+            }
+            return "financeagent/firms/" + firmId + "/portals/" + portalId + "/" + normalizedClientId;
+        }
+        return "financeagent/firms/" + firmId + "/portals/" + portalId;
     }
 }

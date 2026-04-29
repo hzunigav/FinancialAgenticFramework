@@ -114,4 +114,79 @@ class EmployeeMatcherTest {
                 () -> EmployeeMatcher.match("1", "A",
                         List.of("1", "2"), List.of("A")));
     }
+
+    @Test
+    void matchWithDrift_acceptsNameMatch() {
+        // Cédula matches and confirmName succeeds → strict happy path,
+        // nameConfirmed=true, same as match().
+        List<String> ids = List.of("1-0909-0501", "1-1234-5678");
+        List<String> names = List.of("María Fernández", "José Núñez");
+
+        EmployeeMatcher.MatchResult r = EmployeeMatcher
+                .matchWithDrift("109090501", "Maria F", ids, names)
+                .orElseThrow();
+        assertEquals(0, r.index());
+        assertTrue(r.nameConfirmed());
+    }
+
+    @Test
+    void matchWithDrift_acceptsUniqueIdEvenWhenNameDrifts() {
+        // The Evelyn case from production: cédula 207630807 unique on the
+        // planilla; AutoPlanilla says "EVELYN GODINES" (typo) and CCSS
+        // Sicere says "GODINEZ BOZA EVELYN NATALIA". confirmName rejects
+        // (the surnames don't share a token) but the cédula is unique →
+        // accept with nameConfirmed=false so the caller can apply the
+        // salary AND surface a NAME_DRIFT signal to HITL.
+        List<String> ids = List.of("119960589", "207630807", "115010333");
+        List<String> names = List.of("CHINCHILLA PEREZ SORIA",
+                                     "GODINEZ BOZA EVELYN NATALIA",
+                                     "CASCANTE CALDERON LUIS ALEJANDRO");
+
+        EmployeeMatcher.MatchResult r = EmployeeMatcher
+                .matchWithDrift("207630807", "EVELYN GODINES", ids, names)
+                .orElseThrow();
+        assertEquals(1, r.index());
+        assertFalse(r.nameConfirmed());
+    }
+
+    @Test
+    void matchWithDrift_rejectsWhenIdNotFound() {
+        List<String> ids = List.of("1-0909-0501", "1-1234-5678");
+        List<String> names = List.of("María Fernández", "José Núñez");
+        assertEquals(Optional.empty(),
+                EmployeeMatcher.matchWithDrift("999999999", "Anyone", ids, names));
+    }
+
+    @Test
+    void matchWithDrift_rejectsDuplicatedCedulaWithNameMismatch() {
+        // Defensive case: portal-side data corruption / split record listing
+        // the same cédula twice with different names. We can't safely tiebreak
+        // without name confirm, so reject — fall through to MISSING_FROM_PORTAL
+        // and let HITL untangle it.
+        List<String> ids = List.of("207630807", "207630807", "115010333");
+        List<String> names = List.of("ALICE ANDERSON", "BOB BAKER", "CASCANTE CALDERON LUIS");
+        assertEquals(Optional.empty(),
+                EmployeeMatcher.matchWithDrift("207630807", "EVELYN GODINES", ids, names));
+    }
+
+    @Test
+    void matchWithDrift_acceptsDuplicatedCedulaWhenOneNameConfirms() {
+        // Same defensive scenario, but one of the duplicated rows has a
+        // confirmable name → accept that one (matchById returns the FIRST
+        // match, which happens to confirm here).
+        List<String> ids = List.of("207630807", "207630807");
+        List<String> names = List.of("Evelyn Godinez", "Bob Baker");
+        EmployeeMatcher.MatchResult r = EmployeeMatcher
+                .matchWithDrift("207630807", "Evelyn Godinez", ids, names)
+                .orElseThrow();
+        assertEquals(0, r.index());
+        assertTrue(r.nameConfirmed());
+    }
+
+    @Test
+    void matchWithDrift_rejectsMismatchedInputLengths() {
+        assertThrows(IllegalArgumentException.class,
+                () -> EmployeeMatcher.matchWithDrift("1", "A",
+                        List.of("1", "2"), List.of("A")));
+    }
 }

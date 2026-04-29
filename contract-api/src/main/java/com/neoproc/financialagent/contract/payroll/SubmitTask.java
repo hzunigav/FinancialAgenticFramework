@@ -13,7 +13,7 @@ public record SubmitTask(
         String operation,               // SUBMIT_SALARIES | SUBMIT_RENTA_DECLARATION
         String targetPortal,            // ccss-sicere | ins-rt-virtual | hacienda-ovi | mock-payroll
         String sourceCaptureEnvelopeId,
-        String clientIdentifier,        // shared-creds portals only; null for per-firm portals
+        String clientIdentifier,        // shared-creds and per-client portals; null for per-firm portals
         Period period,
         Planilla planilla) {
 
@@ -26,9 +26,15 @@ public record SubmitTask(
     }
 
     /**
-     * Factory for shared-creds portals (INS, Hacienda, AutoPlanilla) where
-     * the envelope must carry the portal-side identifier that picks the
-     * right client after NeoProc's shared login.
+     * Factory for portals that need a client identifier on the envelope:
+     * <ul>
+     *   <li>Shared-creds portals (INS, Hacienda, AutoPlanilla) — picks
+     *       which client to act on after NeoProc's shared login.</li>
+     *   <li>Per-client portals (CCSS Sicere) — corporate id used for
+     *       credential resolution (secret-path segment) and, where
+     *       applicable, for portal-side verification after the
+     *       corporate-id-bound login.</li>
+     * </ul>
      */
     public static SubmitTask forSalaries(String targetPortal,
                                          String sourceCaptureEnvelopeId,

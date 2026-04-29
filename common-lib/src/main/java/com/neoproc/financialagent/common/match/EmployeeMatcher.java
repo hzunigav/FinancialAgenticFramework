@@ -110,6 +110,14 @@ public final class EmployeeMatcher {
     /**
      * Convenience: run {@link #matchById} and {@link #confirmName} in
      * sequence. Returns the matched index only if both checks pass.
+     *
+     * <p>Strict variant — preserved for callers that want a hard reject on
+     * any name disagreement (e.g. cross-portal correlation where ID
+     * collisions are plausible). For per-planilla submission flows where
+     * cédulas are unique on both sides, prefer {@link #matchWithDrift},
+     * which accepts ID-unique matches with a {@code nameConfirmed=false}
+     * indicator so the caller can surface the disagreement to HITL
+     * instead of silently dropping the row.
      */
     public static Optional<Integer> match(String canonicalId,
                                           String canonicalName,
@@ -126,5 +134,71 @@ public final class EmployeeMatcher {
         return confirmName(canonicalName, displayedNames.get(idx))
                 ? byId
                 : Optional.empty();
+    }
+
+    /**
+     * Outcome of {@link #matchWithDrift}: the matched row index plus
+     * whether the canonical and displayed names confirmed under
+     * {@link #confirmName}. {@code nameConfirmed=false} means the cédula
+     * matched uniquely but the names diverged — the caller should accept
+     * the match (cédula is the primary key on a planilla) and surface a
+     * {@code NAME_DRIFT} signal to HITL so a human can review.
+     */
+    public record MatchResult(int index, boolean nameConfirmed) {}
+
+    /**
+     * ID-first match that tolerates name drift when the cédula is unique
+     * on both sides.
+     *
+     * <p>Returns:
+     * <ul>
+     *   <li>{@code empty} — canonical ID has no match in {@code displayedIds}.</li>
+     *   <li>{@code MatchResult{nameConfirmed=true}} — ID match confirmed by
+     *       {@link #confirmName}. The strict-{@link #match} happy path.</li>
+     *   <li>{@code MatchResult{nameConfirmed=false}} — ID matched but names
+     *       diverged. The caller should accept the match and emit a
+     *       {@code NAME_DRIFT} signal. Only returned when the canonical
+     *       ID appears <b>exactly once</b> in {@code displayedIds}; if the
+     *       portal lists the same cédula twice (data corruption / split
+     *       record), we fall back to the strict name confirm and reject
+     *       on disagreement, since name is the only tiebreaker.</li>
+     * </ul>
+     */
+    public static Optional<MatchResult> matchWithDrift(String canonicalId,
+                                                       String canonicalName,
+                                                       List<String> displayedIds,
+                                                       List<String> displayedNames) {
+        if (displayedIds.size() != displayedNames.size()) {
+            throw new IllegalArgumentException(
+                    "displayedIds and displayedNames must be the same length: "
+                            + displayedIds.size() + " vs " + displayedNames.size());
+        }
+        Optional<Integer> byId = matchById(canonicalId, displayedIds);
+        if (byId.isEmpty()) return Optional.empty();
+        int idx = byId.get();
+        boolean nameConfirmed = confirmName(canonicalName, displayedNames.get(idx));
+        if (nameConfirmed) {
+            return Optional.of(new MatchResult(idx, true));
+        }
+        // Names disagree. Accept anyway only when the canonical ID is unique
+        // on the portal side — otherwise the name is our only tiebreaker
+        // between the duplicated rows and we must reject.
+        if (idIsUnique(canonicalId, displayedIds)) {
+            return Optional.of(new MatchResult(idx, false));
+        }
+        return Optional.empty();
+    }
+
+    private static boolean idIsUnique(String canonicalId, List<String> displayedIds) {
+        String target = normalizeId(canonicalId);
+        if (target.isEmpty()) return false;
+        int count = 0;
+        for (String id : displayedIds) {
+            if (target.equals(normalizeId(id))) {
+                count++;
+                if (count > 1) return false;
+            }
+        }
+        return count == 1;
     }
 }

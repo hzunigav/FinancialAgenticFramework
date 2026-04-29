@@ -1,0 +1,42 @@
+{
+  "schema": "payroll-submit-request.v1",
+  "envelope": {
+    "envelopeId": "11111111-2222-3333-4444-555555555555",
+    "businessKey": "2026-04::Planilla NeoProc Abril",
+    "firmId": 1,
+    "locale": "es",
+    "createdAt": "2026-04-29T12:00:00.000Z",
+    "issuer": "ccss-sicere-smoke-test",
+    "issuerRunId": "smoke-1"
+  },
+  "task": {
+    "type": "PAYROLL_SUBMIT",
+    "operation": "SUBMIT_SALARIES",
+    "targetPortal": "ccss-sicere",
+    "clientIdentifier": "3101680139",
+    "period": {
+      "from": "2026-04-01",
+      "to":   "2026-04-30"
+    },
+    "planilla": {
+      "name": "Planilla NeoProc Abril 2026"
+    }
+  },
+  "encryption": null,
+  "request": {
+    "employees": [
+      { "id": "119960589", "displayName": "CHINCHILLA PEREZ SOFIA",          "salary":   329819.00 },
+      { "id": "118920764", "displayName": "BRENES ARRONES ASHLEY VALERIA",   "salary":   424999.00 },
+      { "id": "115010333", "displayName": "CASCANTE CALDERON LUIS ALEJANDRO","salary":  1234566.00 },
+      { "id": "207630807", "displayName": "GODINEZ BOZA EVELYN NATALIA",     "salary":   949999.00 },
+      { "id": "117040400", "displayName": "MARIN MUNOZ ANDRES",              "salary":   875049.00 },
+      { "id": "114230204", "displayName": "MONTERO ARCE CARLOS ANDRES",      "salary":   898699.00 },
+      { "id": "205030093", "displayName": "MONTERO MENDEZ RAFAEL ANTONIO",   "salary":  1182499.00 },
+      { "id": "118040420", "displayName": "MORA HERNANDEZ DAPHNE GABRIELA",  "salary":   898699.00 },
+      { "id": "111860150", "displayName": "OCHOA MEDINA FRANCISCO JOSE",     "salary":  1006911.94 }
+    ]
+  },
+  "audit": {
+    "payloadSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

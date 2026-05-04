@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -91,12 +92,23 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     private static final String CANCELAR_BUTTON = "button:visible:has-text(\"Cancelar\")";
     private static final String CONTINUAR_BUTTON = "button:visible:has-text(\"Continuar\")";
 
-    // Pagination chrome — the recording uses circle-button-right /
-    // circle-button-left class names. Disabled state needs verification
-    // against a real run; until then we read the row count after each
-    // Next click and stop when it doesn't change (last-page detection).
+    // Pagination chrome. INS's paginator renders as:
+    //   <button class="circle-button-left" [disabled]>   ← prev
+    //   <span class="page-status">1 de 2</span>          ← X of N
+    //   <button class="circle-button-right" [disabled]>  ← next
+    // The page-status span is the authoritative signal for total pages
+    // and for confirming that a Next click actually advanced; the
+    // disabled attribute tells us when each end is reached.
     private static final String PAGE_NEXT = ".circle-button-right";
     private static final String PAGE_PREV = ".circle-button-left";
+    private static final String PAGE_STATUS = ".page-status";
+    // INS renders the current-page "X" in an editable <input> inside the
+    // page-status span; only the literal "de N" portion is in innerText.
+    // Make the leading X optional so the regex catches both forms.
+    // We only consume the trailing N as totalPages — the current page
+    // index is already captured per row when we iterate via gotoNextPage.
+    private static final Pattern PAGE_STATUS_PATTERN =
+            Pattern.compile("(?:(\\d+)\\s+)?de\\s+(\\d+)");
 
     /**
      * Buttons the adapter will refuse to click, ever — visible-text denylist
@@ -723,8 +735,22 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
 
         safeClick(page.locator("button:has-text(\"Cargar lista seleccionada\")"),
                 "Cargar lista seleccionada");
-        // Confirmation prompt before the clone fires.
-        safeClick(page.locator("button:has-text(\"Aceptar\")"), "Aceptar");
+        // The codegen recording captured an "Aceptar" confirmation
+        // dialog after Cargar — but empirically that only fires when
+        // there's existing planilla state to overwrite. When the
+        // operator is starting from a fresh poliza (no prior draft),
+        // Cargar closes the picker dialog directly. Wait briefly for
+        // Aceptar; click if present, proceed if not.
+        Locator aceptar = page.locator("button:visible:has-text(\"Aceptar\")");
+        try {
+            aceptar.first().waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(3_000));
+            safeClick(aceptar, "Aceptar");
+            manifest.step("aceptar-overwrite", "confirmed overwrite of prior planilla state");
+        } catch (RuntimeException ignored) {
+            manifest.step("aceptar-skip", "no Aceptar confirm dialog (fresh planilla state)");
+        }
         page.waitForLoadState(LoadState.LOAD);
 
         // Confirm we're on the edit page by waiting for at least one
@@ -741,29 +767,121 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     // --- Pagination + per-row save -----------------------------------------
 
     private List<PortalRow> scrapeAllPages(Page page, RunManifest manifest) {
-        // INS doesn't expose a "Página X de Y" indicator like CCSS does —
-        // detect last page by attempting to advance and observing whether
-        // the row set changed. Cap at a defensive ceiling so a stuck
-        // pagination button can't infinite-loop us.
-        final int MAX_PAGES = 50;
+        // Read total pages from the .page-status span ("X de N") upfront,
+        // same robustness pattern CCSS uses with its "Página X de Y"
+        // paginator: counting upfront defends against the race where
+        // gotoNextPage sees the new chrome before the new rows render.
+        // INS renders the digits inside .page-status asynchronously
+        // (the outer span shows up first with a partial "de" text);
+        // poll briefly so we read the populated value, not the skeleton.
+        int totalPages = pollTotalPages(page, 5_000);
+        log.info("paginator reports totalPages={}", totalPages);
+
         List<PortalRow> all = new ArrayList<>();
-        int pageIdx = 1;
-        while (pageIdx <= MAX_PAGES) {
+        for (int pageIdx = 1; pageIdx <= totalPages; pageIdx++) {
             List<PortalRow> pageRows = scrapeCurrentPage(page, pageIdx);
             all.addAll(pageRows);
-            log.info("scraped page {} rows={} runningTotal={}", pageIdx, pageRows.size(), all.size());
+            log.info("scraped page {}/{} rows={} runningTotal={}",
+                    pageIdx, totalPages, pageRows.size(), all.size());
             manifest.step("scrape-page",
-                    "page=" + pageIdx + " rows=" + pageRows.size()
+                    "page=" + pageIdx + "/" + totalPages
+                            + " rows=" + pageRows.size()
                             + " runningTotal=" + all.size());
-            if (!gotoNextPage(page, pageRows)) break;
-            pageIdx++;
-        }
-        if (pageIdx > MAX_PAGES) {
-            log.warn("ins-rt-virtual: hit MAX_PAGES={} during scrape — pagination may be stuck", MAX_PAGES);
+            if (pageIdx < totalPages && !gotoNextPage(page)) {
+                log.warn("expected to advance to page {} but Next was no-op; stopping",
+                        pageIdx + 1);
+                break;
+            }
         }
         gotoFirstPage(page);
         return all;
     }
+
+    /**
+     * Poll {@link #readTotalPages} for up to {@code timeoutMs} or until
+     * it returns a value > 1. INS renders the page-status text in two
+     * passes (the "de" word lands first, then the digit spans populate);
+     * a single read race with the digit pass and reports 1 page even
+     * when there are 2+. This wrapper keeps the result-vs-1-page
+     * ambiguity correct: a planilla genuinely on one page sees
+     * timeoutMs of polling and returns 1, while a multi-page planilla
+     * gets caught at the moment N>1 first becomes readable.
+     */
+    private static int pollTotalPages(Page page, int timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        int last = 1;
+        while (System.currentTimeMillis() < deadline) {
+            int read = readTotalPages(page);
+            if (read > 1) return read;
+            last = read;
+            page.waitForTimeout(250);
+        }
+        // Final-attempt diagnostic: dump every candidate so we can see
+        // why the regex didn't catch the trabajadores paginator. Costs
+        // one extra DOM walk on the last poll iteration only.
+        Locator status = page.locator(PAGE_STATUS);
+        int n = status.count();
+        StringBuilder dump = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            String t;
+            try { t = status.nth(i).innerText(); } catch (RuntimeException e) { continue; }
+            dump.append('[').append(i).append(":'").append(t.replaceAll("\\s+", "·")).append("'] ");
+        }
+        // Also try a broader DOM scan: any element whose text matches
+        // the X-de-N pattern. If the trabajadores paginator uses a
+        // different class, this catches it.
+        Locator anyMatch = page.locator(":text-matches(\"\\\\d+\\\\s*de\\\\s*\\\\d+\")");
+        int m = Math.min(anyMatch.count(), 5);
+        StringBuilder scan = new StringBuilder();
+        for (int i = 0; i < m; i++) {
+            String t;
+            try { t = anyMatch.nth(i).innerText(); } catch (RuntimeException e) { continue; }
+            scan.append('[').append(i).append(":'")
+                    .append(t.replaceAll("\\s+", "·").substring(0, Math.min(60, t.length())))
+                    .append("'] ");
+        }
+        log.warn("pollTotalPages timed out at totalPages={}; .page-status candidates: {}; X-de-N in DOM: {}",
+                last, dump, scan);
+        return last;
+    }
+
+    /**
+     * Walk every {@code .page-status} on the page (INS uses the same
+     * class on multiple widgets — search results, error panel, the
+     * trabajadores paginator, etc.) and return the largest N from any
+     * "X de N" text. The trabajadores paginator is the one we care
+     * about; its N is always ≥ all the static "1 de 1" indicators
+     * elsewhere. Returns 1 if no match.
+     */
+    private static int readTotalPages(Page page) {
+        Locator status = page.locator(PAGE_STATUS);
+        int n = status.count();
+        int maxPages = 1;
+        String bestText = "";
+        for (int i = 0; i < n; i++) {
+            String text;
+            try {
+                text = status.nth(i).innerText().trim();
+            } catch (RuntimeException e) {
+                continue;
+            }
+            Matcher m = PAGE_STATUS_PATTERN.matcher(text);
+            if (m.find()) {
+                try {
+                    int total = Integer.parseInt(m.group(2));
+                    if (total > maxPages) {
+                        maxPages = total;
+                        bestText = text;
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        if (!bestText.isEmpty()) {
+            log.info("page-status[trabajadores]: '{}' -> totalPages={}", bestText, maxPages);
+        }
+        return maxPages;
+    }
+
 
     private List<PortalRow> scrapeCurrentPage(Page page, int pageIdx) {
         // Anchor on the salary inputs themselves rather than presuming a
@@ -830,43 +948,46 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         }
     }
 
-    private static List<String> readTdTexts(Locator row) {
-        Locator tds = row.locator("td");
-        int n = tds.count();
-        List<String> out = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            out.add(textOrEmpty(tds.nth(i)));
-        }
-        return out;
-    }
 
     /**
-     * Advance to the next page if the right-arrow paginator is enabled
-     * and clicking it actually changes the row set. Returns false when
-     * we've hit the last page (button disabled, or click no-op).
+     * Advance to the next page and confirm the row set changed. The
+     * page-status text only carries "de N" (the current-page number is
+     * in a separate input we don't read), so a static-text comparison
+     * is useless. Read the first row's cédula before/after instead —
+     * if the click actually advanced, the new page's first cédula
+     * differs from the old one.
      */
-    private boolean gotoNextPage(Page page, List<PortalRow> currentPageRows) {
+    private boolean gotoNextPage(Page page) {
         Locator next = page.locator(PAGE_NEXT).first();
         if (next.count() == 0) return false;
         if (isDisabled(next)) return false;
-        // Capture a snapshot of the first row's cédula to detect whether
-        // the click actually changed the page (defensive against the
-        // disabled-state being missing from CSS but present functionally).
-        String fingerprintBefore = currentPageRows.isEmpty()
-                ? "" : currentPageRows.get(0).identification();
+        String beforeCedula = firstRowCedula(page);
         try {
             next.click();
         } catch (RuntimeException e) {
             return false;
         }
         page.waitForTimeout(500);  // SPA re-render
-        Locator firstRowAfter = page.locator("tr:has(input[name=\"salario\"])").first();
-        if (firstRowAfter.count() == 0) return false;
-        List<String> cells = readTdTexts(firstRowAfter);
-        String fingerprintAfter = cells.stream()
-                .filter(c -> CEDULA_PATTERN.matcher(c).matches())
-                .findFirst().orElse("");
-        return !fingerprintAfter.isEmpty() && !fingerprintAfter.equals(fingerprintBefore);
+        String afterCedula = firstRowCedula(page);
+        return !afterCedula.isEmpty() && !afterCedula.equals(beforeCedula);
+    }
+
+    private static String firstRowCedula(Page page) {
+        Locator inputs = page.locator("input[name=\"salario\"]");
+        if (inputs.count() == 0) return "";
+        String rowText;
+        try {
+            rowText = (String) inputs.first().evaluate(
+                    "(el) => { let p = el.parentElement; "
+                            + "while (p && !/\\d{9,12}/.test(p.textContent || '')) "
+                            + "p = p.parentElement; "
+                            + "return p ? (p.textContent || '') : ''; }");
+        } catch (RuntimeException e) {
+            return "";
+        }
+        if (rowText == null) return "";
+        Matcher m = CEDULA_PATTERN.matcher(rowText.replaceAll("\\s+", " "));
+        return m.find() ? m.group() : "";
     }
 
     private void gotoFirstPage(Page page) {
@@ -886,6 +1007,17 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     }
 
     private static boolean isDisabled(Locator locator) {
+        // Locator.isDisabled() honors the native HTML disabled attribute
+        // and aria-disabled="true". INS's paginator buttons use the bare
+        // <button disabled> form, which neither class-based nor
+        // aria-disabled-only checks would catch — without this, click()
+        // tries to actuate the disabled button and burns its 30s
+        // actionability timeout per call.
+        try {
+            if (locator.isDisabled()) return true;
+        } catch (RuntimeException ignored) {
+            // Fall through to attribute checks below.
+        }
         String cls = locator.getAttribute("class");
         if (cls != null && (cls.contains("disabled") || cls.contains("ui-state-disabled"))) {
             return true;
@@ -895,13 +1027,16 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     }
 
     private void saveRow(Page page, PortalRow row, BigDecimal salary, RunManifest manifest) {
-        ensureOnPage(page, row.pageIndex());
-
         if (dryRun) {
+            // Skip ensureOnPage too — in dryRun we're not filling, so
+            // there's no need to navigate the row into view. Saves the
+            // gotoFirstPage round-trip per matched canonical (significant
+            // when matchSet is dozens).
             manifest.step("save-DRYRUN",
                     "id=" + row.identification() + " wouldSave=" + salary.toPlainString());
             return;
         }
+        ensureOnPage(page, row.pageIndex());
 
         // Anchor the input by the row's cédula text, not by stored index —
         // INS may re-render the row order if auto-save reshuffles. Same

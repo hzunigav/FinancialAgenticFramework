@@ -1,0 +1,98 @@
+id: ins-rt-virtual
+description: INS RT-Virtual — shared-creds payroll salary submit (save-only, HITL final-submit).
+baseUrl: https://rtvirtual.grupoins.com/
+
+# Shared-creds scope (PraxisIntegrationHandoff.md §B): one set of
+# credentials accesses every póliza on the platform; the firm scope
+# rides on the envelope as task.clientIdentifier (cédula jurídica,
+# 10 digits like "3101680139"). Secret path:
+# financeagent/shared/portals/ins-rt-virtual/{username,password}.
+credentialScope: shared
+
+# INS auto-saves on blur ("Auto guardado" toast in the UI), so the
+# per-row Tab loop has no portal-side ajax round-trip. Throttle is
+# conservative until we observe behaviour at real-load.
+rateLimit:
+  maxConcurrent: 1
+  minIntervalSeconds: 2.0
+
+# SPA portal — JWT lives in sessionStorage, not cookies/localStorage.
+# Playwright's storageState() captures nothing useful in that case
+# (per feedback_session_reuse_verify), so every run logs in fresh.
+# Cost: ~3-4 seconds, negligible against the per-row save loop.
+session:
+  ttlMinutes: 0
+
+# Runtime bindings the listener (or CLI) supplies via -Dparams.<key>=<value>:
+#   params.clientIdentifier  = cédula jurídica of the firm being filed
+#                              (e.g. "3101680139"). The adapter searches
+#                              the dashboard for the póliza card whose
+#                              "Identificación" cell matches and clicks
+#                              its Ver póliza button. 1:1 firm:póliza
+#                              today; the adapter fails fast with
+#                              MULTIPLE_POLICIES if it sees more than
+#                              one match (would need a policyNumber
+#                              tiebreaker — not in the binding contract
+#                              yet).
+#   params.source.submitRequest = path to the BPM submit envelope. Set
+#                              by PortalRunService when called from the
+#                              queue listener; CLI runs pass it directly.
+#   params.dryRun            = "true" skips the per-row fill (navigation,
+#                              scrape, match still execute). Useful for
+#                              first-contact validation against a real
+#                              portal.
+
+authSteps:
+  - action: navigate
+    target: /
+
+  # Login is a two-step UI: a header button reveals the username +
+  # password form, then a single "Iniciar sesión" submits. Match the
+  # trigger by partial accessible name — INS truncated "...sesión"
+  # out of the aria-label and we don't want to depend on whitespace.
+  - action: click
+    selector: 'role=button[name=/Abrir formulario de inicio de/]'
+
+  - action: fill
+    selector: 'role=textbox[name=/Digite su número de/]'
+    value: "${credentials.username}"
+
+  - action: fill
+    selector: 'role=textbox[name=/Ingrese su contraseña/]'
+    value: "${credentials.password}"
+    redact: true
+
+  - action: click
+    selector: 'role=button[name="Iniciar sesión"]'
+
+  # Post-login readiness is verified inside InsRtVirtualSubmitAdapter
+  # (waitForPostLoginReady) rather than here, because the SPA can land
+  # on either the póliza dashboard OR a "otrasSessiones" confirm dialog
+  # depending on whether the BFF flagged concurrent sessions for the
+  # shared-creds account. The adapter dismisses the dialog if present,
+  # then waits for the dashboard cards. Keeping the dialog handling in
+  # Java means we can also save a diagnostic screenshot on stall — the
+  # PortalEngine waitForSelector path can't.
+
+# Empty by design — InsRtVirtualSubmitAdapter.beforeSteps does all the
+# póliza-card selection, planilla creation, per-row fill, and totals
+# capture directly via Playwright. The descriptor's PortalScraper YAML
+# can't express the dynamic per-employee matching loop.
+steps: []
+
+# No descriptor-driven scrape — totals are captured from the Resumen
+# dialog inside the adapter (the dialog only opens after Continuar
+# fires, well after PortalRunService's standard scrape phase).
+scrape:
+  fields: []
+
+securityContext:
+  scrubHarFields:
+    # Update once we've seen a real INS login HAR. The form posts JSON
+    # to a Grupo INS auth endpoint; field names below are the typical
+    # candidates and any HTML form names we observe in codegen recordings.
+    - urlPattern: "**/grupoins.com/**"
+      bodyFields:
+        - password
+        - contrasena
+        - clave

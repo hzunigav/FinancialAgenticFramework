@@ -55,6 +55,18 @@ aws secretsmanager get-secret-value --secret-id financeagent/firms/<firmId>/port
 
 Should return the credential JSON in `SecretString` (password is present in cleartext over TLS — the AWS CLI does not mask it). If it returns `ResourceNotFoundException`, onboarding didn't complete — do not proceed to rollout.
 
+### Local-dev equivalent (`~/.financeagent/secrets.properties`)
+
+For descriptor authoring against a real portal from a developer workstation (`PortalOnboarding.md` flow), `LocalFileCredentialsProvider` resolves the same `(portalId, clientIdentifier)` pair against a property file. The key shape mirrors the prod AWS path so one mental model covers both:
+
+| Scope         | Prod path                                                          | Local key prefix                                              |
+|---------------|--------------------------------------------------------------------|---------------------------------------------------------------|
+| Per-firm      | `financeagent/firms/<firmId>/portals/<portalId>`                   | `portals.<portalId>.credentials.`                             |
+| Shared        | `financeagent/shared/portals/<portalId>`                           | `portals.<portalId>.credentials.`                             |
+| Per-client    | `financeagent/firms/<firmId>/portals/<portalId>/<clientIdentifier>`| `portals.<portalId>.credentials.<clientIdentifier>.`          |
+
+**Note for shared-scope portals that use `params.clientIdentifier` for portal navigation** (e.g., INS RT-Virtual searches for the póliza card by cédula jurídica): the credential lookup is still scope-driven, not client-keyed. `PortalRunService` nulls `clientIdentifier` at the credentials-provider call site whenever `descriptor.credentialScope == shared`, so AWS resolves to `financeagent/shared/portals/<portalId>` and the local file resolves to the un-namespaced `portals.<portalId>.credentials.*` keys — even though the same `params.clientIdentifier` continues flowing into the adapter via the bindings map for navigation. One credential set per shared portal, regardless of how many firms the worker visits with it.
+
 ---
 
 ## 3. Wire the BPMN Service Task

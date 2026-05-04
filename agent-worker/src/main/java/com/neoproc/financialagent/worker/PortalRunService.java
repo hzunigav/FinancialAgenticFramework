@@ -104,7 +104,17 @@ public final class PortalRunService {
         String firmId = extraBindings.getOrDefault("params.firmId", "1");
         String clientId = extraBindings.get("params.clientIdentifier");
         CredentialsProvider credentialsProvider = buildCredentialsProvider(descriptor, firmId);
-        PortalCredentials credentials = credentialsProvider.get(portalId, clientId);
+        // Shared-scope portals (INS RT-Virtual, AutoPlanilla, Hacienda OVI)
+        // keep one credential set per portalId — the path doesn't include
+        // clientIdentifier on either AWS or the local file. The AWS provider
+        // already ignores clientId for shared scope; the local provider keys
+        // on clientId whenever it's non-blank, so for portals like INS that
+        // need clientIdentifier for navigation but not for credential lookup,
+        // null it out here so dev and prod resolve identically. clientId
+        // continues to flow into the adapter via the bindings map below.
+        String credClientId = "shared".equalsIgnoreCase(descriptor.credentialScope())
+                ? null : clientId;
+        PortalCredentials credentials = credentialsProvider.get(portalId, credClientId);
 
         Map<String, String> bindings = buildBindings(credentials, extraBindings);
         Map<String, List<Map<String, String>>> listBindings = new HashMap<>();
@@ -262,6 +272,7 @@ public final class PortalRunService {
             case "mock-payroll" -> isCapture ? new MockPayrollCaptureAdapter() : new MockPayrollAdapter();
             case "autoplanilla" -> new AutoplanillaAdapter();
             case "ccss-sicere"  -> new CcssSicereSubmitAdapter();
+            case "ins-rt-virtual" -> new InsRtVirtualSubmitAdapter();
             default -> throw new IllegalStateException(
                     "No PortalAdapter registered for portal: " + portalId);
         };

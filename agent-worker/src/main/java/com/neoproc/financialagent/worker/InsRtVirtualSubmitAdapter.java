@@ -89,7 +89,14 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     // Resumen dialog leaving the per-row auto-saved edits intact (the
     // planilla stays in en-edición state). Presentar planilla is the
     // formal commit and is owned by HITL; see FORBIDDEN_BUTTON_LABELS.
-    private static final String CANCELAR_BUTTON = "button:visible:has-text(\"Cancelar\")";
+    //
+    // The Resumen dialog renders both buttons with stable ids:
+    //   #btn-cancel-payroll  → "Cancelar"           (this adapter clicks)
+    //   #btn-submit-payroll  → "Presentar planilla" (HITL-only; FORBIDDEN)
+    // Anchoring on the id avoids collision with cosmetic notification-bar
+    // "Cerrar" buttons that share visible-text patterns. Verified via
+    // diag.dumpResumen capture 2026-05-04T15:11.
+    private static final String CANCELAR_BUTTON = "#btn-cancel-payroll";
     private static final String CONTINUAR_BUTTON = "button:visible:has-text(\"Continuar\")";
 
     // Pagination chrome. INS's paginator renders as:
@@ -125,7 +132,14 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
      */
     private static final List<String> FORBIDDEN_BUTTON_LABELS = List.of(
             "presentar planilla",
-            "presentar"
+            "presentar",
+            // Acciones rápidas dropdown sibling that files an EMPTY planilla
+            // (zero trabajadores, zero salaries) — observed 2026-05-04 after
+            // INS renamed the dropdown items. Worse than just "Presentar
+            // planilla" because clicking it bypasses the Resumen dialog
+            // entirely; the planilla is filed straight away. Hard-deny
+            // by exact text.
+            "presentar planilla sin trabajadores"
     );
 
     // Cédula pattern — Costa Rica national IDs are 9 digits, juridicas 10,
@@ -140,10 +154,24 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     private RosterDiff rosterDiff = new RosterDiff(List.of(), List.of());
     private List<SubmitResultBody.SubmittedRow> submittedRows = List.of();
     private List<SubmitResultBody.Signal> nameDriftSignals = List.of();
+    // Accumulator for canonicals whose saveRow threw mid-loop (search
+    // returned 0 or > 1 rows, fill error, accordion timeout, etc.). The
+    // run no longer aborts on the first failure — it tags the canonical
+    // with a FILL_FAILED signal and continues with the rest, so HITL
+    // sees the partial picture instead of nothing.
+    private List<SubmitResultBody.Signal> fillFailureSignals = List.of();
     private String sourceCaptureEnvelopeId;
     private String clientIdentifier;
     private String consecutivoTemporal;
     private int trabajadoresReportados;
+    // Verbatim innerText of the Resumen de planilla dialog. Surfaced as
+    // PortalConfirmation.rawText so HITL has the exact portal-side
+    // numbers (consecutivo / trabajadores / total / promedio) without
+    // having to re-render an artifact. The schema requires this field
+    // to be a non-null string — null was rejected on the result-publish
+    // path on 2026-05-05 (SchemaValidationException at
+    // $.result.portalConfirmation.rawText).
+    private String resumenRawText = "";
     // Dry-run mode: navigates, scrapes, matches, but does NOT touch the
     // portal (no fill, no Continuar). Set with -Dparams.dryRun=true (CLI).
     private boolean dryRun;
@@ -155,6 +183,25 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
                             Map<String, List<Map<String, String>>> listBindings,
                             PortalCredentials credentials,
                             RunManifest manifest) {
+        try {
+            beforeStepsImpl(descriptor, page, bindings, listBindings, credentials, manifest);
+        } catch (RuntimeException e) {
+            // PortalRunService only fires afterCapture on the success path —
+            // when beforeSteps throws, the session is left logged in and the
+            // shared-creds account accumulates "concurrent session detected"
+            // banners on every subsequent run. Best-effort logout here so
+            // failure cycles don't poison success cycles.
+            performLogoutBestEffort(page, manifest, "logout-on-error");
+            throw e;
+        }
+    }
+
+    private void beforeStepsImpl(PortalDescriptor descriptor,
+                                 Page page,
+                                 Map<String, String> bindings,
+                                 Map<String, List<Map<String, String>>> listBindings,
+                                 PortalCredentials credentials,
+                                 RunManifest manifest) {
 
         clientIdentifier = bindings.get("params.clientIdentifier");
         if (clientIdentifier == null || clientIdentifier.isBlank()) {
@@ -164,10 +211,18 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         }
 
         dryRun = Boolean.parseBoolean(bindings.getOrDefault("params.dryRun", "false"));
-        log.info("ins-rt-virtual starting clientIdentifier={} dryRun={}", clientIdentifier, dryRun);
+        boolean diagDumpResumen = Boolean.parseBoolean(
+                bindings.getOrDefault("params.diag.dumpResumen", "false"));
+        log.info("ins-rt-virtual starting clientIdentifier={} dryRun={} diagDumpResumen={}",
+                clientIdentifier, dryRun, diagDumpResumen);
         if (dryRun) {
             manifest.step("dry-run",
                     "params.dryRun=true — no fill, no Continuar; navigation + scrape + match still execute");
+        }
+        if (diagDumpResumen) {
+            manifest.step("diag-dump-resumen",
+                    "params.diag.dumpResumen=true — fills first row, opens Resumen, dumps HTML, Cancela; "
+                            + "skips match loop and roster diff");
         }
 
         List<Canonical> canonicals = loadCanonical(bindings);
@@ -188,14 +243,41 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         waitForPostLoginReady(page, bindings, manifest);
         openPolizaForClient(page, bindings, manifest);
         openPlanillaForEdit(page, bindings, manifest);
+        // Bump rows-per-page to the maximum INS offers (200) so the entire
+        // planilla renders on a single page. This lets saveRow anchor on
+        // {@code :has-text(<cédula>)} directly without fighting the
+        // toolbar search box (whose magnifier-button submit affordance
+        // we couldn't reliably click — see 2026-05-04T19:49 / T20:11
+        // failures) and without depending on stale page indices that
+        // INS invalidates by reshuffling rows after every auto-save.
+        // 200 covers any realistic NeoProc-managed payroll; if a future
+        // firm exceeds it, this will surface as the loop iterating
+        // canonicals that match no displayed row, which the matcher
+        // already routes to MISSING_FROM_PORTAL.
+        setPageSize(page, "200", manifest);
         saveDiagnosticScreenshot(page, bindings, "planilla-edit-state");
         log.info("ins-rt-virtual on planilla edit page; scraping rows");
+
+        if (diagDumpResumen) {
+            runDiagDumpResumen(page, canonicals, bindings, manifest);
+            // Short-circuit the rest of beforeSteps. buildSubmitOutcome will
+            // run with empty submittedRows / zero totals — the result envelope
+            // is meaningless in diag mode; the value is the dumped HTML on disk.
+            submittedRows = List.of();
+            nameDriftSignals = List.of();
+            rosterDiff = new RosterDiff(List.of(), List.of());
+            portalReportedTotal = BigDecimal.ZERO;
+            consecutivoTemporal = "";
+            trabajadoresReportados = 0;
+            return;
+        }
 
         List<SubmitResultBody.SubmittedRow> matchedRows = new ArrayList<>();
         List<RosterDiff.MissingFromPortal> missingFromPortal = new ArrayList<>();
         List<SubmitResultBody.Signal> drifts = new ArrayList<>();
         List<PortalRow> displayedAll = scrapeAllPages(page, manifest);
         boolean[] displayedMatched = new boolean[displayedAll.size()];
+        List<SubmitResultBody.Signal> fillFails = new ArrayList<>();
 
         for (Canonical c : canonicals) {
             Optional<EmployeeMatcher.MatchResult> matched = findMatchingRow(c, displayedAll);
@@ -235,9 +317,35 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
                         null, null));
             }
 
-            saveRow(page, row, c.salary(), manifest);
-            matchedRows.add(new SubmitResultBody.SubmittedRow(
-                    row.identification(), row.name(), c.salary()));
+            // saveRow is wrapped: a single row's failure (search returned
+            // 0/many, fill timeout, INS reshuffled the row out from under
+            // us, etc.) records a FILL_FAILED signal and the loop moves
+            // on. Aborting on the first failure left every later
+            // canonical un-saved AND surfaced a useless terminal-fail
+            // result envelope; HITL would rather see "12 of 14 saved, 2
+            // need attention" than a bare exception. Status routes to
+            // PARTIAL when fillFails is non-empty.
+            try {
+                saveRow(page, row, c.salary(), bindings, manifest);
+                matchedRows.add(new SubmitResultBody.SubmittedRow(
+                        row.identification(), row.name(), c.salary()));
+            } catch (RuntimeException saveEx) {
+                String reason = saveEx.getClass().getSimpleName()
+                        + ": " + saveEx.getMessage();
+                log.warn("save-failed canonicalId={} portalCedula={} reason={}",
+                        c.id(), row.identification(), reason, saveEx);
+                manifest.step("save-failed",
+                        "canonicalId=" + c.id()
+                                + " portalCedula=" + row.identification()
+                                + " expectedSalary=" + c.salary().toPlainString()
+                                + " reason=" + reason);
+                fillFails.add(new SubmitResultBody.Signal(
+                        "FILL_FAILED", null, null, null,
+                        row.identification(),
+                        c.name(),
+                        c.salary(),
+                        null));
+            }
         }
 
         // Anything portal-side that we never matched and that has a
@@ -257,13 +365,15 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         rosterDiff = new RosterDiff(missingFromPortal, missingFromPayroll);
         submittedRows = List.copyOf(matchedRows);
         nameDriftSignals = List.copyOf(drifts);
-        log.info("roster-diff missingFromPortal={} missingFromPayroll={} nameDrift={} expected={}",
+        fillFailureSignals = List.copyOf(fillFails);
+        log.info("roster-diff missingFromPortal={} missingFromPayroll={} nameDrift={} fillFailed={} expected={}",
                 missingFromPortal.size(), missingFromPayroll.size(),
-                nameDriftSignals.size(), canonicalGrandTotal);
+                nameDriftSignals.size(), fillFailureSignals.size(), canonicalGrandTotal);
         manifest.step("roster-diff",
                 "missingFromPortal=" + missingFromPortal.size()
                         + " missingFromPayroll=" + missingFromPayroll.size()
                         + " nameDrift=" + nameDriftSignals.size()
+                        + " fillFailed=" + fillFailureSignals.size()
                         + " expected=" + canonicalGrandTotal);
 
         // Open the Resumen dialog for the post-save totals readout.
@@ -304,14 +414,15 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
                                                PortalCredentials credentials,
                                                RunManifest manifest) {
 
-        // Same status routing as CCSS Sicere: roster diff or name drift
-        // routes to PARTIAL (HITL needs to confirm the lifecycle / identity);
-        // totals divergence with empty diff routes to MISMATCH; otherwise
-        // SUCCESS. Reconciliation gates on portalReportedTotal — the value
-        // INS displays in the Resumen dialog after auto-save settles.
+        // Same status routing as CCSS Sicere: roster diff, name drift,
+        // or any per-row save failure routes to PARTIAL (HITL needs to
+        // resolve the gap); totals divergence with empty diff routes to
+        // MISMATCH; otherwise SUCCESS. Reconciliation gates on
+        // portalReportedTotal — the value INS displays in the Resumen
+        // dialog after auto-save settles.
         boolean totalsMatch = canonicalGrandTotal.compareTo(portalReportedTotal) == 0;
         String status;
-        if (!rosterDiff.isEmpty() || !nameDriftSignals.isEmpty()) {
+        if (!rosterDiff.isEmpty() || !nameDriftSignals.isEmpty() || !fillFailureSignals.isEmpty()) {
             status = EnvelopeStatus.PARTIAL;
         } else if (!totalsMatch) {
             status = EnvelopeStatus.MISMATCH;
@@ -324,10 +435,12 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
                         + " expected=" + canonicalGrandTotal
                         + " portalReported=" + portalReportedTotal
                         + " rosterDiff.empty=" + rosterDiff.isEmpty()
-                        + " nameDrift=" + nameDriftSignals.size());
+                        + " nameDrift=" + nameDriftSignals.size()
+                        + " fillFailed=" + fillFailureSignals.size());
 
         SubmitResultBody.Review review = buildReview(
-                status, canonicalGrandTotal, portalReportedTotal, rosterDiff, nameDriftSignals);
+                status, canonicalGrandTotal, portalReportedTotal, rosterDiff,
+                nameDriftSignals, fillFailureSignals);
 
         // INS Consecutivo temporal is a diagnostic id pre-Presentar; it
         // promotes to a permanent planilla number after HITL final-submit.
@@ -336,7 +449,15 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         SubmitResultBody.PortalConfirmation confirmation =
                 (consecutivoTemporal != null && !consecutivoTemporal.isBlank())
                         ? new SubmitResultBody.PortalConfirmation(
-                                consecutivoTemporal, Instant.now(), null)
+                                consecutivoTemporal,
+                                Instant.now(),
+                                // Schema requires a non-null string; pass
+                                // the verbatim Resumen dialog text so HITL
+                                // sees the same fields INS rendered. Empty
+                                // string fallback covers the path where
+                                // the dialog scrape didn't populate it
+                                // (e.g. dryRun short-circuit upstream).
+                                resumenRawText == null ? "" : resumenRawText)
                         : null;
 
         SubmitResultBody body = new SubmitResultBody(
@@ -369,23 +490,57 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
 
     @Override
     public void afterCapture(Page page, Map<String, String> bindings, RunManifest manifest) {
-        // Best-effort logout. The session is JWT-bearing and short-lived;
-        // leaking it doesn't expose data, but a clean teardown is polite
-        // and helps if the same shared-creds user runs concurrently for
-        // another firm's BPMN execution. PortalRunService swallows any
-        // exception thrown from this hook.
+        // Success-path teardown. PortalRunService swallows any exception
+        // thrown from this hook, so a logout failure cannot flip a SUCCESS
+        // run to FAILED. The same helper is invoked from the failure path
+        // in beforeSteps so error cycles don't leak the shared session.
+        performLogoutBestEffort(page, manifest, "logout");
+    }
+
+    /**
+     * Click whatever "Cerrar sesión" affordance INS exposes on the
+     * current page. Tries the left-sidebar link first (visible from any
+     * post-login state, including planilla edit / Resumen dialog open),
+     * then falls back to the top-right user-menu flow that the codegen
+     * recording captured. Always non-fatal: if both paths fail we log
+     * and move on, leaving the JWT to expire on its own — leaking a
+     * short-lived session is annoying (next run dismisses a "concurrent
+     * session detected" modal) but never blocks correctness.
+     *
+     * @param stepLabel manifest step name on success — typically
+     *                  {@code "logout"} for the success path and
+     *                  {@code "logout-on-error"} so the manifest makes
+     *                  it obvious which path the cleanup ran from.
+     */
+    private void performLogoutBestEffort(Page page, RunManifest manifest, String stepLabel) {
+        if (page == null) return;
         try {
-            // The recording's logout path: top-right user-menu icon →
-            // "Cerrar sesión". Both selectors are best-effort; if INS
-            // tweaks the avatar control we'll see this fail in logs but
-            // the run will already be complete.
-            page.locator(".buttons-user-item-header").first().click();
-            page.locator("button:has-text(\"Cerrar sesión\")").first().click();
+            // Sidebar path — verified visible in every post-login screenshot
+            // captured 2026-05-04. The exact-text match avoids accidentally
+            // hitting a button that merely contains "Cerrar" (e.g. a modal's
+            // close button). 3s click timeout so we don't burn 30s of
+            // Playwright actionability waiting on a stale element.
+            Locator sidebar = page.locator(":visible:text-is(\"Cerrar sesión\")").first();
+            if (sidebar.count() > 0) {
+                try {
+                    sidebar.click(new Locator.ClickOptions().setTimeout(3_000));
+                    page.waitForLoadState(LoadState.LOAD);
+                    manifest.step(stepLabel, "sidebar Cerrar sesión");
+                    return;
+                } catch (RuntimeException ignored) {
+                    // Fall through to top-right user-menu attempt.
+                }
+            }
+            // Top-right user-menu path — the codegen recording's original.
+            page.locator(".buttons-user-item-header").first()
+                    .click(new Locator.ClickOptions().setTimeout(3_000));
+            page.locator("button:has-text(\"Cerrar sesión\")").first()
+                    .click(new Locator.ClickOptions().setTimeout(3_000));
             page.waitForLoadState(LoadState.LOAD);
-            manifest.step("logout", "user-menu -> Cerrar sesión");
+            manifest.step(stepLabel, "user-menu -> Cerrar sesión");
         } catch (RuntimeException e) {
             log.warn("ins-rt-virtual logout failed (non-fatal)", e);
-            manifest.step("logout-skip", "best-effort logout failed: " + e.getMessage());
+            manifest.step(stepLabel + "-skip", "best-effort logout failed: " + e.getMessage());
         }
     }
 
@@ -508,6 +663,230 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
             return byText;
         } catch (RuntimeException ignored) {
             return null;
+        }
+    }
+
+    /**
+     * Diagnostic-only flow: drops onto the planilla edit page after
+     * openPlanillaForEdit, fills the first visible row with the first
+     * canonical's salary, clicks Continuar to open the Resumen dialog,
+     * then dumps three pieces of DOM to disk so we can harden selectors
+     * without burning an E2E attempt:
+     *
+     * <ol>
+     *   <li>{@code diag-spot1-salary-input.html} — the first salary
+     *       {@code <input>}'s outerHTML, plus a sibling-walk of its
+     *       containing row to see how INS lays the row out.</li>
+     *   <li>{@code diag-spot2-resumen-dialog.html} + .txt + screenshot —
+     *       the Resumen de planilla dialog's full outer HTML and rendered
+     *       text, so we can pin labels (Total de salarios, Consecutivo
+     *       temporal, etc.) and value cell selectors.</li>
+     *   <li>{@code diag-spot3-cancelar-candidates.html} — every visible
+     *       button whose text matches /cancel|cerrar|volver/i, with its
+     *       outerHTML and a parent-chain crumb, so we can pick the right
+     *       Cancelar without colliding with a snackbar/header Cancelar.</li>
+     * </ol>
+     *
+     * Then clicks Cancelar to dismiss the dialog (no Presentar — the
+     * FORBIDDEN_BUTTON_LABELS denylist still applies). The cloned planilla
+     * is left with the one filled row exactly like a normal save-only
+     * run; the operator cleans it up from "Planillas guardadas" later.
+     */
+    private void runDiagDumpResumen(Page page,
+                                    List<Canonical> canonicals,
+                                    Map<String, String> bindings,
+                                    RunManifest manifest) {
+        // --- spot 1: salary input + row HTML --------------------------------
+        Locator inputs = page.locator("input[name=\"salario\"]");
+        if (inputs.count() == 0) {
+            saveDiagnosticScreenshot(page, bindings, "diag-no-salary-inputs");
+            throw new IllegalStateException(
+                    "diag.dumpResumen: no input[name=\"salario\"] visible on the edit page");
+        }
+        Locator firstInput = inputs.first();
+        String inputHtml = (String) firstInput.evaluate("el => el.outerHTML");
+        saveDiagFile(bindings, "diag-spot1-salary-input.html", inputHtml);
+        // Walk up to the first ancestor whose textContent contains a
+        // cédula-shaped digit run (same heuristic scrapeCurrentPage uses)
+        // and dump its outerHTML — that's the row container.
+        String rowHtml = (String) firstInput.evaluate(
+                "(el) => { let p = el.parentElement; "
+                        + "while (p && !/\\d{9,12}/.test(p.textContent || '')) p = p.parentElement; "
+                        + "return p ? p.outerHTML : ''; }");
+        saveDiagFile(bindings, "diag-spot1-salary-row.html", rowHtml);
+        saveDiagnosticScreenshot(page, bindings, "diag-spot1-edit-page");
+        manifest.step("diag-spot1", "dumped first salary input + row outerHTML");
+
+        // --- fill the first row so Continuar has something to summarise -----
+        Canonical first = canonicals.get(0);
+        BigDecimal diagSalary = first.salary();
+        log.info("diag: filling first salary input with canonical {} salary={}",
+                first.id(), diagSalary);
+        firstInput.scrollIntoViewIfNeeded();
+        firstInput.click();
+        firstInput.fill(formatSalaryForInput(diagSalary));
+        firstInput.press("Tab");
+        page.waitForTimeout(800);  // auto-save toast settles
+        // Capture what the input actually holds after blur — tells us
+        // whether INS reformats US-comma ("1,127,500") or expects EU.
+        String postBlurValue = "";
+        try {
+            postBlurValue = firstInput.inputValue();
+        } catch (RuntimeException ignored) {}
+        saveDiagFile(bindings, "diag-spot1-input-value-post-blur.txt",
+                "filled='" + formatSalaryForInput(diagSalary)
+                        + "'\npostBlur='" + postBlurValue + "'");
+        manifest.step("diag-spot1-fill",
+                "filled=" + formatSalaryForInput(diagSalary)
+                        + " postBlur='" + postBlurValue + "'");
+
+        // --- spot 2: Resumen dialog -----------------------------------------
+        log.info("diag: clicking Continuar to open Resumen dialog");
+        safeClick(page.locator(CONTINUAR_BUTTON), "Continuar");
+        // Wait for any role=dialog to materialise; the existing
+        // RESUMEN_DIALOG selector requires "Resumen de planilla" text and
+        // would over-constrain if the title differs.
+        try {
+            page.waitForSelector("[role=\"dialog\"]:visible",
+                    new Page.WaitForSelectorOptions()
+                            .setState(WaitForSelectorState.VISIBLE)
+                            .setTimeout(15_000));
+        } catch (RuntimeException timeout) {
+            saveDiagnosticScreenshot(page, bindings, "diag-spot2-no-dialog");
+            saveDiagFile(bindings, "diag-spot2-no-dialog-pageHtml.html",
+                    (String) page.evaluate("() => document.body.outerHTML"));
+            throw new IllegalStateException(
+                    "diag.dumpResumen: no role=dialog appeared after Continuar — "
+                            + "see diag-spot2-no-dialog.png", timeout);
+        }
+        // The Resumen dialog opens with a loader spinner ("modal-body
+        // > .loader > .loading") and only renders the totals/buttons after
+        // an async fetch settles. Reading immediately captures the
+        // skeleton — confirmed empirically on the 14:44 diag run where
+        // diag-spot2-resumen-dialog.txt came back 0 bytes. Poll until
+        // either the loader disappears or the dialog text grows past a
+        // skeletal threshold.
+        long deadline = System.currentTimeMillis() + 30_000;
+        boolean loaded = false;
+        while (System.currentTimeMillis() < deadline) {
+            int loaderCount = page.locator("[role=\"dialog\"]:visible .loader:visible").count();
+            String txt;
+            try {
+                txt = page.locator("[role=\"dialog\"]:visible").first().innerText();
+            } catch (RuntimeException e) { txt = ""; }
+            if (loaderCount == 0 && txt.length() > 30) {
+                loaded = true;
+                break;
+            }
+            page.waitForTimeout(500);
+        }
+        if (!loaded) {
+            log.warn("diag: Resumen dialog loader never cleared in 30s — dumping current state anyway");
+        }
+        // Prefer the Resumen-anchored locator; fall back to any visible dialog.
+        Locator resumen = page.locator(RESUMEN_DIALOG).first();
+        if (resumen.count() == 0) {
+            resumen = page.locator("[role=\"dialog\"]:visible").first();
+        }
+        String dlgHtml = (String) resumen.evaluate("el => el.outerHTML");
+        String dlgText = resumen.innerText();
+        saveDiagFile(bindings, "diag-spot2-resumen-dialog.html", dlgHtml);
+        saveDiagFile(bindings, "diag-spot2-resumen-dialog.txt", dlgText);
+        saveDiagnosticScreenshot(page, bindings, "diag-spot2-resumen");
+        manifest.step("diag-spot2",
+                "loaded=" + loaded + " dumped Resumen dialog outerHTML ("
+                        + dlgHtml.length() + " bytes) text=" + dlgText.length() + " bytes");
+
+        // --- spot 3: Cancelar candidates ------------------------------------
+        Locator visButtons = page.locator("button:visible");
+        int btnCount = visButtons.count();
+        StringBuilder candidates = new StringBuilder();
+        candidates.append("Visible buttons matching /cancel|cerrar|volver/i (case-insensitive):\n\n");
+        int matched = 0;
+        for (int i = 0; i < btnCount; i++) {
+            Locator b = visButtons.nth(i);
+            String text;
+            try {
+                text = b.innerText().trim();
+            } catch (RuntimeException e) {
+                continue;
+            }
+            if (text.isEmpty()) continue;
+            String low = text.toLowerCase(Locale.ROOT);
+            if (!(low.contains("cancel") || low.contains("cerrar") || low.contains("volver"))) {
+                continue;
+            }
+            String html;
+            try {
+                html = (String) b.evaluate("el => el.outerHTML");
+            } catch (RuntimeException e) {
+                continue;
+            }
+            String parentChain;
+            try {
+                parentChain = (String) b.evaluate(
+                        "(el) => { const crumbs = []; let p = el; "
+                                + "for (let i = 0; i < 6 && p && p.tagName; i++) { "
+                                + "  const id = p.id ? '#' + p.id : ''; "
+                                + "  const cls = p.className && typeof p.className === 'string' "
+                                + "      ? '.' + p.className.trim().split(/\\s+/).slice(0, 3).join('.') : ''; "
+                                + "  crumbs.unshift(p.tagName.toLowerCase() + id + cls); "
+                                + "  p = p.parentElement; "
+                                + "} return crumbs.join(' > '); }");
+            } catch (RuntimeException e) {
+                parentChain = "(crumb-failed)";
+            }
+            candidates.append("--- candidate[").append(i).append("] text='").append(text).append("' ---\n")
+                    .append("parentChain: ").append(parentChain).append("\n")
+                    .append(html).append("\n\n");
+            matched++;
+        }
+        if (matched == 0) {
+            candidates.append("(no visible button matched /cancel|cerrar|volver/i — full button list follows)\n\n");
+            for (int i = 0; i < Math.min(btnCount, 50); i++) {
+                String text;
+                try {
+                    text = visButtons.nth(i).innerText().trim();
+                } catch (RuntimeException e) { continue; }
+                if (text.isEmpty()) continue;
+                candidates.append("[").append(i).append("] '").append(text).append("'\n");
+            }
+        }
+        saveDiagFile(bindings, "diag-spot3-cancelar-candidates.txt", candidates.toString());
+        manifest.step("diag-spot3", "dumped " + matched + " Cancelar/Cerrar/Volver candidate(s)");
+
+        // --- back out cleanly via Cancelar ----------------------------------
+        try {
+            safeClick(page.locator(CANCELAR_BUTTON), "Cancelar");
+            page.waitForLoadState(LoadState.LOAD);
+            manifest.step("diag-cancelar", "dismissed Resumen dialog via existing CANCELAR_BUTTON selector");
+        } catch (RuntimeException e) {
+            log.warn("diag: Cancelar click failed — leaving dialog open. spot3 dump should reveal why.", e);
+            manifest.step("diag-cancelar-fail", "current CANCELAR_BUTTON selector did not match: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Write a UTF-8 text artifact next to the run's screenshots/manifest.
+     * Used by the diag.dumpResumen flow; non-fatal on failure (worker
+     * shouldn't die over a diagnostic write that would only delay diag
+     * iteration anyway).
+     */
+    private static void saveDiagFile(Map<String, String> bindings,
+                                     String name,
+                                     String content) {
+        try {
+            String runDirStr = bindings.get("runtime.runDir");
+            if (runDirStr == null) {
+                log.warn("diag file {} not written — runtime.runDir binding missing", name);
+                return;
+            }
+            Path file = Paths.get(runDirStr).resolve(name);
+            java.nio.file.Files.writeString(file, content == null ? "" : content);
+            log.info("diag file written: {} ({} bytes)", file,
+                    content == null ? 0 : content.length());
+        } catch (Exception e) {
+            log.warn("failed to write diag file {}", name, e);
         }
     }
 
@@ -657,20 +1036,33 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         safeClick(preparar, "Preparar planilla");
         page.waitForLoadState(LoadState.LOAD);
 
+        // INS renamed "Nueva planilla" to a longer descriptive label after
+        // a UI refresh observed 2026-05-04: "Cargar lista de trabajadores
+        // de periodos anteriores" (load workers from previous periods —
+        // identical intent and same picker dialog opens). Try the legacy
+        // label first for backward-compat, fall through to the new one.
+        // Both labels live inside the "Acciones rápidas" dropdown when the
+        // poliza is in en-edición state.
+        //
+        // CRITICAL: the dropdown's *sibling* item is "Presentar planilla
+        // sin trabajadores", which would file an empty planilla on click.
+        // Never click it. Belt-and-suspenders: it's also in
+        // FORBIDDEN_BUTTON_LABELS, and we anchor on the specific
+        // "Cargar lista..." text rather than any visible dropdown item.
         Locator nueva = clickableByText(page, "Nueva planilla");
         if (nueva == null) {
-            // INS RT-Virtual hides Nueva planilla inside an "Acciones
-            // rápidas" dropdown at the top-right of the Preparar planilla
-            // page. Open it, then re-look. The codegen recording worked
-            // on a fresh poliza state where the button was directly
-            // visible; this fallback handles the in-edición state where
-            // the action menu must be opened first.
-            log.info("Nueva planilla not directly visible — opening Acciones rápidas dropdown");
+            nueva = clickableByText(page, "Cargar lista de trabajadores de periodos anteriores");
+        }
+        if (nueva == null) {
+            log.info("Cargar/Nueva planilla not directly visible — opening Acciones rápidas dropdown");
             Locator acciones = clickableByText(page, "Acciones rápidas");
             if (acciones != null) {
                 safeClick(acciones, "Acciones rápidas");
                 page.waitForTimeout(500);
                 nueva = clickableByText(page, "Nueva planilla");
+                if (nueva == null) {
+                    nueva = clickableByText(page, "Cargar lista de trabajadores de periodos anteriores");
+                }
             }
         }
         if (nueva == null) {
@@ -688,12 +1080,14 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
             manifest.step("nueva-planilla-not-found",
                     "buttons=" + labels.toString());
             throw new IllegalStateException(
-                    "ins-rt-virtual: Nueva planilla button not found on the Preparar "
-                            + "planilla page (and not inside Acciones rápidas dropdown). "
-                            + "See nueva-planilla-not-found.png and the manifest "
-                            + "nueva-planilla-not-found step for the visible button list.");
+                    "ins-rt-virtual: neither 'Nueva planilla' nor "
+                            + "'Cargar lista de trabajadores de periodos anteriores' "
+                            + "found on the Preparar planilla page (or inside Acciones "
+                            + "rápidas dropdown). See nueva-planilla-not-found.png and "
+                            + "the manifest nueva-planilla-not-found step for the visible "
+                            + "button list.");
         }
-        safeClick(nueva, "Nueva planilla");
+        safeClick(nueva, "Cargar/Nueva planilla");
 
         // The Nueva planilla dialog lists prior-period planillas as rows
         // with checkboxes. Operator confirmed the most recent prior is
@@ -1026,66 +1420,124 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         return "true".equalsIgnoreCase(aria);
     }
 
-    private void saveRow(Page page, PortalRow row, BigDecimal salary, RunManifest manifest) {
+    private void saveRow(Page page, PortalRow row, BigDecimal salary,
+                         Map<String, String> bindings, RunManifest manifest) {
         if (dryRun) {
-            // Skip ensureOnPage too — in dryRun we're not filling, so
-            // there's no need to navigate the row into view. Saves the
-            // gotoFirstPage round-trip per matched canonical (significant
-            // when matchSet is dozens).
             manifest.step("save-DRYRUN",
                     "id=" + row.identification() + " wouldSave=" + salary.toPlainString());
             return;
         }
-        ensureOnPage(page, row.pageIndex());
 
-        // Anchor the input by the row's cédula text, not by stored index —
-        // INS may re-render the row order if auto-save reshuffles. Same
-        // robustness rule as CCSS Sicere's PrimeFaces handling.
+        // With page-size bumped to 200 in beforeStepsImpl, every row of a
+        // realistic NeoProc-managed planilla is rendered on a single page.
+        // Anchor directly on the accordion-item whose subtree contains
+        // the canonical cédula — INS reshuffles row order after each
+        // auto-save but {@code :has-text} still finds the row regardless
+        // of position, and there's no pagination to navigate. The prior
+        // search-box approach had to fight the magnifier-icon submit
+        // affordance (a real button we couldn't click cleanly) and the
+        // X-clear button that mounts inside the search wrapper; both
+        // sidestepped by the page-size bump.
         Locator targetRow = page.locator(
-                "tr:has(input[name=\"salario\"]):has-text(\"" + row.identification() + "\")");
+                "div.accordion-item:has(input[name=\"salario\"])"
+                        + ":has-text(\"" + row.identification() + "\")");
         Locator input = targetRow.locator("input[name=\"salario\"]").first();
         input.waitFor(new Locator.WaitForOptions()
                 .setState(WaitForSelectorState.VISIBLE)
                 .setTimeout(10_000));
         input.scrollIntoViewIfNeeded();
         input.click();
-        // Playwright's fill() replaces the existing value; no need for
-        // dblclick-to-select that the codegen recording captured (codegen
-        // often emits redundant interactions when the operator double-clicks
-        // out of habit).
-        input.fill(formatSalaryForInput(salary));
+        // Real keystrokes (Ctrl+A / Delete / pressSequentially) so INS's
+        // SPA input-event listeners actually fire — fill() with element
+        // .value= bypasses them, which is what stranded prior runs at
+        // 19:49 with empty inputs. Tab to commit; auto-save fires on blur.
+        input.press("Control+A");
+        input.press("Delete");
+        input.pressSequentially(formatSalaryForInput(salary),
+                new Locator.PressSequentiallyOptions().setDelay(40));
         input.press("Tab");
-        // Auto-save is on blur (Tab triggers blur). The "Auto guardado"
-        // toast is the visible signal; we wait long enough for the toast
-        // to settle but well below any sensible portal-side rate-limit.
-        page.waitForTimeout(400);
+        page.waitForTimeout(400);                  // toast settles
         manifest.step("save-row",
                 "id=" + row.identification() + " salary=" + salary.toPlainString());
     }
 
-    private void ensureOnPage(Page page, int targetPage) {
-        // Cheap implementation: jump to first page, then click Next
-        // (targetPage - 1) times. Adequate for ≤ a few hundred employees.
-        gotoFirstPage(page);
-        for (int i = 1; i < targetPage; i++) {
-            Locator next = page.locator(PAGE_NEXT).first();
-            if (next.count() == 0 || isDisabled(next)) return;
-            next.click();
-            page.waitForTimeout(300);
+    /**
+     * Bump the rows-per-page combobox so the entire planilla renders on
+     * one page. Tries the native {@code <select>} affordance first
+     * (semantically correct, handles by-value), then falls back to the
+     * custom-dropdown click-and-pick pattern that some INS theme variants
+     * use. Best-effort: a failure here just means saveRow falls back to
+     * whatever default page size INS exposed (10 today), so the run will
+     * fail mid-loop on a row that paginated off-screen — caller logs it
+     * but doesn't abort because saveRow exceptions are now caught.
+     */
+    private void setPageSize(Page page, String size, RunManifest manifest) {
+        // Strategy 1: native <select> with the desired option. Bootstrap
+        // form-select renders this way, and {@code selectOption} dispatches
+        // a real change event so the SPA's listener fires.
+        Locator nativeSelect = page.locator(
+                "select:visible:has(option[value=\"" + size + "\"])").first();
+        if (nativeSelect.count() > 0) {
+            try {
+                nativeSelect.selectOption(size);
+                page.waitForTimeout(600);
+                manifest.step("page-size",
+                        "set to " + size + " via native <select>");
+                return;
+            } catch (RuntimeException ignored) {
+                // Fall through to the custom-dropdown path.
+            }
         }
+        // Strategy 2: custom dropdown — anchor on the visible "Mostrando"
+        // label and click the trigger that follows it (a button or
+        // role=combobox), then click the option whose visible text
+        // matches {@code size}. Two-phase: open the popup, then pick.
+        Locator trigger = page.locator(
+                "xpath=//*[normalize-space(text())='Mostrando']"
+                        + "/following::*[self::button or @role='combobox' "
+                        + "or self::div[@aria-haspopup='listbox'] "
+                        + "or self::select][1]").first();
+        if (trigger.count() > 0) {
+            try {
+                trigger.click(new Locator.ClickOptions().setTimeout(2_000));
+                page.waitForTimeout(300);
+                Locator option = page.locator(
+                        ":visible:text-is(\"" + size + "\")").first();
+                option.click(new Locator.ClickOptions().setTimeout(2_000));
+                page.waitForTimeout(600);
+                manifest.step("page-size",
+                        "set to " + size + " via custom dropdown");
+                return;
+            } catch (RuntimeException ignored) {
+                // Fall through to the warning path.
+            }
+        }
+        log.warn("page-size: could not bump rows-per-page to {} — "
+                + "saveRow may fail on rows that paginate off-screen", size);
+        manifest.step("page-size-skip",
+                "could not set rows-per-page to " + size + "; using default");
     }
 
     /**
      * Format a canonical BigDecimal salary for the INS salario input.
-     * The codegen recording fills the input with "1,127,500" — US-style
-     * thousand separators, integer (no decimals). We round to whole
-     * colones; INS's per-row input doesn't accept the decimals that the
-     * dialog totals display. The first real run may invalidate this; if
-     * INS rejects integer-only input we'll add decimals here.
+     * Diag capture 2026-05-04T14:44 confirmed INS pads any value entered
+     * to two decimals on blur (the input HTML carried {@code value="425,000.00"}
+     * pre-fill, and our integer-only fill of {@code 889,985} was reformatted
+     * to {@code 889,985.00} on Tab). Rounding to integer therefore drops
+     * the canonical's cents and the totals reconciliation comes back off
+     * by the per-row rounding error. Send 2-decimal precision so the
+     * portal-reported sum matches the canonical sum byte-for-byte.
+     *
+     * <p>{@code DecimalFormat} with explicit US symbols guarantees
+     * {@code "889,985.36"} regardless of the JVM default locale (a CRC
+     * locale would otherwise produce {@code "889.985,36"}, which INS
+     * does not accept).
      */
     private static String formatSalaryForInput(BigDecimal salary) {
-        BigDecimal rounded = salary.setScale(0, RoundingMode.HALF_UP);
-        return String.format(Locale.US, "%,d", rounded.longValueExact());
+        BigDecimal scaled = salary.setScale(2, RoundingMode.HALF_UP);
+        return new java.text.DecimalFormat(
+                "#,##0.00",
+                new java.text.DecimalFormatSymbols(Locale.US)).format(scaled);
     }
 
     // --- Resumen dialog ----------------------------------------------------
@@ -1102,10 +1554,18 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         }
 
         safeClick(page.locator(CONTINUAR_BUTTON), "Continuar");
-        page.waitForSelector(RESUMEN_DIALOG,
+        // Two-phase wait: first the dialog mounts (with a loader spinner),
+        // then INS fetches the totals async and replaces the spinner with
+        // the rendered "Total de salarios:" / "Consecutivo temporal:" /
+        // etc. Anchoring on a label that only exists post-load gates the
+        // scrape correctly — verified via diag.dumpResumen 2026-05-04T14:44
+        // (skeletal capture, 0 bytes of text) vs 2026-05-04T15:11 (loaded,
+        // 364 bytes). 30s ceiling matches the loader timeout we observed
+        // in the wild + a safety margin.
+        page.waitForSelector(RESUMEN_DIALOG + ":has-text(\"Total de salarios:\")",
                 new Page.WaitForSelectorOptions()
                         .setState(WaitForSelectorState.VISIBLE)
-                        .setTimeout(15_000));
+                        .setTimeout(30_000));
 
         // Single innerText scrape + label-anchored regex extracts. The
         // Resumen dialog is small (6 labels + values + 2 buttons), so
@@ -1113,6 +1573,11 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         String text = page.locator(RESUMEN_DIALOG).first().innerText();
         log.info("resumen dialog text:\n{}", text);
         manifest.step("resumen-scrape", "text len=" + text.length());
+        // Stash the raw dialog text for PortalConfirmation.rawText so the
+        // HITL reviewer sees exactly what INS displayed (consecutivo /
+        // trabajadores / total / promedio / period dates) without having
+        // to re-render the artifact screenshot.
+        resumenRawText = text;
 
         return new DialogTotals(
                 extractAfter(text, "Consecutivo temporal:"),
@@ -1121,15 +1586,27 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     }
 
     /**
-     * Pull the value following a "Label:" line in the dialog innerText,
-     * stopping at the next newline (or end-of-text). innerText already
-     * collapses whitespace and uses \n between block-level elements, so
-     * "Consecutivo temporal:\n1007180\nPeríodo:\n4..." extracts cleanly.
+     * Pull the value following a "Label:" line in the dialog innerText.
+     * INS renders the Resumen with each label and its value as separate
+     * block-level elements, so innerText interleaves them with newlines:
+     * <pre>
+     * Total de salarios:
+     * ₡ 18 509 691,90
+     * Promedio de salarios:
+     * ...
+     * </pre>
+     * Skip leading whitespace/newlines after the label so we read the
+     * value line, not the empty zero-length slice between the label-end
+     * and its trailing {@code \n}. Verified via diag.dumpResumen
+     * 2026-05-04T15:11 dump of the full Resumen text.
      */
     private static String extractAfter(String text, String label) {
         int idx = text.indexOf(label);
         if (idx < 0) return "";
         int start = idx + label.length();
+        while (start < text.length() && Character.isWhitespace(text.charAt(start))) {
+            start++;
+        }
         int end = text.indexOf('\n', start);
         return (end < 0 ? text.substring(start) : text.substring(start, end)).trim();
     }
@@ -1270,7 +1747,8 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
 
     private static SubmitResultBody.Review buildReview(
             String status, BigDecimal canonical, BigDecimal portal, RosterDiff diff,
-            List<SubmitResultBody.Signal> nameDrifts) {
+            List<SubmitResultBody.Signal> nameDrifts,
+            List<SubmitResultBody.Signal> fillFailures) {
         if (!EnvelopeStatus.MISMATCH.equals(status) && !EnvelopeStatus.PARTIAL.equals(status)) {
             return null;
         }
@@ -1287,6 +1765,7 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
                 "MISSING_FROM_PAYROLL", null, null, null,
                 m.id(), m.displayName(), null, m.lastKnownSalary())));
         signals.addAll(nameDrifts);
+        signals.addAll(fillFailures);
 
         StringBuilder summary = new StringBuilder();
         if (canonical.compareTo(portal) != 0) {
@@ -1309,6 +1788,11 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
             if (!summary.isEmpty()) summary.append("; ");
             summary.append(nameDrifts.size())
                     .append(" name disagreement(s) — cédula matched, names differ (HITL review)");
+        }
+        if (!fillFailures.isEmpty()) {
+            if (!summary.isEmpty()) summary.append("; ");
+            summary.append(fillFailures.size())
+                    .append(" row(s) failed to save mid-loop — HITL must verify and resubmit");
         }
         return new SubmitResultBody.Review(
                 severityFor(status), summary.toString(), signals,

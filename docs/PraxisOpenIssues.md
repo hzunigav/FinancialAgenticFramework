@@ -171,3 +171,45 @@ The cédula jurídica has two equivalent forms: `3-101-680139` (legal-registry d
 ### Praxis-side asks
 
 None — the worker now tolerates either form. Praxis can keep emitting the dashed legal form (which is what appears in Costa Rican legal documents) without coordination. Documenting here only so a future Praxis-side change to clientIdentifier formatting doesn't break the contract silently.
+
+---
+
+## OI-004 — Happy-path result envelope failed schema validation on null `rawText` (silently DLQ'd)
+
+**Status:** worker-side fix landed 2026-05-05. Same family as OI-002 (validate-on-publish DLQ'ing the result envelope), this one on the success path rather than the error path.
+
+**Found:** 2026-05-05 during the first successful BPMN-driven E2E run for `ins-rt-virtual`. The submit adapter completed cleanly — 13 of 14 canonicals saved, totals matched the Resumen dialog, status PARTIAL was correct given roster-diff — and the result envelope still never reached Praxis.
+
+### Symptom
+
+Worker log shows the run completed and the listener immediately tried (and failed) to publish:
+
+```
+INFO  run complete status=PARTIAL envelopeId=29b5fb1b-... businessKey=2026-04::1051
+ERROR run failed envelopeId=b0352370-...
+SchemaValidationException: Schema validation failed for payroll-submit-result.v1 (3 errors):
+  $.result: must be valid to one and only one schema, but 0 are valid;
+  $.result.portalConfirmation.rawText: null found, string expected;
+  $.result: object found, string expected
+```
+
+The latter two errors are the cleartext-vs-encrypted `oneOf` complaining: the cleartext branch failed because of the `rawText` violation, and obviously the object isn't a string. Fix the `rawText` and the `oneOf` resolves cleanly.
+
+### Root cause
+
+`InsRtVirtualSubmitAdapter` constructed `SubmitResultBody.PortalConfirmation` with `rawText=null` because the adapter discarded the Resumen dialog's `innerText` after parsing it for individual fields (consecutivo / trabajadores / total / promedio). The schema declares `rawText: String` as a non-null required field, so validate-on-publish rejected the envelope. The listener's catch-and-DLQ fall-through (the same path OI-002 fixed for error envelopes) silently dropped the success-path result too — Praxis stayed in `Wait for INS submit result` indefinitely.
+
+This wasn't a brand-new schema gap, just a brand-new path through it. Adapters that happened to populate `rawText` (CCSS Sicere, AutoPlanilla) had been masking the trap.
+
+### Worker-side fix (landed 2026-05-05)
+
+1. `InsRtVirtualSubmitAdapter` retains the verbatim Resumen dialog `innerText` in a `resumenRawText` instance field after `openResumenAndScrape`. `buildSubmitOutcome` passes it to `PortalConfirmation.rawText` (with empty-string fallback for the dryRun short-circuit path).
+2. Memory rule `feedback_pojo_validation_test_required` already covers this category — the lesson here was that **the success path also needs the validate-on-publish coverage**, not just error envelopes (which OI-002 addressed). Future adapters can catch this in unit tests by round-tripping a populated `SubmitResultBody` through the schema validator before calling the run done.
+
+### Praxis-side asks
+
+Same shape as OI-001 / OI-002: **surface validate-on-publish rejections.** When the worker-side listener fails to publish an outbound result because of schema validation, the message DLQ's and Praxis's `Wait` task hangs forever. A log line at WARN/ERROR level on the worker (which we now have) is necessary but not sufficient — the human-visible signal is "the BPM is stuck and nothing useful is on screen." Logging at the listener level when an outbound publish is rejected, or routing the rejected message to a separate `validation-rejected` DLQ that an alert can watch, would have shortened today's debug loop from one full submit cycle to a Slack ping.
+
+### Acceptance test
+
+Re-running the submit task end-to-end after the fix lands a `payroll-submit-result.v1` on `financeagent.results` within seconds, and the Praxis BPMN `Wait for INS submit result` task advances. Confirmed 2026-05-05 against rtvirtual.grupoins.com with 13/14 canonicals saved.

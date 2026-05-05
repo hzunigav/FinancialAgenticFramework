@@ -186,6 +186,71 @@ Use `EmployeeMatcher.matchWithDrift(canonicalId, canonicalName, ids, names)` rat
 
 The strict `EmployeeMatcher.match` is preserved for callers where cédula collisions are plausible (cross-portal correlation, identifier reuse). For per-planilla submit flows where cédulas are unique by construction, default to `matchWithDrift`.
 
+### SPA filter inputs may swallow `fill()` — use real keystrokes
+
+Playwright's `Locator.fill()` sets `element.value=` directly and dispatches a single `input` event. Many SPA toolbars (search filters, type-ahead lookups) only respond to `keydown`/`keyup`/`input` events from the keyboard pipeline — `fill()` looks like nothing happened, the field stays empty, and the filter never fires. Verified on INS RT-Virtual 2026-05-04: `fill("117040400")` on the planilla search box left the field empty in the live browser; the magnifier-icon submit button next to it received no value to filter by.
+
+Pattern that works:
+
+```java
+input.click();                                  // focus
+input.press("Control+A");                       // select existing
+input.press("Delete");                          // clear via real keystroke
+input.pressSequentially(value,                  // per-char keydown/keyup/input
+        new Locator.PressSequentiallyOptions().setDelay(40));
+input.press("Tab");                             // or Enter, depending on the widget
+```
+
+If the search bar has its own submit button (magnifier icon) and you can't reliably anchor on it, **consider sidestepping search entirely.** INS RT-Virtual exposes a "Mostrando" rows-per-page combobox with options up to 200; bumping it once at startup put every row on a single rendered page and let the adapter anchor on `div.accordion-item:has-text(<cédula>)` directly — no search, no pagination, no reshuffle headaches. Reach for this trick when (a) the planilla fits in the max page size and (b) the search submit is finicky.
+
+### Submit-result envelope: every required field must be a real value
+
+The result-envelope schema is enforced at validate-on-publish. A POJO that builds a structurally correct shape but leaves a required string `null` will **DLQ silently** — the listener nacks the message, Praxis never sees a result, and the workflow stays in `Wait`. Same failure mode as OI-001, just from a different cause.
+
+The trap that hit `ins-rt-virtual` on 2026-05-05: `SubmitResultBody.PortalConfirmation.rawText` is `String` (non-null per schema) and the adapter constructed it with `null` because the Resumen dialog's text wasn't preserved after parsing. Fix was to retain the dialog's `innerText` in an instance field and pass it through. **Always run a real BPMN E2E before declaring a new adapter done** — fixture tests and unit tests exercise the happy path inputs but don't catch this kind of validate-on-publish gap, since they don't go through the listener's publish path.
+
+When in doubt, default required strings to the most useful information you have at that point: the verbatim portal-reported text, a formatted summary, or the empty string `""`. Never `null`.
+
+### Wrap `beforeSteps` so failures still log out
+
+`PortalRunService` invokes `afterCapture` only on the **success** path. When `beforeSteps` throws, the session is left logged in — and for shared-creds portals (INS, AutoPlanilla) every leaked session triggers a "concurrent session detected" modal on the next run, which the adapter then has to dismiss. The cycle gets noisier with each failure.
+
+Standard wrapper:
+
+```java
+@Override
+public void beforeSteps(...) {
+    try {
+        beforeStepsImpl(...);
+    } catch (RuntimeException e) {
+        performLogoutBestEffort(page, manifest, "logout-on-error");
+        throw e;
+    }
+}
+```
+
+Where `performLogoutBestEffort` is a private method that tries the visible logout affordances (sidebar link first, then top-right user-menu) inside a try/catch — best-effort, never throws. Manifest gets a `logout-on-error` step on the failure path so the difference vs the success-path `logout` is visible.
+
+### Continue on per-row save failure, don't abort
+
+Submit-side adapters that loop over canonicals should treat each row's save as best-effort. A single row's failure (search returned 0/many, fill timeout, accordion not visible, race with portal-side reorder) **must not** abort the loop — the rest of the canonicals still need to land. Wrap each `saveRow` call:
+
+```java
+try {
+    saveRow(page, row, c.salary(), bindings, manifest);
+    matchedRows.add(...);
+} catch (RuntimeException saveEx) {
+    log.warn("save-failed canonicalId={} reason={}", c.id(), saveEx.toString());
+    manifest.step("save-failed",
+            "canonicalId=" + c.id() + " reason=" + saveEx.getMessage());
+    fillFails.add(new SubmitResultBody.Signal(
+            "FILL_FAILED", null, null, null,
+            row.identification(), c.name(), c.salary(), null));
+}
+```
+
+Status routes to `PARTIAL` when `fillFailures` is non-empty (alongside the existing `rosterDiff` and `nameDrift` triggers). HITL would rather see "12 of 14 saved, 2 need attention" with the specific cédulas flagged than a bare exception with everyone untouched. The `Review.summary` should append something like "N row(s) failed to save mid-loop — HITL must verify and resubmit".
+
 ### Verify session reuse before enabling it
 
 Adding a `session: { ttlMinutes: <N> }` block tells the engine to save Playwright's `storageState()` after auth and reuse it on subsequent runs. That works for portals storing auth in **cookies** or **localStorage** — but `storageState()` does **not** capture `sessionStorage` or in-memory tokens. Many SPA-based portals (anything with a JWT held in a Redux store / `sessionStorage` / a service worker) fall into this second category.

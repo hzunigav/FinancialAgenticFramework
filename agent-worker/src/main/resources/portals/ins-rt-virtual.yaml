@@ -78,6 +78,45 @@ authSteps:
 # póliza-card selection, planilla creation, per-row fill, and totals
 # capture directly via Playwright. The descriptor's PortalScraper YAML
 # can't express the dynamic per-employee matching loop.
+#
+# Adapter mechanics (see InsRtVirtualSubmitAdapter javadoc + class body
+# for the full story; summarised here so descriptor readers don't have
+# to dig):
+#   - "Nueva planilla" was renamed by INS to "Cargar lista de
+#     trabajadores de periodos anteriores" inside the "Acciones rápidas"
+#     dropdown. The adapter accepts both labels, preferring the legacy
+#     one if visible.
+#   - "Presentar planilla sin trabajadores" is the dropdown sibling that
+#     would file an EMPTY planilla on click. Listed in
+#     FORBIDDEN_BUTTON_LABELS (alongside "presentar planilla" /
+#     "presentar") so safeClick refuses it.
+#   - Bumps "Mostrando" rows-per-page to 200 once at the top of the
+#     edit flow so every row of a realistic NeoProc-managed planilla
+#     renders on a single page. Sidesteps the toolbar search box (whose
+#     magnifier-icon submit affordance we can't reliably click), the
+#     X-clear button that mounts inside the search wrapper when text is
+#     present, and INS's per-save row reshuffle that invalidates any
+#     captured page index. saveRow then anchors on
+#     div.accordion-item:has-text(<cédula>) directly.
+#   - Per-row salary fill uses Ctrl+A / Delete / pressSequentially so
+#     INS's SPA input-event listeners fire — fill() with element.value=
+#     is a no-op on this widget. Auto-save fires on Tab.
+#   - Resumen de planilla dialog opens with a loader spinner; the
+#     scrape gates on :has-text("Total de salarios:") rather than
+#     dialog-visible so it reads loaded numbers, not the skeleton.
+#   - Cancelar uses #btn-cancel-payroll (stable id) to avoid colliding
+#     with cosmetic notification-bar "Cerrar" buttons.
+#   - PortalConfirmation.rawText carries the verbatim Resumen dialog
+#     innerText. Schema requires a non-null string; passing null DLQ'd
+#     the result envelope on the first successful E2E (PraxisOpenIssues
+#     OI-004).
+#   - beforeSteps body wrapped in try/catch that calls
+#     performLogoutBestEffort on failure. PortalRunService only fires
+#     afterCapture on the success path, so failed runs would otherwise
+#     leak the shared session.
+#   - saveRow exceptions are caught per-row and emitted as FILL_FAILED
+#     signals; the loop continues with the remaining canonicals and
+#     status routes to PARTIAL when fillFailures is non-empty.
 steps: []
 
 # No descriptor-driven scrape — totals are captured from the Resumen

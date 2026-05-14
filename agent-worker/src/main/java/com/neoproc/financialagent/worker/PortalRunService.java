@@ -59,7 +59,7 @@ import java.util.stream.Collectors;
  * <p>A fresh {@link PortalAdapter} is created per run to ensure stateful
  * adapters (e.g. {@link MockPayrollAdapter}) never share state across calls.
  */
-public final class PortalRunService {
+public class PortalRunService {
 
     private static final Logger log = LoggerFactory.getLogger(PortalRunService.class);
 

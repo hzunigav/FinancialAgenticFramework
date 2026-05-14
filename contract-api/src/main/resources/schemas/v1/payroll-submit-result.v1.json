@@ -152,12 +152,13 @@
                               "description": "Either a coarse classification (TRANSIENT|PERMANENT) or the fully-qualified Java class of the originating component, depending on producer." },
             "category":     { "type": "string",
                               "enum": ["NETWORK", "SELECTOR", "CREDENTIALS", "PORTAL_REJECTED",
-                                       "DUPLICATE_ENVELOPE", "UNCAUGHT_EXCEPTION", "SCHEMA_VIOLATION",
+                                       "DUPLICATE_ENVELOPE", "EXPIRED_DUPLICATE",
+                                       "UNCAUGHT_EXCEPTION", "SCHEMA_VIOLATION",
                                        "OTHER",
                                        "CREDENTIALS_INVALID", "CREDENTIALS_EXPIRED",
                                        "PORTAL_UNREACHABLE", "PORTAL_AUTH_BLOCKED",
                                        "UNEXPECTED"],
-                              "description": "Adapter-emitted categories follow the §15.5 vocabulary: CREDENTIALS_INVALID (login rejected), CREDENTIALS_EXPIRED (login forced password change), PORTAL_UNREACHABLE (network/DNS/timeout), PORTAL_AUTH_BLOCKED (CAPTCHA / step-up / anti-bot), UNEXPECTED (anything else). The remaining values are listener-side categories (DUPLICATE_ENVELOPE, UNCAUGHT_EXCEPTION, SCHEMA_VIOLATION) and pre-§15 worker-side categories (NETWORK, SELECTOR, CREDENTIALS, PORTAL_REJECTED, OTHER) kept for backwards compatibility. New adapters should use the §15.5 values." },
+                              "description": "Adapter-emitted categories follow the §15.5 vocabulary: CREDENTIALS_INVALID (login rejected), CREDENTIALS_EXPIRED (login forced password change), PORTAL_UNREACHABLE (network/DNS/timeout), PORTAL_AUTH_BLOCKED (CAPTCHA / step-up / anti-bot), UNEXPECTED (anything else). Listener-side categories: DUPLICATE_ENVELOPE (warm-cache duplicate, normally re-publishes the cached result instead), EXPIRED_DUPLICATE (cold-cache duplicate per SqsMigrationPlan.md §6.6 Q6b — receiveCount>1 with no cached result, e.g. worker restart between original receive and redelivery), UNCAUGHT_EXCEPTION, SCHEMA_VIOLATION. Pre-§15 worker-side categories (NETWORK, SELECTOR, CREDENTIALS, PORTAL_REJECTED, OTHER) kept for backwards compatibility. New adapters should use the §15.5 values." },
             "message":      { "type": "string" }
           }
         },

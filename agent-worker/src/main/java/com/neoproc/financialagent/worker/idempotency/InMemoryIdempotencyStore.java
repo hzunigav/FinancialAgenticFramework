@@ -4,33 +4,47 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.stereotype.Component;
 
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Bounded, TTL-keyed in-memory implementation of {@link IdempotencyStore}.
  *
- * <p>Entries expire after 7 days (matching the handoff §C.4 requirement).
- * Bounded at 50 000 entries — well above any realistic burst — to prevent
- * unbounded heap growth on a long-lived worker. Entries evicted by the
- * size bound before the TTL elapses are a correctness risk (late duplicates
- * could slip through), but the bound would only be hit under sustained
- * high-volume replay, which is far outside normal operation.
+ * <p>Stores the full result envelope per envelopeId. On a duplicate
+ * delivery the listener re-publishes the cached envelope without touching
+ * the portal — required by SqsMigrationPlan.md §6.3 for the
+ * throw-on-publish-failure recovery contract to be safe (without it, a
+ * redelivery after a transient publish failure would emit a synthetic
+ * DUPLICATE_ENVELOPE failure for an envelope whose portal work succeeded).
  *
- * <p>Does not survive worker restarts. A restart that triggers redelivery
- * of an already-processed message will result in a duplicate portal action.
- * Acceptable for Phase 1 where Praxis manages retries via new envelopeIds;
- * swap for a durable store (Redis/Postgres) at M6.
+ * <p>Sized at 10 000 entries × ~10 KB envelope ≈ 100 MB worst case. At
+ * ~10 envelopes per cycle and weekly cadence the bound is years away from
+ * binding; eviction in normal operation comes from the 7-day TTL.
+ *
+ * <p>Does not survive worker restarts. A restart between original receive
+ * and redelivery is the realistic cold-cache scenario; the listener
+ * detects it via SQS {@code ApproximateReceiveCount > 1} with no cached
+ * entry and emits {@code EXPIRED_DUPLICATE} (per the cold-cache pin in
+ * SqsMigrationPlan.md §6.6 Q6b answer). Persistent backing store
+ * (Redis/DynamoDB) tracked in EnhancementsBacklog.md.
  */
 @Component
 public class InMemoryIdempotencyStore implements IdempotencyStore {
 
-    private final Cache<String, Boolean> seen = Caffeine.newBuilder()
+    private final Cache<String, Object> cache = Caffeine.newBuilder()
             .expireAfterWrite(7, TimeUnit.DAYS)
-            .maximumSize(50_000)
+            .maximumSize(10_000)
             .build();
 
     @Override
-    public boolean tryRecord(String envelopeId) {
-        return seen.asMap().putIfAbsent(envelopeId, Boolean.TRUE) == null;
+    public Optional<Object> lookup(String envelopeId) {
+        return Optional.ofNullable(cache.getIfPresent(envelopeId));
+    }
+
+    @Override
+    public void cacheResult(String envelopeId, Object result) {
+        // First-write-wins: a parallel retry that lands here second must not
+        // overwrite the result the first attempt already published.
+        cache.asMap().putIfAbsent(envelopeId, result);
     }
 }

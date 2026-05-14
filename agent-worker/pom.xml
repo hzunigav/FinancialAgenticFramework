@@ -59,10 +59,10 @@
             <artifactId>logback-classic</artifactId>
         </dependency>
 
-        <!-- Queue consumer + Spring lifecycle -->
+        <!-- Queue consumer + Spring lifecycle (SQS via Spring Cloud AWS) -->
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-amqp</artifactId>
+            <groupId>io.awspring.cloud</groupId>
+            <artifactId>spring-cloud-aws-starter-sqs</artifactId>
         </dependency>
         <!-- HTTP server for /actuator/prometheus -->
         <dependency>
@@ -95,7 +95,7 @@
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>rabbitmq</artifactId>
+            <artifactId>localstack</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -104,8 +104,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>org.springframework.amqp</groupId>
-            <artifactId>spring-rabbit-test</artifactId>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -115,6 +115,33 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <!-- *IT.java tests run under failsafe (mvn verify), not surefire (mvn test).
+                 Keeps the LocalStack/Docker-dependent SQS round-trip IT out of the
+                 fast inner loop. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <!-- Docker Desktop 29.x rejects API versions below 1.44.
+                         docker-java starts negotiation from v1.24, which returns
+                         a 400 stub from the Docker Desktop relay, so testcontainers
+                         cannot find a valid Docker environment.  Setting
+                         DOCKER_API_VERSION=1.44 here forces docker-java to open
+                         with a version the relay accepts.  CI/container runners
+                         (Docker 24.0+ or later, API >= 1.43) accept 1.44 too. -->
+                    <environmentVariables>
+                        <DOCKER_API_VERSION>${docker.api.version}</DOCKER_API_VERSION>
+                    </environmentVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

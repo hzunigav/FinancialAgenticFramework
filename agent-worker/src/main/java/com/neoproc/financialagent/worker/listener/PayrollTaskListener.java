@@ -1,5 +1,6 @@
 package com.neoproc.financialagent.worker.listener;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.contract.payroll.Audit;
 import com.neoproc.financialagent.contract.payroll.EnvelopeMeta;
@@ -14,109 +15,127 @@ import com.neoproc.financialagent.worker.PortalRunService;
 import com.neoproc.financialagent.worker.RunOutcome;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
 import com.neoproc.financialagent.worker.idempotency.IdempotencyStore;
+import io.awspring.cloud.sqs.annotation.SqsListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
-import org.springframework.amqp.AmqpRejectAndDontRequeueException;
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Consumes {@code payroll-submit-request.v1} messages from the
- * portal-keyed task queue, executes the portal interaction via
+ * Consumes {@code payroll-submit-request.v1} envelopes from the
+ * portal-keyed submit queue, executes the portal interaction via
  * {@link PortalRunService}, and publishes a
- * {@code payroll-submit-result.v1} envelope to the results exchange.
+ * {@code payroll-submit-result.v1} envelope to the shared results queue.
  *
- * <p>Ack/nack semantics ({@code spring.rabbitmq.listener.simple.acknowledge-mode=auto}
- * + {@code default-requeue-rejected=false}):
+ * <p>Recovery + idempotency contract per SqsMigrationPlan.md §6.3:
  * <ul>
- *   <li>Listener returns normally → Spring acks (message removed from queue).</li>
- *   <li>Listener throws any exception → Spring nacks with requeue=false
- *       → message flows to DLQ. This only happens when even the error-result
- *       publish fails; all other failures produce a {@code FAILED} result
- *       envelope before acking.</li>
+ *   <li><b>Cache hit</b> (warm duplicate): re-publish the cached result
+ *       envelope. Do not re-execute the portal.</li>
+ *   <li><b>Cache miss + {@code ApproximateReceiveCount > 1}</b> (cold
+ *       duplicate, e.g. worker restart): emit a synthetic
+ *       {@code EXPIRED_DUPLICATE} failure. Do not re-execute the portal —
+ *       portals like Hacienda are not idempotent and a re-run could
+ *       create a duplicate filing.</li>
+ *   <li><b>Cache miss + receiveCount == 1</b> (fresh delivery): run the
+ *       portal, cache the result, publish.</li>
  * </ul>
+ *
+ * <p>If the result publish fails after 3 retries, the listener throws —
+ * SQS redelivers after the visibility timeout, the cache hit on next
+ * attempt re-publishes the original result.
  */
 @Component
 public class PayrollTaskListener {
 
     private static final Logger log = LoggerFactory.getLogger(PayrollTaskListener.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .findAndRegisterModules();
 
     private final PortalRunService portalRunService;
     private final IdempotencyStore idempotencyStore;
-    private final RabbitTemplate rabbitTemplate;
+    private final SqsRetryablePublisher publisher;
 
     @Value("${portal.id}")
     private String portalId;
 
-    @Value("${agent.worker.results-exchange}")
-    private String resultsExchange;
-
-    @Value("${agent.worker.results-routing-key:}")
-    private String resultsRoutingKey;
+    @Value("${agent.worker.results-queue}")
+    private String resultsQueue;
 
     public PayrollTaskListener(PortalRunService portalRunService,
                                 IdempotencyStore idempotencyStore,
-                                RabbitTemplate rabbitTemplate) {
+                                SqsRetryablePublisher publisher) {
         this.portalRunService = portalRunService;
         this.idempotencyStore = idempotencyStore;
-        this.rabbitTemplate = rabbitTemplate;
+        this.publisher = publisher;
     }
 
-    @RabbitListener(queues = "${agent.worker.submit-queue}",
-                    errorHandler = "envelopeAwareErrorHandler")
-    public void onSubmitRequest(PayrollSubmitRequest request, Message rawMessage) {
+    @SqsListener("${agent.worker.submit-queue}")
+    public void onSubmitRequest(@Payload String body,
+                                @Header(name = "envelopeId", required = false) String envelopeIdHeader,
+                                MessageHeaders headers) throws Exception {
+        byte[] rawBytes = body.getBytes(StandardCharsets.UTF_8);
+
+        // Defend against malformed envelopes from upstream — schema-validate
+        // raw bytes (catches additionalProperties / enum violations that
+        // lenient deserialization would silently drop).
+        SchemaValidator.validate(rawBytes, SchemaValidator.SUBMIT_REQUEST);
+
+        PayrollSubmitRequest request = MAPPER.readValue(rawBytes, PayrollSubmitRequest.class);
+        String envelopeId = request.envelope().envelopeId();
+        String businessKey = request.envelope().businessKey();
         setupMdc(request);
 
-        String envelopeId = null;
-        String businessKey = null;
         try {
-            envelopeId = request.envelope().envelopeId();
-            businessKey = request.envelope().businessKey();
-
-            // Defend against malformed envelopes from upstream — schema-validate the
-            // raw bytes (catches additionalProperties / enum violations that
-            // lenient deserialization would silently drop).
-            SchemaValidator.validate(rawMessage.getBody(), SchemaValidator.SUBMIT_REQUEST);
-
             log.info("receive portalId={} envelopeId={}", portalId, envelopeId);
 
-            PayrollSubmitResult result;
+            Optional<Object> cached = idempotencyStore.lookup(envelopeId);
+            if (cached.isPresent()) {
+                log.warn("warm-cache duplicate envelopeId={} — re-publishing cached result", envelopeId);
+                publishResult((PayrollSubmitResult) cached.get(), businessKey);
+                return;
+            }
 
-            if (!idempotencyStore.tryRecord(envelopeId)) {
-                log.warn("duplicate envelopeId={} — acking without portal re-execution", envelopeId);
-                result = buildFailedResult(request, "DUPLICATE_ENVELOPE",
-                        "envelopeId already processed: " + envelopeId);
+            PayrollSubmitResult result;
+            if (extractReceiveCount(headers) > 1) {
+                log.warn("cold-cache duplicate envelopeId={} (receiveCount>1, no cached result) — emitting EXPIRED_DUPLICATE",
+                        envelopeId);
+                result = buildFailedResult(request, "EXPIRED_DUPLICATE",
+                        "envelopeId previously processed but cached result lost (worker restart): " + envelopeId);
             } else {
                 result = executeRun(request);
             }
 
+            idempotencyStore.cacheResult(envelopeId, result);
             publishResult(result, businessKey);
             log.info("result published envelopeId={} resultStatus={}",
                     envelopeId, extractStatus(result));
 
+        } catch (SqsRetryablePublisher.PublishFailedException pubFailed) {
+            // Retries exhausted. Throw so SQS redelivers; the cache hit on
+            // the next attempt will re-publish without portal re-execution.
+            log.error("publish failed terminally envelopeId={} — throwing for SQS redelivery", envelopeId, pubFailed);
+            throw pubFailed;
         } catch (Exception e) {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             log.error("run failed envelopeId={}", envelopeId, e);
-            try {
-                publishResult(buildFailedResult(request, "UNCAUGHT_EXCEPTION",
-                        e.getClass().getSimpleName() + ": " + e.getMessage()), businessKey);
-            } catch (Exception pubEx) {
-                log.error("cannot publish error result — routing to DLQ envelopeId={}", envelopeId, pubEx);
-                throw new AmqpRejectAndDontRequeueException(
-                        "Cannot publish error result for envelopeId=" + envelopeId, pubEx);
-            }
+            PayrollSubmitResult failed = buildFailedResult(request, "UNCAUGHT_EXCEPTION",
+                    e.getClass().getSimpleName() + ": " + e.getMessage());
+            idempotencyStore.cacheResult(envelopeId, failed);
+            publishResult(failed, businessKey);
         } finally {
             MDC.clear();
         }
@@ -137,18 +156,17 @@ public class PayrollTaskListener {
         return buildMinimalResult(request, outcome.status());
     }
 
-    private void publishResult(PayrollSubmitResult result, String correlationId) {
+    private void publishResult(PayrollSubmitResult result, String businessKey) {
         // Schema-validate the outgoing envelope. A failure is a worker bug —
         // we'd rather DLQ the message than send Praxis something it cannot
-        // correlate. The catch in onSubmitRequest will turn this into a
-        // FAILED result with category=SCHEMA_VIOLATION.
+        // correlate.
         SchemaValidator.validate(result, SchemaValidator.SUBMIT_RESULT);
-        rabbitTemplate.convertAndSend(resultsExchange, resultsRoutingKey, result, msg -> {
-            msg.getMessageProperties().setCorrelationId(correlationId);
-            msg.getMessageProperties().setContentType("application/json");
-            msg.getMessageProperties().setType(PayrollSubmitResult.SCHEMA);
-            return msg;
-        });
+        publisher.publish(
+                resultsQueue,
+                result,
+                PayrollSubmitResult.SCHEMA,
+                result.envelope().envelopeId(),
+                businessKey);
     }
 
     /**
@@ -220,6 +238,24 @@ public class PayrollTaskListener {
     }
 
     // -----------------------------------------------------------------------
+
+    /**
+     * Extracts SQS {@code ApproximateReceiveCount} from the message headers.
+     * Spring Cloud AWS surfaces SQS system attributes as {@code Sqs_*}
+     * headers. A receiveCount of 1 means first delivery; anything >1 is a
+     * redelivery, which signals (in combination with a cache miss) that we
+     * processed this envelopeId before but lost the cached result.
+     */
+    static int extractReceiveCount(MessageHeaders headers) {
+        Object v = headers.get("Sqs_ApproximateReceiveCount");
+        if (v == null) v = headers.get("ApproximateReceiveCount");
+        if (v == null) return 1;
+        try {
+            return Integer.parseInt(v.toString());
+        } catch (NumberFormatException e) {
+            return 1;
+        }
+    }
 
     private static Map<String, String> extractBindings(PayrollSubmitRequest request) {
         EnvelopeMeta env = request.envelope();

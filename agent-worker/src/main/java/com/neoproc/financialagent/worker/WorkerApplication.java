@@ -5,9 +5,9 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
  * Production entry point. Starts the Spring Boot application context,
- * which wires up the RabbitMQ consumer and the actuator endpoints.
+ * which wires up the SQS consumers and the actuator endpoints.
  *
- * <p>For local dev without a broker, use {@link Agent#main} directly
+ * <p>For local dev without AWS, use {@link Agent#main} directly
  * ({@code mvn exec:java -Dexec.mainClass=...Agent -Dportal.id=mock-payroll ...}).
  */
 @SpringBootApplication

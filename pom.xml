@@ -35,8 +35,14 @@
         <playwright.version>1.48.0</playwright.version>
         <jackson.version>2.17.2</jackson.version>
         <aws.sdk.version>2.26.12</aws.sdk.version>
+        <spring-cloud-aws.version>3.2.1</spring-cloud-aws.version>
         <guava.version>33.2.1-jre</guava.version>
         <json-schema-validator.version>1.5.3</json-schema-validator.version>
+        <!-- Docker Desktop 29.x requires API >= 1.44; docker-java defaults to
+             ~1.24 which triggers a 400 stub from the Desktop relay.  Set 1.44
+             for the failsafe JVM env.  CI runners on Docker 25.0+ accept 1.44.
+             Override: mvn verify -Ddocker.api.version=1.43 -->
+        <docker.api.version>1.44</docker.api.version>
     </properties>
 
     <dependencyManagement>
@@ -62,6 +68,15 @@
                 <groupId>software.amazon.awssdk</groupId>
                 <artifactId>bom</artifactId>
                 <version>${aws.sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- Spring Cloud AWS BOM — provides SQS starter aligned with Spring Boot 3.3.x -->
+            <dependency>
+                <groupId>io.awspring.cloud</groupId>
+                <artifactId>spring-cloud-aws-dependencies</artifactId>
+                <version>${spring-cloud-aws.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>

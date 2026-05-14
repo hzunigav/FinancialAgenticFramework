@@ -1,5 +1,6 @@
 package com.neoproc.financialagent.worker.listener;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.contract.payroll.Audit;
 import com.neoproc.financialagent.contract.payroll.CaptureResultBody;
@@ -12,91 +13,108 @@ import com.neoproc.financialagent.worker.PortalRunService;
 import com.neoproc.financialagent.worker.RunOutcome;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
 import com.neoproc.financialagent.worker.idempotency.IdempotencyStore;
+import io.awspring.cloud.sqs.annotation.SqsListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
-import org.springframework.amqp.AmqpRejectAndDontRequeueException;
-import org.springframework.amqp.core.Message;
-import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * Capture-flow analog of {@link PayrollTaskListener}. Same recovery
+ * contract per SqsMigrationPlan.md §6.3 (warm-cache → re-publish,
+ * cold-cache → EXPIRED_DUPLICATE, fresh → run portal).
+ */
 @Component
 public class PayrollCaptureListener {
 
     private static final Logger log = LoggerFactory.getLogger(PayrollCaptureListener.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .findAndRegisterModules();
 
     private final PortalRunService portalRunService;
     private final IdempotencyStore idempotencyStore;
-    private final RabbitTemplate rabbitTemplate;
+    private final SqsRetryablePublisher publisher;
 
     @Value("${portal.id}")
     private String portalId;
 
-    @Value("${agent.worker.results-exchange}")
-    private String resultsExchange;
-
-    @Value("${agent.worker.results-routing-key:}")
-    private String resultsRoutingKey;
+    @Value("${agent.worker.results-queue}")
+    private String resultsQueue;
 
     public PayrollCaptureListener(PortalRunService portalRunService,
                                    IdempotencyStore idempotencyStore,
-                                   RabbitTemplate rabbitTemplate) {
+                                   SqsRetryablePublisher publisher) {
         this.portalRunService = portalRunService;
         this.idempotencyStore = idempotencyStore;
-        this.rabbitTemplate = rabbitTemplate;
+        this.publisher = publisher;
     }
 
-    @RabbitListener(queues = "${agent.worker.capture-queue}",
-                    errorHandler = "envelopeAwareErrorHandler")
-    public void onCaptureRequest(PayrollCaptureRequest request, Message rawMessage) {
+    @SqsListener("${agent.worker.capture-queue}")
+    public void onCaptureRequest(@Payload String body,
+                                  @Header(name = "envelopeId", required = false) String envelopeIdHeader,
+                                  MessageHeaders headers) throws Exception {
+        byte[] rawBytes = body.getBytes(StandardCharsets.UTF_8);
+
+        // Defend against malformed envelopes from upstream — schema-validate
+        // raw bytes (catches additionalProperties / enum violations that
+        // lenient deserialization would silently drop).
+        SchemaValidator.validate(rawBytes, SchemaValidator.CAPTURE_REQUEST);
+
+        PayrollCaptureRequest request = MAPPER.readValue(rawBytes, PayrollCaptureRequest.class);
         String envelopeId = request.envelope().envelopeId();
         String businessKey = request.envelope().businessKey();
-
         setupMdc(request);
-        log.info("receive portalId={} envelopeId={}", portalId, envelopeId);
 
         try {
-            // Defend against malformed envelopes from upstream — schema-validate
-            // the raw bytes (catches additionalProperties / enum violations that
-            // lenient deserialization would silently drop).
-            SchemaValidator.validate(rawMessage.getBody(), SchemaValidator.CAPTURE_REQUEST);
+            log.info("receive portalId={} envelopeId={}", portalId, envelopeId);
+
+            Optional<Object> cached = idempotencyStore.lookup(envelopeId);
+            if (cached.isPresent()) {
+                log.warn("warm-cache duplicate envelopeId={} — re-publishing cached result", envelopeId);
+                publishResult((PayrollCaptureResult) cached.get(), businessKey);
+                return;
+            }
 
             PayrollCaptureResult result;
-
-            if (!idempotencyStore.tryRecord(envelopeId)) {
-                log.warn("duplicate envelopeId={} — acking without portal re-execution", envelopeId);
-                result = buildFailedResult(request, "DUPLICATE_ENVELOPE",
-                        "envelopeId already processed: " + envelopeId);
+            if (PayrollTaskListener.extractReceiveCount(headers) > 1) {
+                log.warn("cold-cache duplicate envelopeId={} (receiveCount>1, no cached result) — emitting EXPIRED_DUPLICATE",
+                        envelopeId);
+                result = buildFailedResult(request, "EXPIRED_DUPLICATE",
+                        "envelopeId previously processed but cached result lost (worker restart): " + envelopeId);
             } else {
                 result = executeRun(request);
             }
 
+            idempotencyStore.cacheResult(envelopeId, result);
             publishResult(result, businessKey);
             log.info("result published envelopeId={} resultStatus={}",
                     envelopeId, extractStatus(result));
 
+        } catch (SqsRetryablePublisher.PublishFailedException pubFailed) {
+            log.error("publish failed terminally envelopeId={} — throwing for SQS redelivery", envelopeId, pubFailed);
+            throw pubFailed;
         } catch (Exception e) {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             log.error("run failed envelopeId={}", envelopeId, e);
-            try {
-                publishResult(buildFailedResult(request, "UNCAUGHT_EXCEPTION",
-                        e.getClass().getSimpleName() + ": " + e.getMessage()), businessKey);
-            } catch (Exception pubEx) {
-                log.error("cannot publish error result — routing to DLQ envelopeId={}", envelopeId, pubEx);
-                throw new AmqpRejectAndDontRequeueException(
-                        "Cannot publish error result for envelopeId=" + envelopeId, pubEx);
-            }
+            PayrollCaptureResult failed = buildFailedResult(request, "UNCAUGHT_EXCEPTION",
+                    e.getClass().getSimpleName() + ": " + e.getMessage());
+            idempotencyStore.cacheResult(envelopeId, failed);
+            publishResult(failed, businessKey);
         } finally {
             MDC.clear();
         }
@@ -115,16 +133,16 @@ public class PayrollCaptureListener {
         return buildMinimalResult(request, outcome.status());
     }
 
-    private void publishResult(PayrollCaptureResult result, String correlationId) {
+    private void publishResult(PayrollCaptureResult result, String businessKey) {
         // Schema-validate the outgoing envelope. Failure surfaces a producer
         // bug at the wire boundary instead of letting Praxis silently reject.
         SchemaValidator.validate(result, SchemaValidator.CAPTURE_RESULT);
-        rabbitTemplate.convertAndSend(resultsExchange, resultsRoutingKey, result, msg -> {
-            msg.getMessageProperties().setCorrelationId(correlationId);
-            msg.getMessageProperties().setContentType("application/json");
-            msg.getMessageProperties().setType(PayrollCaptureResult.SCHEMA);
-            return msg;
-        });
+        publisher.publish(
+                resultsQueue,
+                result,
+                PayrollCaptureResult.SCHEMA,
+                result.envelope().envelopeId(),
+                businessKey);
     }
 
     private PayrollCaptureResult buildFailedResult(PayrollCaptureRequest request,

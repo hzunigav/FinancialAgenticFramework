@@ -48,3 +48,38 @@ See `docs/LocalWorkerRunbook.md` for the full runbook.
 
 ## businessKey passthrough rule
 The worker never synthesizes a `businessKey`. Every result envelope echoes `request.envelope().businessKey()` verbatim — both inside the envelope JSON and as the SQS message attribute. Changing this breaks Praxis BPM correlation.
+
+## GitHub Packages — published artifacts
+
+Three Maven artifacts are published to GitHub Packages (`com.neoproc.financialagent`):
+
+| Artifact | What it contains |
+|---|---|
+| `finance-agent-root` | Parent POM — dependency versions, plugin config |
+| `common-lib` | Shared records, BigDecimal serializers, payload comparators |
+| `contract-api` | JSON Schema files (`schemas/v1/*.json`) + Java envelope POJOs + `SchemaValidator` |
+
+**Praxis BPM** consumes `contract-api` (and transitively `common-lib`) from GitHub Packages to validate incoming result envelopes. If local commits are not pushed, Praxis builds against stale JARs.
+
+### When you must push to republish
+
+A push to `main` is required (and sufficient) whenever any of these change:
+
+- `contract-api/src/main/resources/schemas/v1/*.json` — schema additions or enum changes (e.g. new error `category` values)
+- `contract-api/src/main/java/**` — Java API changes that Praxis imports
+- `common-lib/src/main/java/**` — shared records or serializers
+- Root `pom.xml` — dependency version bumps inherited by consumers
+
+Changes confined to `agent-worker/`, `agent-gateway/`, `testing-harness/`, or `mcp-payroll-server/` do **not** require a republish — those modules are not published to GitHub Packages.
+
+### How publishing works
+
+`.github/workflows/publish-contract-api.yml` triggers automatically on push to `main` when `contract-api/**` or `pom.xml` changes. It runs:
+
+```
+mvn -pl contract-api -am deploy
+```
+
+The `-am` (also-make) flag rebuilds and redeploys all three JARs in dependency order: root → common-lib → contract-api. No manual step is needed beyond the push.
+
+**Version:** `1.0.0-SNAPSHOT` — Praxis resolves the latest published SNAPSHOT each time it rebuilds. No version bump required for iterative development.

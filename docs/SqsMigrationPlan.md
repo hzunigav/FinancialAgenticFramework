@@ -1,9 +1,9 @@
 # SQS Migration Plan — Phase 11D Transport Switch
 
-> **Status:** CODE COMPLETE 2026-05-06 — both Praxis (§5) and agent-worker code shipped.
-> Blocked on: **AWS resource provisioning** (§4 dev + prod queues, KMS keys, secrets,
-> IAM policy attachments) and **dev-parity cross-system test** (§7.2 / §8 Week 3).
-> Track remaining work against §10 checklist (AWS resources + Cutover sections).
+> **Status:** DEV PARITY VALIDATED 2026-05-14 — mock-payroll full capture + submit cycle
+> confirmed end-to-end on real `dev-financeagent-*` queues with Praxis BPM advancing
+> through both `waitCaptureResult` and `waitSubmitResult`. Remaining work: AWS prod
+> resource provisioning (§10 AWS resources — PROD) and prod cutover steps (§10 Cutover).
 >
 > **Owner:** Praxis team (this doc) + Agent-worker team (their half of §6 + §10).
 >
@@ -1225,9 +1225,9 @@ Update this section as work progresses. Tick items as they ship.
 - [x] `MEMORY.md` Phase 11D entries updated — shipped 2026-05-06
 
 ### Cutover (§8)
-- [ ] Dev parity test passed (cross-system mock cycle on real dev queues)
-- [ ] **Visibility timeout re-checked against dev-parity actual timings** (per §6.6 Q3 watch clause) — if any P95 > 600s, bump visibility timeout before prod
-- [ ] **Largest envelope size monitored during dev-parity** (per §6.6 Q7 watch threshold) — if any single envelope > 180 KB cleartext, escalate to Option B before prod cutover
+- [x] Dev parity test passed (cross-system mock cycle on real dev queues) — **2026-05-14**: mock-payroll full capture + submit cycle completed end-to-end on real `dev-financeagent-*` queues. Praxis `waitCaptureResult` and `waitSubmitResult` both advanced. `businessKey=2026-04::1051` correlated correctly throughout.
+- [x] **Visibility timeout re-checked against dev-parity actual timings** — mock-payroll capture: ~1.4–1.6s; submit: similarly fast. Both well under 900s baseline. No change needed.
+- [x] **Largest envelope size monitored during dev-parity** — mock-payroll envelopes far below 180 KB threshold. Option A (raw SQS) confirmed safe.
 - [ ] RDS snapshot taken
 - [ ] Code merged to main + EB deployed
 - [ ] Boot logs verified (KMS key found, SQS listeners started, no errors)

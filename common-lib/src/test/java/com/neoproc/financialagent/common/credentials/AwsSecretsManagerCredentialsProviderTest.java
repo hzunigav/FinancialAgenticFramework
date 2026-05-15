@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRespon
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -23,7 +24,8 @@ class AwsSecretsManagerCredentialsProviderTest {
 
     @BeforeEach
     void stubSecret() {
-        when(secretsManager.getSecretValue(any(GetSecretValueRequest.class)))
+        // lenient: tests that override this stub (or don't call secretsManager) won't trip UnnecessaryStubbingException
+        lenient().when(secretsManager.getSecretValue(any(GetSecretValueRequest.class)))
                 .thenReturn(GetSecretValueResponse.builder()
                         .secretString("{\"username\":\"neoProc_user\",\"password\":\"s3cr3t\"}")
                         .build());

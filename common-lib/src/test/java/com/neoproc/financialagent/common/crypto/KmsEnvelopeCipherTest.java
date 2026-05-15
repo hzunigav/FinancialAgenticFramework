@@ -7,17 +7,16 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.kms.KmsClient;
-import software.amazon.awssdk.services.kms.model.DecryptRequest;
 import software.amazon.awssdk.services.kms.model.DecryptResponse;
-import software.amazon.awssdk.services.kms.model.GenerateDataKeyRequest;
 import software.amazon.awssdk.services.kms.model.GenerateDataKeyResponse;
 
 import javax.crypto.KeyGenerator;
 import java.security.SecureRandom;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
 class KmsEnvelopeCipherTest {
@@ -33,15 +32,18 @@ class KmsEnvelopeCipherTest {
         gen.init(256, new SecureRandom());
         fakeDek = gen.generateKey().getEncoded();
 
-        // GenerateDataKey returns the plaintext DEK + a fake encrypted blob
-        when(kmsClient.generateDataKey(any(GenerateDataKeyRequest.class)))
+        // GenerateDataKey returns the plaintext DEK + a fake encrypted blob.
+        // Uses lenient() because schemeName/decrypt_rejectsNonKmsFormat don't call encrypt().
+        // Uses Consumer.class because KmsEnvelopeCipher calls the lambda overload: kms.generateDataKey(r -> r.keyId(...))
+        lenient().when(kmsClient.generateDataKey(any(Consumer.class)))
                 .thenAnswer(inv -> GenerateDataKeyResponse.builder()
                         .plaintext(SdkBytes.fromByteArray(fakeDek))
-                        .ciphertextBlob(SdkBytes.fromByteArray(new byte[]{0x01, 0x02})) // fake enc DEK
+                        .ciphertextBlob(SdkBytes.fromByteArray(new byte[]{0x01, 0x02}))
                         .build());
 
-        // Decrypt returns the same plaintext DEK (simulates KMS round-trip)
-        when(kmsClient.decrypt(any(DecryptRequest.class)))
+        // Decrypt returns the same plaintext DEK (simulates KMS round-trip).
+        // lenient() for the same reason; Consumer overload used by kms.decrypt(r -> r.ciphertextBlob(...))
+        lenient().when(kmsClient.decrypt(any(Consumer.class)))
                 .thenAnswer(inv -> DecryptResponse.builder()
                         .plaintext(SdkBytes.fromByteArray(fakeDek))
                         .build());

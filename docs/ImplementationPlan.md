@@ -17,9 +17,10 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live), [TechnicalRe
 | M3.0 | Engine plumbing for MFA + session + shadow | ✓ |
 | M3 | Real portal access (Shadow Mode, fill-only) | ✓ |
 | P1 | Praxis Phase 1 integration — agent-worker readiness | ✓ |
+| M6-pre | Schema correctness for KMS production path | ✓ |
 | M4 | MCP Server + real payroll data feed | · |
 | M5 | HITL gate + Safe-Submit loop | · |
-| M6 | Production AWS infra | · |
+| M6 | Production AWS infra | → |
 | M7 | Exception-only autonomy | · |
 
 ---
@@ -148,6 +149,21 @@ Complements [DeploymentPlan.md](DeploymentPlan.md) (infra go-live), [TechnicalRe
 - Full BPMN cycle (capture → submit) completes end-to-end with `PORTAL_ID=mock-payroll` against Praxis staging.
 - Docker image processes a mock envelope on a fresh host.
 - `/actuator/prometheus` exposes the four spec metrics during a run.
+
+---
+
+## M6-pre — Schema correctness for KMS production path · ✓
+
+**Goal:** Close two dormant schema bugs that would fire the moment `FINANCEAGENT_CIPHER=kms` is set on the worker or Praxis enables encryption on outbound envelopes. Required before flipping the cipher env-var in any environment.
+
+**Delivered:**
+- **Per-schema `Encryption` `$defs`** — `payroll-submit-request.v1.json` was inheriting `ciphertextField: ["result"]` via a cross-schema `$ref` to `payroll-capture-result.v1.json`, but the submit-request body is in the `"request"` field. Each schema now has its own inline `Encryption` `$def` with the correct single-value enum (`["result"]` for capture/submit-result; `["request"]` for submit-request) — [payroll-submit-request.v1.json](../contract-api/src/main/resources/schemas/v1/payroll-submit-request.v1.json), [payroll-submit-result.v1.json](../contract-api/src/main/resources/schemas/v1/payroll-submit-result.v1.json).
+- **KMS ciphertext pattern** — all three schemas accepted only `^vault:v\d+:` for the encrypted body field; `KmsEnvelopeCipher` emits `kms:v1:...`. Pattern widened to `^(vault|kms):v\d+:` — [payroll-capture-result.v1.json](../contract-api/src/main/resources/schemas/v1/payroll-capture-result.v1.json), [payroll-submit-result.v1.json](../contract-api/src/main/resources/schemas/v1/payroll-submit-result.v1.json), [payroll-submit-request.v1.json](../contract-api/src/main/resources/schemas/v1/payroll-submit-request.v1.json).
+- **Fixtures corrected** — three fixtures were using `"scheme": "local-aes-gcm-v1"` (not in the enum) and `ciphertextField: "result"` on the submit-request. Updated to `kms-envelope-v1` + `kms:v1:` ciphertext strings matching the KMS wire format — [payroll-capture-result.valid-encrypted.json](../contract-api/src/test/resources/fixtures/payroll-capture-result.valid-encrypted.json), [payroll-submit-request.valid.json](../contract-api/src/test/resources/fixtures/payroll-submit-request.valid.json), [payroll-submit-result.valid-success.json](../contract-api/src/test/resources/fixtures/payroll-submit-result.valid-success.json).
+- **Negative fixture locking the fix** — [payroll-submit-request.invalid-bad-ciphertextfield.json](../contract-api/src/test/resources/fixtures/payroll-submit-request.invalid-bad-ciphertextfield.json) asserts that `ciphertextField: "result"` on a submit-request is rejected; wired into `SchemaFixtureValidationTest`.
+- All 20 `contract-api` tests pass; 3 were failing before this work.
+
+**Next in M6:** flip `FINANCEAGENT_CIPHER=kms` in the worker, provision the KMS CMK and SecretManager paths, stand up `infra-aws` CDK, and deploy to Fargate. See [DeploymentPlan.md](DeploymentPlan.md).
 
 ---
 

@@ -16,12 +16,12 @@
     "sourceCaptureEnvelopeId": "d9f5a846-fa8c-4078-aa22-2019cd2e2388"
   },
   "encryption": {
-    "scheme": "local-aes-gcm-v1",
+    "scheme": "kms-envelope-v1",
     "keyName": "payroll-firm-1351",
     "keyVersion": 1,
     "ciphertextField": "result"
   },
-  "result": "vault:v1:successCiphertext==",
+  "result": "kms:v1:AAAAAAAAAAAAAAAAAAAAAA==.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
   "audit": {
     "payloadSha256": "0000000000000000000000000000000000000000000000000000000000000002"
   }

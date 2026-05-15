@@ -25,12 +25,12 @@
       }
     },
 
-    "encryption": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/$defs/Encryption" },
+    "encryption": { "$ref": "#/$defs/Encryption" },
 
     "result": {
       "oneOf": [
         { "$ref": "#/$defs/SubmitResultBody" },
-        { "type": "string", "pattern": "^vault:v\\d+:" }
+        { "type": "string", "pattern": "^(vault|kms):v\\d+:" }
       ]
     },
 
@@ -38,6 +38,18 @@
   },
 
   "$defs": {
+    "Encryption": {
+      "type": "object",
+      "required": ["scheme", "keyName", "keyVersion", "ciphertextField"],
+      "additionalProperties": false,
+      "properties": {
+        "scheme":          { "type": "string", "enum": ["vault-transit-v1", "kms-envelope-v1"] },
+        "keyName":         { "type": "string", "minLength": 1 },
+        "keyVersion":      { "type": "integer", "minimum": 1 },
+        "ciphertextField": { "type": "string", "enum": ["result"] }
+      }
+    },
+
     "SubmitResultBody": {
       "type": "object",
       "required": ["status", "totals", "submittedRows", "roster_diff"],

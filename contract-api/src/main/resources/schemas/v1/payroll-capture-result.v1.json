@@ -68,7 +68,7 @@
     "result": {
       "oneOf": [
         { "$ref": "#/$defs/CaptureResultBody" },
-        { "type": "string", "pattern": "^vault:v\\d+:" }
+        { "type": "string", "pattern": "^(vault|kms):v\\d+:" }
       ]
     },
 

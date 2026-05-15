@@ -17,12 +17,12 @@
     "planilla": null
   },
   "encryption": {
-    "scheme": "local-aes-gcm-v1",
+    "scheme": "kms-envelope-v1",
     "keyName": "payroll-firm-1351",
     "keyVersion": 1,
     "ciphertextField": "result"
   },
-  "result": "vault:v1:QCpts8sJvdy5g3KIl4EKLmDPuMsiGRIZrmSum8eN9CwH",
+  "result": "kms:v1:AAAAAAAAAAAAAAAAAAAAAA==.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
   "audit": {
     "manifestPath": "manifest.json",
     "harSha256": null,

@@ -44,16 +44,16 @@ class SchemaFixtureValidationTest {
 
     @ParameterizedTest(name = "{0} must be rejected by {1}")
     @CsvSource({
-        "fixtures/payroll-capture-result.invalid-bad-scheme.json, payroll-capture-result.v1"
+        "fixtures/payroll-capture-result.invalid-bad-scheme.json,          payroll-capture-result.v1",
+        "fixtures/payroll-submit-request.invalid-bad-ciphertextfield.json, payroll-submit-request.v1"
     })
     @DisplayName("Invalid fixtures must be rejected with SchemaValidationException")
     void invalidFixturesMustBeRejected(String fixturePath, String schemaName) throws IOException {
         byte[] body = readFixture(fixturePath);
         SchemaValidationException ex = assertThrows(SchemaValidationException.class,
                 () -> SchemaValidator.validate(body, schemaName));
-        assertTrue(ex.errors().stream().anyMatch(m -> m.toLowerCase().contains("scheme")
-                                                   || m.toLowerCase().contains("enum")),
-                "Expected a scheme/enum violation but got: " + ex.errors());
+        assertTrue(ex.errors().stream().anyMatch(m -> m.toLowerCase().contains("enum")),
+                "Expected an enum violation but got: " + ex.errors());
     }
 
     @Test

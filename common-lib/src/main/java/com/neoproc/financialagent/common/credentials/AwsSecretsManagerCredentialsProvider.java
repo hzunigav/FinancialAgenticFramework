@@ -13,11 +13,12 @@ import java.util.function.Function;
  * Production {@link CredentialsProvider} backed by AWS Secrets Manager.
  *
  * <p>Secret paths follow the convention from CONTRACT.md and
- * PraxisIntegrationHandoff.md §15.2:
+ * PraxisIntegrationHandoff.md §15.2, optionally prefixed by
+ * {@code FINANCEAGENT_SECRETS_ENV_PREFIX} (e.g. {@code prod}):
  * <ul>
- *   <li>Per-firm:    {@code financeagent/firms/<firmId>/portals/<portalId>}</li>
- *   <li>Shared:      {@code financeagent/shared/portals/<portalId>}</li>
- *   <li>Per-client:  {@code financeagent/firms/<firmId>/portals/<portalId>/<clientId>}</li>
+ *   <li>Per-firm:    {@code [prefix/]financeagent/firms/<firmId>/portals/<portalId>}</li>
+ *   <li>Shared:      {@code [prefix/]financeagent/shared/portals/<portalId>}</li>
+ *   <li>Per-client:  {@code [prefix/]financeagent/firms/<firmId>/portals/<portalId>/<clientId>}</li>
  * </ul>
  *
  * <p>The secret value must be a JSON object whose keys map directly to
@@ -40,18 +41,34 @@ public final class AwsSecretsManagerCredentialsProvider implements CredentialsPr
     private final String firmId;
     private final Function<String, String> credentialScopeFor;
     private final SecretsManagerClient secretsManager;
+    private final String envPrefix;
 
     public AwsSecretsManagerCredentialsProvider(String firmId,
                                                 Function<String, String> credentialScopeFor) {
-        this(firmId, credentialScopeFor, SecretsManagerClient.create());
+        this(firmId, credentialScopeFor,
+             normalizePrefix(System.getenv("FINANCEAGENT_SECRETS_ENV_PREFIX")),
+             SecretsManagerClient.create());
     }
 
     AwsSecretsManagerCredentialsProvider(String firmId,
                                          Function<String, String> credentialScopeFor,
                                          SecretsManagerClient secretsManager) {
+        this(firmId, credentialScopeFor, "", secretsManager);
+    }
+
+    AwsSecretsManagerCredentialsProvider(String firmId,
+                                         Function<String, String> credentialScopeFor,
+                                         String envPrefix,
+                                         SecretsManagerClient secretsManager) {
         this.firmId = firmId;
         this.credentialScopeFor = credentialScopeFor;
+        this.envPrefix = normalizePrefix(envPrefix);
         this.secretsManager = secretsManager;
+    }
+
+    private static String normalizePrefix(String raw) {
+        if (raw == null || raw.isBlank()) return "";
+        return raw.endsWith("/") ? raw : raw + "/";
     }
 
     @Override
@@ -79,7 +96,7 @@ public final class AwsSecretsManagerCredentialsProvider implements CredentialsPr
 
     private String resolveSecretId(String scope, String portalId, String clientId) {
         if (SCOPE_SHARED.equals(scope)) {
-            return "financeagent/shared/portals/" + portalId;
+            return envPrefix + "financeagent/shared/portals/" + portalId;
         }
         if (SCOPE_PER_CLIENT.equals(scope)) {
             // Praxis emits the cédula-jurídica with dashes ("3-101-680139");
@@ -91,8 +108,8 @@ public final class AwsSecretsManagerCredentialsProvider implements CredentialsPr
                         "per-client portal '" + portalId + "' requires a clientIdentifier "
                                 + "but the request envelope did not provide one");
             }
-            return "financeagent/firms/" + firmId + "/portals/" + portalId + "/" + normalizedClientId;
+            return envPrefix + "financeagent/firms/" + firmId + "/portals/" + portalId + "/" + normalizedClientId;
         }
-        return "financeagent/firms/" + firmId + "/portals/" + portalId;
+        return envPrefix + "financeagent/firms/" + firmId + "/portals/" + portalId;
     }
 }

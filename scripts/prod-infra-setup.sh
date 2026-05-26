@@ -123,11 +123,12 @@ SERVICE_NAME="financeagent-worker-${PORTAL_ID}"
 
 # Build environment array; add MOCK_PORTAL_BASE_URL only for mock-payroll
 ENV_JSON="[
-  {\"name\":\"PORTAL_ID\",              \"value\":\"${PORTAL_ID}\"},
-  {\"name\":\"AWS_REGION\",             \"value\":\"${REGION}\"},
-  {\"name\":\"FINANCEAGENT_CIPHER\",    \"value\":\"cleartext\"},
-  {\"name\":\"FINANCEAGENT_CREDENTIALS\",\"value\":\"aws\"},
-  {\"name\":\"JAVA_TOOL_OPTIONS\",      \"value\":\"-Dagent.worker.queue-prefix=${ENV_PREFIX}\"}
+  {\"name\":\"PORTAL_ID\",                        \"value\":\"${PORTAL_ID}\"},
+  {\"name\":\"AWS_REGION\",                       \"value\":\"${REGION}\"},
+  {\"name\":\"FINANCEAGENT_CIPHER\",              \"value\":\"cleartext\"},
+  {\"name\":\"FINANCEAGENT_CREDENTIALS\",         \"value\":\"aws\"},
+  {\"name\":\"FINANCEAGENT_SECRETS_ENV_PREFIX\",  \"value\":\"${ENV_PREFIX}\"},
+  {\"name\":\"JAVA_TOOL_OPTIONS\",                \"value\":\"-Dagent.worker.queue-prefix=${ENV_PREFIX}\"}
 ]"
 
 if [[ "$PORTAL_ID" == "mock-payroll" ]]; then
@@ -150,6 +151,10 @@ TD_JSON=$(jq -n \
   requiresCompatibilities:   ["FARGATE"],
   cpu:                       "1024",
   memory:                    "3072",
+  runtimePlatform: {
+    cpuArchitecture:        "ARM64",
+    operatingSystemFamily:  "LINUX"
+  },
   containerDefinitions: [{
     name:      "agent-worker",
     image:     $image,

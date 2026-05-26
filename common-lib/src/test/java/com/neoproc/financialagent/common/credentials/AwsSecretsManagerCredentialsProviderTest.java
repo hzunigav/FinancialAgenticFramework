@@ -164,6 +164,27 @@ class AwsSecretsManagerCredentialsProviderTest {
     }
 
     @Test
+    void envPrefix_prependedToAllPaths() {
+        var captured = new String[1];
+        when(secretsManager.getSecretValue(any(GetSecretValueRequest.class)))
+                .thenAnswer(inv -> {
+                    captured[0] = ((GetSecretValueRequest) inv.getArgument(0)).secretId();
+                    return GetSecretValueResponse.builder()
+                            .secretString("{\"username\":\"u\",\"password\":\"p\"}")
+                            .build();
+                });
+
+        new AwsSecretsManagerCredentialsProvider(FIRM_ID, id -> "shared", "prod", secretsManager)
+                .get(PORTAL_ID);
+        assertEquals("prod/financeagent/shared/portals/" + PORTAL_ID, captured[0]);
+
+        new AwsSecretsManagerCredentialsProvider(FIRM_ID, id -> "per-firm", "prod/", secretsManager)
+                .get(PORTAL_ID);
+        assertEquals("prod/financeagent/firms/" + FIRM_ID + "/portals/" + PORTAL_ID, captured[0],
+                "trailing slash in raw prefix must not produce a double slash");
+    }
+
+    @Test
     void normalizeClientId_helperContract() {
         // The shared normaliser is the single source of truth for both
         // providers; lock its behaviour here so both stay aligned.

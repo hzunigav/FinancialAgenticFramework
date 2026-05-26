@@ -28,8 +28,9 @@ session:
 
 # Runtime parameters the operator passes via -Dparams.<key>=<value>:
 #   params.planillaId    = stable AutoPlanilla payroll id, e.g. "1051".
-#                          Matched against <option value="..."> on the planilla
-#                          <select> — operators rename labels, ids never change.
+#                          Matched against data-value="..." on the MUI
+#                          multi-select option — operators rename labels,
+#                          ids never change.
 #   params.planillaName  = visible label, only used in the run manifest /
 #                          capture envelope for human-readable context. NOT
 #                          used to drive the dropdown.
@@ -40,14 +41,16 @@ session:
 #                          task.period.to.
 
 authSteps:
-  # Selectors below come from the operator's Playwright codegen recording
-  # (April 2026). Semantic locators (role= / label=) are preferred over
-  # CSS classes because they survive Material UI class-hash churn.
+  # Selectors from the operator's Playwright codegen recording (May 2026).
+  # Semantic locators (role= / label=) are preferred over CSS classes
+  # because they survive Material UI class-hash churn.
+  #
+  # Navigate directly to /login — the home page renders an alert-link
+  # "iniciar sesión" that is present in the DOM but not visible in headless
+  # Chromium (Bootstrap alert animation), causing a 30s timeout. Direct
+  # navigation sidesteps the link entirely.
   - action: navigate
-    target: /
-
-  - action: click
-    selector: 'role=link[name="iniciar sesión"]'
+    target: /login
 
   - action: fill
     selector: 'role=textbox[name="Nombre de usuario"]'
@@ -74,28 +77,29 @@ steps:
   - action: click
     selector: 'role=menuitem[name="CCSS Report"]'
 
-  # AutoPlanilla replaced the native <select> with a MUI multi-select
-  # listbox (detected 2026-05-26). Each <li role="option"> carries
-  # data-value="{planillaId}" — match by that stable id, not the
-  # display name which can be renamed by operators.
-  # Use #payrollIds (the element's own HTML id) to avoid the strict-mode
-  # violation: the Rows-per-page combobox shares aria-haspopup="listbox"
-  # and is already present on the CCSS Report page before the report loads.
-  # Wait for #payrollIds first: the CCSS Report page loads async and the
-  # Select element appears in the DOM before React attaches its click
-  # handler — clicking without waiting silently does nothing.
+  # MUI MultiSelect interaction pattern (verified via Playwright codegen,
+  # May 2026). The planilla field is a multi-select combobox — clicking
+  # the trigger opens a popup with checkboxes; you must click the checkbox
+  # inside the target option, then click the MuiBackdrop to close.
+  #
+  # The combobox is targeted by its accessible label ("Select one or more
+  # payrolls") rather than #payrollIds to avoid strict-mode violations.
+  # The option is targeted by data-value (stable planilla id) rather than
+  # display name, which operators can rename.
   - action: waitForSelector
-    selector: '#payrollIds'
+    selector: 'role=combobox[name="Select one or more payrolls"]'
 
   - action: click
-    selector: '#payrollIds'
-
-  # Wait for the listbox popup to appear before clicking the target option.
-  - action: waitForSelector
-    selector: '[role="listbox"]'
+    selector: 'role=combobox[name="Select one or more payrolls"]'
 
   - action: click
-    selector: '[role="option"][data-value="${params.planillaId}"]'
+    selector: '[role="option"][data-value="${params.planillaId}"] input[type="checkbox"]'
+
+  # Close the dropdown by clicking the MUI backdrop (clicking outside the
+  # popup). The subsequent fill on Start Date is not sufficient — the
+  # backdrop intercepts all outside clicks while the multi-select is open.
+  - action: click
+    selector: '.MuiBackdrop-root'
 
   - action: fill
     selector: 'role=textbox[name="Start Date"]'

@@ -42,10 +42,11 @@ jobs:
         run: |
           IMAGE_URI="${{ env.ECR_ACCOUNT }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/financeagent-testing-harness"
           TAG="prod-${GITHUB_SHA::8}"
-          docker build -f Dockerfile.testing-harness -t "$IMAGE_URI:$TAG" .
+          docker build -f Dockerfile.testing-harness -t "$IMAGE_URI:$TAG" -t "$IMAGE_URI:latest" .
           docker push "$IMAGE_URI:$TAG"
+          docker push "$IMAGE_URI:latest"
           echo "image=$IMAGE_URI:$TAG" >> "$GITHUB_OUTPUT"
-          echo "Built and pushed $IMAGE_URI:$TAG"
+          echo "Built and pushed $IMAGE_URI:$TAG (and :latest)"
 
       - name: Update ECS service image
         env:

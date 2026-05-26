@@ -58,15 +58,17 @@ jobs:
             --cluster "$CLUSTER" --services "$SERVICE" \
             --query 'services[0].taskDefinition' --output text)
 
-          NEW_TD_ARN=$(aws ecs describe-task-definition \
+          TD_JSON=$(aws ecs describe-task-definition \
             --task-definition "$TD_ARN" \
             --query 'taskDefinition' --output json | \
           jq --arg img "$NEW_IMAGE" '
             .containerDefinitions[0].image = $img |
             del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                 .placementConstraints, .compatibilities, .registeredAt, .registeredBy)
-          ' | aws ecs register-task-definition \
-            --cli-input-json file:///dev/stdin \
+          ')
+
+          NEW_TD_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$TD_JSON" \
             --query 'taskDefinition.taskDefinitionArn' --output text)
 
           aws ecs update-service \

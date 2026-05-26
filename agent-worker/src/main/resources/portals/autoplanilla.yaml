@@ -81,9 +81,18 @@ steps:
   # Use #payrollIds (the element's own HTML id) to avoid the strict-mode
   # violation: the Rows-per-page combobox shares aria-haspopup="listbox"
   # and is already present on the CCSS Report page before the report loads.
-  # The subsequent fill on Start Date implicitly closes the dropdown.
+  # Wait for #payrollIds first: the CCSS Report page loads async and the
+  # Select element appears in the DOM before React attaches its click
+  # handler — clicking without waiting silently does nothing.
+  - action: waitForSelector
+    selector: '#payrollIds'
+
   - action: click
     selector: '#payrollIds'
+
+  # Wait for the listbox popup to appear before clicking the target option.
+  - action: waitForSelector
+    selector: '[role="listbox"]'
 
   - action: click
     selector: '[role="option"][data-value="${params.planillaId}"]'

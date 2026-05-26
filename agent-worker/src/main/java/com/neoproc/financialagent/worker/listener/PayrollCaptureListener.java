@@ -81,7 +81,8 @@ public class PayrollCaptureListener {
         setupMdc(request);
 
         try {
-            log.info("receive portalId={} envelopeId={}", portalId, envelopeId);
+            log.info("receive portalId={} envelopeId={} probe={}",
+                    portalId, envelopeId, isProbe(businessKey));
 
             Optional<Object> cached = idempotencyStore.lookup(envelopeId);
             if (cached.isPresent()) {
@@ -91,7 +92,12 @@ public class PayrollCaptureListener {
             }
 
             PayrollCaptureResult result;
-            if (PayrollTaskListener.extractReceiveCount(headers) > 1) {
+            if (isProbe(businessKey)) {
+                // Login-probe path: authenticate + screenshot only, no payroll data.
+                // businessKey prefix "probe::" is the sole dispatch signal — no new
+                // schema type or queue is needed (see AgentSmokeTestRequirements.md §4b).
+                result = executeProbe(request);
+            } else if (PayrollTaskListener.extractReceiveCount(headers) > 1) {
                 log.warn("cold-cache duplicate envelopeId={} (receiveCount>1, no cached result) — emitting EXPIRED_DUPLICATE",
                         envelopeId);
                 result = buildFailedResult(request, "EXPIRED_DUPLICATE",
@@ -121,6 +127,65 @@ public class PayrollCaptureListener {
     }
 
     // -----------------------------------------------------------------------
+
+    private static boolean isProbe(String businessKey) {
+        return businessKey != null && businessKey.startsWith("probe::");
+    }
+
+    /**
+     * Login-probe execution. Calls {@link com.neoproc.financialagent.worker.PortalRunService#runProbe}
+     * which runs only the portal's {@code authSteps}, takes a screenshot, and
+     * returns without fetching any payroll data.
+     *
+     * <p>For per-client portals (ccss-sicere), {@code task.planilla.id} carries
+     * the {@code clientIdentifier} (cédula jurídica). Praxis must populate
+     * {@code task.planilla} with {@code id = <cédula>} and {@code name = "probe"}
+     * when dispatching CCSS SICERE probes. All other portals leave planilla null.
+     */
+    private PayrollCaptureResult executeProbe(PayrollCaptureRequest request) throws Exception {
+        Map<String, String> bindings = extractBindings(request);
+
+        // Per-client portals encode clientIdentifier in task.planilla.id.
+        CaptureTask task = request.task();
+        if (task != null && task.planilla() != null && task.planilla().id() != null) {
+            bindings.put("params.clientIdentifier", task.planilla().id());
+        }
+
+        RunOutcome outcome = portalRunService.runProbe(portalId, bindings);
+        log.info("probe complete portalId={} status={} screenshotSha256={}",
+                portalId, outcome.status(), outcome.screenshotSha256());
+        return buildProbeResult(request, outcome.status(), outcome.screenshotSha256());
+    }
+
+    private PayrollCaptureResult buildProbeResult(PayrollCaptureRequest request,
+                                                   String runStatus,
+                                                   String screenshotSha256) {
+        String status = "SUCCESS".equals(runStatus) ? "SUCCESS" : "FAILED";
+        // employees MUST be an empty array — null fails schema validation and
+        // causes Praxis to create a HITL escalation task instead of advancing.
+        CaptureResultBody body = new CaptureResultBody(status, zeroTotals(), List.of());
+
+        long firmId = request.envelope().firmId();
+        EnvelopeCipher cipher = EnvelopeIo.defaultCipher();
+        EnvelopeIo.EncryptedPayload encrypted = EnvelopeIo.encryptBody(body, cipher, firmId);
+
+        String locale = request.envelope().locale() != null ? request.envelope().locale() : "es";
+
+        return new PayrollCaptureResult(
+                PayrollCaptureResult.SCHEMA,
+                new EnvelopeMeta(
+                        UUID.randomUUID().toString(),
+                        request.envelope().businessKey(),   // echoed back exactly for Praxis correlation
+                        firmId,
+                        locale,
+                        Instant.now(),
+                        "agent-worker/" + portalId,
+                        request.envelope().issuerRunId()),
+                CaptureTask.of(portalId, null, null),       // sourcePortal matches inbound for BPMN routing
+                encrypted.meta(),
+                encrypted.result(),
+                new Audit(null, null, screenshotSha256, encrypted.payloadSha256()));
+    }
 
     private PayrollCaptureResult executeRun(PayrollCaptureRequest request) throws Exception {
         Map<String, String> bindings = extractBindings(request);

@@ -1,0 +1,139 @@
+name: Deploy agent-worker to production
+
+# Triggers automatically when agent-worker code or its Docker image changes.
+# Use workflow_dispatch to deploy a specific portal without a code push, or
+# to deploy all portals when only infra changed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'agent-worker/**'
+      - 'common-lib/**'
+      - 'contract-api/**'
+      - 'Dockerfile'
+      - '.github/workflows/deploy-agent-worker.yml'
+  workflow_dispatch:
+    inputs:
+      portals:
+        description: 'Comma-separated portal IDs to redeploy (empty = all)'
+        required: false
+        default: ''
+
+env:
+  AWS_REGION:  us-east-1
+  ECR_ACCOUNT: 409159414704
+  CLUSTER:     financeagent
+  ECR_REPO:    financeagent-worker
+
+jobs:
+  # ── Build once, deploy to N portals in parallel ───────────────────────────
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token exchange
+      contents: read
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        id: push
+        run: |
+          IMAGE_URI="${{ env.ECR_ACCOUNT }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}"
+          TAG="prod-${GITHUB_SHA::8}"
+          docker build -t "$IMAGE_URI:$TAG" .
+          docker push "$IMAGE_URI:$TAG"
+          echo "image=$IMAGE_URI:$TAG" >> "$GITHUB_OUTPUT"
+          echo "Built and pushed $IMAGE_URI:$TAG"
+
+  # ── Deploy to each portal service in parallel ─────────────────────────────
+  # Adding a new portal: append its ID to the matrix list below.
+  # The ECS service must already exist (run scripts/prod-infra-setup.sh first).
+  deploy:
+    name: Deploy → ${{ matrix.portal }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      matrix:
+        portal:
+          - mock-payroll
+          - autoplanilla
+          - ccss-sicere
+          - ins-rt-virtual
+          - hacienda-ovi
+      fail-fast: false   # one portal failure doesn't block the others
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check portal filter (workflow_dispatch only)
+        id: filter
+        run: |
+          INPUT="${{ github.event.inputs.portals }}"
+          PORTAL="${{ matrix.portal }}"
+          if [ -z "$INPUT" ] || echo "$INPUT" | tr ',' '\n' | grep -qx "$PORTAL"; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping $PORTAL (not in filter: $INPUT)"
+          fi
+
+      - name: Update ECS service image
+        if: steps.filter.outputs.deploy == 'true'
+        env:
+          SERVICE:   financeagent-worker-${{ matrix.portal }}
+          NEW_IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          # Check the service exists before attempting deploy
+          STATUS=$(aws ecs describe-services \
+            --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
+
+          if [ "$STATUS" != "ACTIVE" ]; then
+            echo "Service $SERVICE not found or not ACTIVE (status=$STATUS) — run prod-infra-setup.sh first"
+            exit 1
+          fi
+
+          # Get current task definition, swap only the image
+          TD_ARN=$(aws ecs describe-services \
+            --cluster "$CLUSTER" --services "$SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+
+          NEW_TD_ARN=$(aws ecs describe-task-definition \
+            --task-definition "$TD_ARN" \
+            --query 'taskDefinition' --output json | \
+          jq --arg img "$NEW_IMAGE" '
+            .containerDefinitions[0].image = $img |
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .placementConstraints, .compatibilities, .registeredAt, .registeredBy)
+          ' | aws ecs register-task-definition \
+            --cli-input-json file:///dev/stdin \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --task-definition "$NEW_TD_ARN" \
+            --force-new-deployment \
+            --no-cli-pager
+
+          echo "Deployed $NEW_IMAGE → $SERVICE (TD: $NEW_TD_ARN)"

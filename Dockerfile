@@ -43,20 +43,12 @@ RUN mkdir -p /app/artifacts && chown pwuser:pwuser /app/artifacts
 USER pwuser
 
 # ── Runtime defaults ──────────────────────────────────────────────────────────
-# Override all of these via env vars / ECS task-definition environment + secrets blocks.
-# Production values per PraxisIntegrationHandoff §F.2:
-#   FINANCEAGENT_CIPHER=kms
-#   FINANCEAGENT_CREDENTIALS=aws
-#   RABBITMQ_* injected from Secrets Manager
+# Override via ECS task-definition environment block.
+# Production: FINANCEAGENT_CIPHER=cleartext, FINANCEAGENT_CREDENTIALS=aws
 ENV PORTAL_ID=mock-payroll \
     ARTIFACTS_DIR=/app/artifacts \
     FINANCEAGENT_CIPHER=local \
-    FINANCEAGENT_CREDENTIALS=local \
-    RABBITMQ_HOST=rabbitmq \
-    RABBITMQ_PORT=5672 \
-    RABBITMQ_USERNAME=guest \
-    RABBITMQ_PASSWORD=guest \
-    RABBITMQ_VHOST=/
+    FINANCEAGENT_CREDENTIALS=local
 
 # 8080 = Spring Boot HTTP (health + /actuator/prometheus)
 EXPOSE 8080

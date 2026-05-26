@@ -1,0 +1,58 @@
+id: ccss-sicere-capture
+description: CCSS Sicere — capture side (login probe + future report capture).
+baseUrl: https://aissfa.ccss.sa.cr/afiliacion/
+
+# Per-client credential scope: one (firm × clientIdentifier) per corporate id.
+# Secret path: financeagent/firms/<firmId>/portals/ccss-sicere/<clientIdentifier>.
+# For login probes, clientIdentifier is carried on task.planilla.id in the
+# capture-request envelope (see PayrollCaptureListener.executeProbe).
+credentialScope: per-client
+
+rateLimit:
+  maxConcurrent: 1
+  minIntervalSeconds: 2.0
+
+session:
+  ttlMinutes: 0
+
+# authSteps are intentionally kept in sync with ccss-sicere.yaml.
+# If the CCSS login flow changes, update BOTH descriptors.
+authSteps:
+  - action: navigate
+    target: /
+
+  - action: fill
+    selector: '[id="formInicioSesion:usuario"]'
+    value: "${credentials.username}"
+
+  - action: click
+    selector: 'form[id="formInicioSesion"] button:has-text("Continuar")'
+
+  - action: fill
+    selector: '[id="formInicioSesion:clave"]'
+    value: "${credentials.password}"
+    redact: true
+
+  - action: click
+    selector: 'form[id="formInicioSesion"] button:has-text("Ingresar")'
+
+  # Confirm post-login state. The Planilla menu item is always visible for
+  # an active patrono account; timeout here surfaces as CREDENTIALS_INVALID.
+  - action: waitForSelector
+    selector: 'role=menuitem[name=/Planilla/]'
+
+# Empty by design for the probe milestone. Future report-capture steps
+# (navigating to the employer planilla selector and scraping report data)
+# go here once that scope is implemented.
+steps: []
+
+scrape:
+  fields: []
+
+securityContext:
+  scrubHarFields:
+    - urlPattern: "**/afiliacion/**"
+      bodyFields:
+        - "formInicioSesion:clave"
+        - password
+        - clave

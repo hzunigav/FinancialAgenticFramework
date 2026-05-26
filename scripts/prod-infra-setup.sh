@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# prod-infra-setup.sh — one-time provisioning for a new agent-worker portal in production.
+#
+# Run from AWS CloudShell. Idempotent: safe to re-run; existing resources are skipped.
+#
+# Usage:
+#   ./scripts/prod-infra-setup.sh <portal-id> <queue-type> <image-tag>
+#
+#   portal-id   Portal identifier matching the YAML descriptor filename, e.g. ccss-sicere
+#   queue-type  Which task queues to create: capture | submit | both
+#   image-tag   ECR image tag to use in the initial task definition, e.g. prod-abc1234
+#
+# Environment (set these before running, or export them):
+#   CLUSTER          ECS cluster name       (default: financeagent)
+#   REGION           AWS region             (default: us-east-1)
+#   ACCOUNT          AWS account ID         (default: 409159414704)
+#   SUBNET_ID        Private subnet for Fargate tasks
+#   SG_ID            Security group ID for Fargate tasks
+#   EXEC_ROLE_ARN    ECS task execution role ARN (ECR pull + CloudWatch logs)
+#   TASK_ROLE_ARN    ECS task role ARN (SQS, KMS, Secrets Manager)
+#   NS_ARN           ECS Service Connect namespace ARN (financeagent.local)
+#
+# To retrieve the last four values from an existing service:
+#   source <(./scripts/prod-infra-setup.sh --print-env)
+#
+set -euo pipefail
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+CLUSTER="${CLUSTER:-financeagent}"
+REGION="${REGION:-us-east-1}"
+ACCOUNT="${ACCOUNT:-409159414704}"
+ENV_PREFIX="prod"
+DLQ_NAME="${ENV_PREFIX}-financeagent-dlq"
+
+# ── Helper: print env vars from an existing service ───────────────────────────
+if [[ "${1:-}" == "--print-env" ]]; then
+  SVC="financeagent-worker-mock-payroll"
+  TD_ARN=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" \
+    --region "$REGION" --query 'services[0].taskDefinition' --output text)
+  EXEC=$(aws ecs describe-task-definition --task-definition "$TD_ARN" \
+    --region "$REGION" --query 'taskDefinition.executionRoleArn' --output text)
+  TASK=$(aws ecs describe-task-definition --task-definition "$TD_ARN" \
+    --region "$REGION" --query 'taskDefinition.taskRoleArn' --output text)
+  TASK_ARN=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SVC" \
+    --region "$REGION" --query 'taskArns[0]' --output text)
+  ENI_ID=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+    --region "$REGION" \
+    --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
+    --output text)
+  ENI=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI_ID" \
+    --region "$REGION" --query 'NetworkInterfaces[0]' --output json)
+  echo "export SUBNET_ID=$(echo "$ENI" | jq -r '.SubnetId')"
+  echo "export SG_ID=$(echo "$ENI"    | jq -r '.Groups[0].GroupId')"
+  echo "export VPC_ID=$(echo "$ENI"   | jq -r '.VpcId')"
+  echo "export EXEC_ROLE_ARN=$EXEC"
+  echo "export TASK_ROLE_ARN=$TASK"
+  NS=$(aws servicediscovery list-namespaces --region "$REGION" \
+    --query "Namespaces[?Name=='financeagent.local'].Arn | [0]" --output text)
+  echo "export NS_ARN=$NS"
+  exit 0
+fi
+
+# ── Argument validation ────────────────────────────────────────────────────────
+if [[ $# -lt 3 ]]; then
+  echo "Usage: $0 <portal-id> <capture|submit|both> <image-tag>" >&2
+  exit 1
+fi
+
+PORTAL_ID="$1"
+QUEUE_TYPE="$2"   # capture | submit | both
+IMAGE_TAG="$3"
+IMAGE_URI="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/financeagent-worker:${IMAGE_TAG}"
+
+for VAR in SUBNET_ID SG_ID EXEC_ROLE_ARN TASK_ROLE_ARN NS_ARN; do
+  if [[ -z "${!VAR:-}" ]]; then
+    echo "ERROR: $VAR is not set. Run: source <(./scripts/prod-infra-setup.sh --print-env)" >&2
+    exit 1
+  fi
+done
+
+echo "=== Provisioning portal: $PORTAL_ID (queue-type=$QUEUE_TYPE) ==="
+
+# ── Step 1: SQS queues ────────────────────────────────────────────────────────
+DLQ_ARN=$(aws sqs get-queue-attributes \
+  --queue-url "$(aws sqs get-queue-url --queue-name "$DLQ_NAME" --region "$REGION" --query 'QueueUrl' --output text)" \
+  --attribute-names QueueArn --region "$REGION" \
+  --query 'Attributes.QueueArn' --output text)
+
+create_queue() {
+  local NAME="$1"
+  if aws sqs get-queue-url --queue-name "$NAME" --region "$REGION" &>/dev/null; then
+    echo "  Queue already exists: $NAME"
+    return
+  fi
+  aws sqs create-queue --queue-name "$NAME" --region "$REGION" \
+    --attributes "{
+      \"VisibilityTimeout\":           \"900\",
+      \"ReceiveMessageWaitTimeSeconds\":\"20\",
+      \"MessageRetentionPeriod\":      \"345600\",
+      \"RedrivePolicy\": \"{\\\"deadLetterTargetArn\\\":\\\"$DLQ_ARN\\\",\\\"maxReceiveCount\\\":\\\"5\\\"}\"
+    }" > /dev/null
+  echo "  Created queue: $NAME"
+}
+
+[[ "$QUEUE_TYPE" == "capture" || "$QUEUE_TYPE" == "both" ]] && \
+  create_queue "${ENV_PREFIX}-financeagent-tasks-capture-${PORTAL_ID}"
+
+[[ "$QUEUE_TYPE" == "submit" || "$QUEUE_TYPE" == "both" ]] && \
+  create_queue "${ENV_PREFIX}-financeagent-tasks-submit-${PORTAL_ID}"
+
+# ── Step 2: CloudWatch log group ──────────────────────────────────────────────
+LOG_GROUP="/ecs/financeagent-worker-${PORTAL_ID}"
+if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region "$REGION" \
+    --query "logGroups[?logGroupName=='$LOG_GROUP']" --output text | grep -q .; then
+  echo "  Log group already exists: $LOG_GROUP"
+else
+  aws logs create-log-group --log-group-name "$LOG_GROUP" --region "$REGION"
+  echo "  Created log group: $LOG_GROUP"
+fi
+
+# ── Step 3: Task definition ───────────────────────────────────────────────────
+SERVICE_NAME="financeagent-worker-${PORTAL_ID}"
+
+# Build environment array; add MOCK_PORTAL_BASE_URL only for mock-payroll
+ENV_JSON="[
+  {\"name\":\"PORTAL_ID\",              \"value\":\"${PORTAL_ID}\"},
+  {\"name\":\"AWS_REGION\",             \"value\":\"${REGION}\"},
+  {\"name\":\"FINANCEAGENT_CIPHER\",    \"value\":\"cleartext\"},
+  {\"name\":\"FINANCEAGENT_CREDENTIALS\",\"value\":\"aws\"},
+  {\"name\":\"JAVA_TOOL_OPTIONS\",      \"value\":\"-Dagent.worker.queue-prefix=${ENV_PREFIX}\"}
+]"
+
+if [[ "$PORTAL_ID" == "mock-payroll" ]]; then
+  ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"MOCK_PORTAL_BASE_URL","value":"http://testing-harness:3000"}]')
+fi
+
+TD_JSON=$(jq -n \
+  --arg family   "$SERVICE_NAME" \
+  --arg execRole "$EXEC_ROLE_ARN" \
+  --arg taskRole "$TASK_ROLE_ARN" \
+  --arg image    "$IMAGE_URI" \
+  --arg logGroup "$LOG_GROUP" \
+  --arg region   "$REGION" \
+  --argjson env  "$ENV_JSON" \
+'{
+  family:                    $family,
+  executionRoleArn:          $execRole,
+  taskRoleArn:               $taskRole,
+  networkMode:               "awsvpc",
+  requiresCompatibilities:   ["FARGATE"],
+  cpu:                       "1024",
+  memory:                    "3072",
+  containerDefinitions: [{
+    name:      "agent-worker",
+    image:     $image,
+    essential: true,
+    environment: $env,
+    logConfiguration: {
+      logDriver: "awslogs",
+      options: {
+        "awslogs-group":         $logGroup,
+        "awslogs-region":        $region,
+        "awslogs-stream-prefix": "ecs"
+      }
+    }
+  }]
+}')
+
+TD_ARN=$(echo "$TD_JSON" | aws ecs register-task-definition \
+  --cli-input-json file:///dev/stdin --region "$REGION" \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+echo "  Registered task definition: $TD_ARN"
+
+# ── Step 4: ECS service ───────────────────────────────────────────────────────
+EXISTING_STATUS=$(aws ecs describe-services \
+  --cluster "$CLUSTER" --services "$SERVICE_NAME" --region "$REGION" \
+  --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
+
+if [[ "$EXISTING_STATUS" == "ACTIVE" ]]; then
+  echo "  Service already exists: $SERVICE_NAME — updating task definition"
+  aws ecs update-service \
+    --cluster "$CLUSTER" --service "$SERVICE_NAME" \
+    --task-definition "$TD_ARN" --force-new-deployment \
+    --region "$REGION" --no-cli-pager > /dev/null
+else
+  aws ecs create-service \
+    --cluster "$CLUSTER" \
+    --service-name "$SERVICE_NAME" \
+    --task-definition "$TD_ARN" \
+    --desired-count 1 \
+    --launch-type FARGATE \
+    --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_ID}],securityGroups=[${SG_ID}],assignPublicIp=DISABLED}" \
+    --service-connect-configuration "{\"enabled\":true,\"namespace\":\"${NS_ARN}\"}" \
+    --region "$REGION" --no-cli-pager > /dev/null
+  echo "  Created ECS service: $SERVICE_NAME"
+fi
+
+echo ""
+echo "=== Done. Portal $PORTAL_ID is provisioned. ==="
+echo "    Push code to main to deploy the first image via GitHub Actions."
+echo "    To update AgentWorkerSqsFinanceagent IAM policy, add the new queue ARN to the ConsumeTasks statement."

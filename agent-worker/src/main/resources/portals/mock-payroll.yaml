@@ -1,6 +1,6 @@
 id: mock-payroll
 description: Local write-flow test portal — login, fuzzy-match employees, fill salaries, submit, reconcile totals.
-baseUrl: http://localhost:3000
+baseUrl: ${MOCK_PORTAL_BASE_URL:http://localhost:3000}
 
 # The mock is the one place it is SAFE to let submit actually fire — the
 # whole point of this descriptor is to exercise the write path end-to-end

@@ -1,6 +1,6 @@
 id: mock-payroll-capture
 description: Capture-side read of the mock payroll harness — login, navigate to /employees, scrape current roster.
-baseUrl: http://localhost:3000
+baseUrl: ${MOCK_PORTAL_BASE_URL:http://localhost:3000}
 
 shadowMode: false
 credentialScope: per-firm

@@ -5,7 +5,6 @@ import com.neoproc.financialagent.common.credentials.CredentialsProvider;
 import com.neoproc.financialagent.common.credentials.LocalFileCredentialsProvider;
 import com.neoproc.financialagent.common.credentials.PortalCredentials;
 import com.neoproc.financialagent.common.session.LocalEncryptedSessionStore;
-import com.neoproc.financialagent.common.session.SessionStore;
 import com.neoproc.financialagent.contract.payroll.PayrollSubmitRequest;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
 import com.neoproc.financialagent.worker.portal.HarScrubber;
@@ -35,8 +34,9 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.concurrent.TimeUnit;
-import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -58,6 +58,10 @@ import java.util.stream.Collectors;
  *
  * <p>A fresh {@link PortalAdapter} is created per run to ensure stateful
  * adapters (e.g. {@link MockPayrollAdapter}) never share state across calls.
+ *
+ * <p>Authentication is handled by {@link PortalAuthService}, which is shared
+ * between the full capture/submit path ({@link #run}) and the login-only
+ * probe path ({@link #runProbe}).
  */
 public class PortalRunService {
 
@@ -73,7 +77,7 @@ public class PortalRunService {
     }
 
     /**
-     * Executes a complete portal run.
+     * Executes a complete portal run (capture or submit).
      *
      * @param portalId       descriptor id (e.g. {@code "mock-payroll"})
      * @param submitRequest  BPM-shape submit envelope; when non-null it is
@@ -141,8 +145,11 @@ public class PortalRunService {
             MDC.put("businessKey", bindings.get("params.businessKey"));
         }
 
-        SessionStore sessionStore = new LocalEncryptedSessionStore();
-        Optional<String> savedSession = loadSavedSession(sessionStore, descriptor);
+        // Load saved session for browser context setup (PortalAuthService also
+        // loads it internally to decide whether to replay authSteps — the two
+        // reads are cheap and idempotent).
+        Optional<String> savedSession = PortalAuthService.loadSavedSession(
+                new LocalEncryptedSessionStore(), descriptor);
 
         RunManifest manifest = new RunManifest();
         manifest.runId = runId;
@@ -151,7 +158,6 @@ public class PortalRunService {
         manifest.portal.baseUrl = descriptor.baseUrl();
         manifest.portal.username = credentials.require("username");
         manifest.portal.shadowMode = descriptor.isShadowMode();
-        manifest.portal.sessionReused = savedSession.isPresent();
         manifest.agentWorkerVersion = version(PortalRunService.class.getPackage().getImplementationVersion());
         manifest.playwrightVersion = version(Playwright.class.getPackage().getImplementationVersion());
 
@@ -177,15 +183,8 @@ public class PortalRunService {
                     page, bindings, listBindings, manifest::step,
                     stdinOperatorInput(), descriptor.isShadowMode());
 
-            if (savedSession.isEmpty()) {
-                engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());
-                saveSessionIfEnabled(sessionStore, descriptor, context);
-            } else {
-                page.navigate(descriptor.baseUrl());
-                page.waitForLoadState(LoadState.NETWORKIDLE);
-                manifest.step("auth-skipped",
-                        "session-reused; navigated to " + descriptor.baseUrl() + " (networkidle)");
-            }
+            manifest.portal.sessionReused = PortalAuthService.login(
+                    engine, descriptor, context, page, manifest);
 
             adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);
 
@@ -264,14 +263,115 @@ public class PortalRunService {
         return new RunOutcome(runDir, manifest.status);
     }
 
+    /**
+     * Login-only probe run. Authenticates to the portal, takes a full-page
+     * screenshot, and returns without fetching any payroll data.
+     *
+     * <p>Triggered when {@link com.neoproc.financialagent.worker.listener.PayrollCaptureListener}
+     * detects a {@code probe::} businessKey prefix. No adapter is instantiated —
+     * the probe runs only the descriptor's {@code authSteps} via
+     * {@link PortalAuthService#login}.
+     *
+     * @param portalId      portal to probe (e.g. {@code "autoplanilla"})
+     * @param extraBindings must contain {@code params.firmId}; for per-client
+     *                      portals (e.g. {@code ccss-sicere}) must also contain
+     *                      {@code params.clientIdentifier}
+     * @return outcome with {@code screenshotSha256} populated on success
+     */
+    public RunOutcome runProbe(String portalId, Map<String, String> extraBindings)
+            throws IOException, InterruptedException {
+
+        // Probes always use the base descriptor — authSteps are there.
+        PortalDescriptor descriptor = PortalDescriptorLoader.load(portalId);
+
+        String firmId = extraBindings.getOrDefault("params.firmId", "1");
+        String clientId = extraBindings.get("params.clientIdentifier");
+        CredentialsProvider credentialsProvider = buildCredentialsProvider(descriptor, firmId);
+        String credClientId = "shared".equalsIgnoreCase(descriptor.credentialScope())
+                ? null : clientId;
+        PortalCredentials credentials = credentialsProvider.get(portalId, credClientId);
+
+        Map<String, String> bindings = buildBindings(credentials, extraBindings);
+        Map<String, List<Map<String, String>>> listBindings = new HashMap<>();
+
+        String runId = newRunId();
+        Path runDir = artifactsRoot.resolve(runId);
+        Files.createDirectories(runDir);
+        bindings.put("runtime.runId", runId);
+        bindings.put("runtime.runDir", runDir.toString());
+
+        MDC.put("firmId", firmId);
+        if (bindings.containsKey("params.businessKey")) {
+            MDC.put("businessKey", bindings.get("params.businessKey"));
+        }
+
+        RunManifest manifest = new RunManifest();
+        manifest.runId = runId;
+        manifest.startedAt = Instant.now();
+        manifest.portal.id = descriptor.id();
+        manifest.portal.baseUrl = descriptor.baseUrl();
+        manifest.portal.shadowMode = descriptor.isShadowMode();
+
+        log.info("probe started portal={}", portalId);
+
+        String screenshotSha256 = null;
+        Path manifestPath = runDir.resolve("manifest.json");
+
+        try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
+             Playwright playwright = Playwright.create();
+             Browser browser = playwright.chromium().launch(
+                     new BrowserType.LaunchOptions().setHeadless(headless()));
+             BrowserContext context = browser.newContext(newContextOptions(runDir, Optional.empty()))) {
+
+            Page page = context.newPage();
+
+            PortalEngine engine = new PortalEngine(
+                    page, bindings, listBindings, manifest::step,
+                    stdinOperatorInput(), descriptor.isShadowMode());
+
+            // Probes always log in fresh — no session reuse. PortalAuthService
+            // will find no saved session (all probe portals have ttlMinutes=0)
+            // and execute authSteps normally.
+            PortalAuthService.login(engine, descriptor, context, page, manifest);
+
+            Path screenshotPath = runDir.resolve("probe.png");
+            page.screenshot(new Page.ScreenshotOptions()
+                    .setPath(screenshotPath)
+                    .setFullPage(true));
+            manifest.step("probe-screenshot", "probe.png");
+
+            if (Files.exists(screenshotPath) && Files.size(screenshotPath) > 0) {
+                screenshotSha256 = sha256Hex(screenshotPath);
+            }
+
+            manifest.status = "SUCCESS";
+
+        } catch (PortalEngine.ShadowHalt e) {
+            manifest.status = "SHADOW_HALT";
+            manifest.error = e.getMessage();
+        } catch (RuntimeException e) {
+            manifest.status = "FAILED";
+            manifest.error = e.getClass().getSimpleName() + ": " + e.getMessage();
+        } finally {
+            new HarScrubber(descriptor.securityContext()).scrub(runDir.resolve("network.har"));
+            manifest.finishedAt = Instant.now();
+            EnvelopeIo.MAPPER.writeValue(manifestPath.toFile(), manifest);
+            log.info("probe complete status={} portal={} screenshotSha256={}",
+                    manifest.status, portalId, screenshotSha256);
+            MDC.clear();
+        }
+
+        return new RunOutcome(runDir, manifest.status, screenshotSha256);
+    }
+
     // --- adapter registry ---------------------------------------------------
 
     static PortalAdapter newAdapter(String portalId, boolean isCapture) {
         return switch (portalId) {
-            case "mock-portal"  -> new MockPortalAdapter();
-            case "mock-payroll" -> isCapture ? new MockPayrollCaptureAdapter() : new MockPayrollAdapter();
-            case "autoplanilla" -> new AutoplanillaAdapter();
-            case "ccss-sicere"  -> new CcssSicereSubmitAdapter();
+            case "mock-portal"    -> new MockPortalAdapter();
+            case "mock-payroll"   -> isCapture ? new MockPayrollCaptureAdapter() : new MockPayrollAdapter();
+            case "autoplanilla"   -> new AutoplanillaAdapter();
+            case "ccss-sicere"    -> isCapture ? new CcssSicereCaptureAdapter() : new CcssSicereSubmitAdapter();
             case "ins-rt-virtual" -> new InsRtVirtualSubmitAdapter();
             default -> throw new IllegalStateException(
                     "No PortalAdapter registered for portal: " + portalId);
@@ -306,23 +406,17 @@ public class PortalRunService {
         return opts;
     }
 
-    private static Optional<String> loadSavedSession(
-            SessionStore store, PortalDescriptor descriptor) {
-        PortalDescriptor.SessionConfig session = descriptor.session();
-        if (session == null || !session.enabled()) {
-            return Optional.empty();
+    private static String sha256Hex(Path path) throws IOException {
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path));
+            StringBuilder sb = new StringBuilder(64);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 unavailable", e);
         }
-        return store.load(descriptor.id(), Duration.ofMinutes(session.ttlMinutes()));
-    }
-
-    private static void saveSessionIfEnabled(SessionStore store,
-                                              PortalDescriptor descriptor,
-                                              BrowserContext context) {
-        PortalDescriptor.SessionConfig session = descriptor.session();
-        if (session == null || !session.enabled()) {
-            return;
-        }
-        store.save(descriptor.id(), context.storageState());
     }
 
     private static Function<String, String> stdinOperatorInput() {

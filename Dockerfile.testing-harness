@@ -1,0 +1,41 @@
+# ── Stage 1: build fat JAR ────────────────────────────────────────────────────
+FROM maven:3.9-eclipse-temurin-21-jammy AS builder
+WORKDIR /build
+
+# All module POMs required for Maven reactor initialization before filtering to -pl testing-harness.
+COPY pom.xml .
+COPY common-lib/pom.xml           common-lib/pom.xml
+COPY contract-api/pom.xml         contract-api/pom.xml
+COPY agent-worker/pom.xml         agent-worker/pom.xml
+COPY mcp-payroll-server/pom.xml   mcp-payroll-server/pom.xml
+COPY agent-gateway/pom.xml        agent-gateway/pom.xml
+COPY testing-harness/pom.xml      testing-harness/pom.xml
+
+RUN mvn -pl testing-harness dependency:go-offline -q
+
+COPY testing-harness/src testing-harness/src
+RUN mvn -pl testing-harness package -DskipTests -q
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+# Plain JRE — no Playwright, no Chromium, no pwuser.
+FROM eclipse-temurin:21-jre-jammy AS runtime
+
+WORKDIR /app
+
+RUN groupadd --system --gid 1001 app \
+ && useradd  --system --uid 1001 --gid app app \
+ && mkdir -p /app/logs \
+ && chown -R app:app /app
+
+COPY --from=builder --chown=app:app \
+    /build/testing-harness/target/testing-harness-*.jar app.jar
+
+USER app
+
+# 3000 = Spring Boot HTTP (matches server.port in application.yml)
+EXPOSE 3000
+
+# Disable file-based access log in container — all output goes to stdout/CloudWatch.
+ENV SERVER_TOMCAT_ACCESSLOG_ENABLED=false
+
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

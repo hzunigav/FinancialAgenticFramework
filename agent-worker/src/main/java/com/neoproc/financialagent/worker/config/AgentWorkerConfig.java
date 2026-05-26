@@ -2,6 +2,7 @@ package com.neoproc.financialagent.worker.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.neoproc.financialagent.worker.PortalRunService;
+import com.neoproc.financialagent.worker.artifact.S3ArtifactStore;
 import io.awspring.cloud.sqs.config.SqsMessageListenerContainerFactory;
 import io.awspring.cloud.sqs.listener.QueueNotFoundStrategy;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
@@ -10,6 +11,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.converter.MappingJackson2MessageConverter;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 import software.amazon.awssdk.services.sqs.SqsAsyncClient;
 
 import java.nio.file.Path;
@@ -27,10 +30,38 @@ public class AgentWorkerConfig {
     @Value("${agent.worker.artifacts-dir:artifacts}")
     private String artifactsDir;
 
+    // Bucket name is intentionally absent from application.yml so local
+    // dev runs without S3 configured. Production deploys must inject
+    // ARTIFACTS_BUCKET; when blank, S3ArtifactStore.isEnabled() returns
+    // false and upload is skipped silently.
+    @Value("${agent.worker.artifacts-bucket:}")
+    private String artifactsBucket;
+
+    // Mirrors the SQS queue prefix — same env var, same value — so the
+    // S3 key prefix and the queue prefix stay in sync without a second
+    // FINANCEAGENT_SECRETS_ENV_PREFIX wiring on the task definition.
+    @Value("${agent.worker.queue-prefix:dev}")
+    private String envPrefix;
+
+    @Value("${spring.cloud.aws.region.static:us-east-1}")
+    private String awsRegion;
+
     @Bean
-    PortalRunService portalRunService() {
+    PortalRunService portalRunService(S3ArtifactStore s3ArtifactStore) {
         Path root = Paths.get(artifactsDir).toAbsolutePath().normalize();
-        return new PortalRunService(root);
+        return new PortalRunService(root, s3ArtifactStore);
+    }
+
+    @Bean
+    S3AsyncClient s3AsyncClient() {
+        return S3AsyncClient.builder()
+                .region(Region.of(awsRegion))
+                .build();
+    }
+
+    @Bean
+    S3ArtifactStore s3ArtifactStore(S3AsyncClient s3AsyncClient) {
+        return new S3ArtifactStore(s3AsyncClient, artifactsBucket, envPrefix);
     }
 
     /**

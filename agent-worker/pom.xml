@@ -64,6 +64,12 @@
             <groupId>io.awspring.cloud</groupId>
             <artifactId>spring-cloud-aws-starter-sqs</artifactId>
         </dependency>
+        <!-- S3 artifact persistence (uploads run-dir contents post-execution
+             so Fargate-ephemeral artifacts survive task shutdown). -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+        </dependency>
         <!-- HTTP server for /actuator/prometheus -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

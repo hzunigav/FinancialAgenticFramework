@@ -122,8 +122,13 @@ abstract class AbstractCaptureAdapter extends BaseAdapter {
                 outcome.period(),
                 outcome.planilla());
 
+        // manifest.artifactUri is the deterministic S3 URI set by
+        // PortalRunService when an artifacts-bucket is configured.
+        // Local dev keeps the legacy "manifest.json" filename so the
+        // path still resolves against the on-disk run dir.
+        String manifestRef = manifest.artifactUri != null ? manifest.artifactUri : "manifest.json";
         Audit audit = new Audit(
-                "manifest.json",
+                manifestRef,
                 null, null,
                 encrypted.payloadSha256());
 

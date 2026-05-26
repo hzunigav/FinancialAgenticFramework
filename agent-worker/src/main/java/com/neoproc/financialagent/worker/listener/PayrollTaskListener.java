@@ -153,7 +153,7 @@ public class PayrollTaskListener {
             return EnvelopeIo.read(resultFile, PayrollSubmitResult.class);
         }
         // Capture-only adapters and SHADOW_HALT runs don't write a submit-result file.
-        return buildMinimalResult(request, outcome.status());
+        return buildMinimalResult(request, outcome.status(), outcome.artifactUri());
     }
 
     private void publishResult(PayrollSubmitResult result, String businessKey) {
@@ -184,14 +184,16 @@ public class PayrollTaskListener {
                 new SubmitResultBody.ErrorDetail(
                         PayrollTaskListener.class.getName(), category, message),
                 null);
-        return wrapResult(request, body);
+        return wrapResult(request, body, null);
     }
 
-    private PayrollSubmitResult buildMinimalResult(PayrollSubmitRequest request, String status) {
+    private PayrollSubmitResult buildMinimalResult(PayrollSubmitRequest request,
+                                                    String status,
+                                                    String artifactUri) {
         SubmitResultBody body = new SubmitResultBody(
                 status, null, zeroTotals(), List.of(),
                 new RosterDiff(List.of(), List.of()), null, null);
-        return wrapResult(request, body);
+        return wrapResult(request, body, artifactUri);
     }
 
     // Schema requires totals; null fails validation. Zero placeholder for
@@ -200,7 +202,9 @@ public class PayrollTaskListener {
         return new SubmitResultBody.Totals("CRC", java.math.BigDecimal.ZERO, 0);
     }
 
-    private PayrollSubmitResult wrapResult(PayrollSubmitRequest request, SubmitResultBody body) {
+    private PayrollSubmitResult wrapResult(PayrollSubmitRequest request,
+                                            SubmitResultBody body,
+                                            String artifactUri) {
         long firmId = request.envelope().firmId();
         EnvelopeCipher cipher = EnvelopeIo.defaultCipher();
         EnvelopeIo.EncryptedPayload encrypted = EnvelopeIo.encryptBody(body, cipher, firmId);
@@ -234,7 +238,8 @@ public class PayrollTaskListener {
                 task,
                 encrypted.meta(),
                 encrypted.result(),
-                new Audit("none", null, null, encrypted.payloadSha256()));
+                new Audit(artifactUri != null ? artifactUri : "none",
+                        null, null, encrypted.payloadSha256()));
     }
 
     // -----------------------------------------------------------------------

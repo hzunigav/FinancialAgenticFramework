@@ -31,6 +31,7 @@ REGION="${REGION:-us-east-1}"
 ACCOUNT="${ACCOUNT:-409159414704}"
 ENV_PREFIX="prod"
 DLQ_NAME="${ENV_PREFIX}-financeagent-dlq"
+ARTIFACTS_BUCKET="${ENV_PREFIX}-financeagent-artifacts"
 
 # ── Helper: print env vars from an existing service ───────────────────────────
 if [[ "${1:-}" == "--print-env" ]]; then
@@ -80,6 +81,30 @@ done
 
 echo "=== Provisioning portal: $PORTAL_ID (queue-type=$QUEUE_TYPE) ==="
 
+# ── Step 0: S3 artifacts bucket (idempotent, one-time per env) ────────────────
+# Holds post-run artifact uploads from every worker:
+#   s3://${ARTIFACTS_BUCKET}/${ENV_PREFIX}/runs/<portal>/<runId>/{manifest.json,report.png,network.har,...}
+# Lifecycle expires objects at 90 days — adjust if compliance requires longer
+# retention. No versioning by design (artifacts are immutable per-run anyway).
+if aws s3api head-bucket --bucket "$ARTIFACTS_BUCKET" --region "$REGION" 2>/dev/null; then
+  echo "  Artifacts bucket already exists: $ARTIFACTS_BUCKET"
+else
+  if [[ "$REGION" == "us-east-1" ]]; then
+    aws s3api create-bucket --bucket "$ARTIFACTS_BUCKET" --region "$REGION" > /dev/null
+  else
+    aws s3api create-bucket --bucket "$ARTIFACTS_BUCKET" --region "$REGION" \
+      --create-bucket-configuration "LocationConstraint=$REGION" > /dev/null
+  fi
+  aws s3api put-public-access-block --bucket "$ARTIFACTS_BUCKET" --region "$REGION" \
+    --public-access-block-configuration \
+    "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true" \
+    > /dev/null
+  echo "  Created artifacts bucket: $ARTIFACTS_BUCKET"
+fi
+aws s3api put-bucket-lifecycle-configuration --bucket "$ARTIFACTS_BUCKET" --region "$REGION" \
+  --lifecycle-configuration '{"Rules":[{"ID":"expire-90d","Status":"Enabled","Expiration":{"Days":90},"Filter":{"Prefix":""}}]}' \
+  > /dev/null
+
 # ── Step 1: SQS queues ────────────────────────────────────────────────────────
 DLQ_ARN=$(aws sqs get-queue-attributes \
   --queue-url "$(aws sqs get-queue-url --queue-name "$DLQ_NAME" --region "$REGION" --query 'QueueUrl' --output text)" \
@@ -128,6 +153,7 @@ ENV_JSON="[
   {\"name\":\"FINANCEAGENT_CIPHER\",              \"value\":\"cleartext\"},
   {\"name\":\"FINANCEAGENT_CREDENTIALS\",         \"value\":\"aws\"},
   {\"name\":\"FINANCEAGENT_SECRETS_ENV_PREFIX\",  \"value\":\"${ENV_PREFIX}\"},
+  {\"name\":\"ARTIFACTS_BUCKET\",                 \"value\":\"${ARTIFACTS_BUCKET}\"},
   {\"name\":\"JAVA_TOOL_OPTIONS\",                \"value\":\"-Dagent.worker.queue-prefix=${ENV_PREFIX}\"}
 ]"
 
@@ -204,3 +230,14 @@ echo ""
 echo "=== Done. Portal $PORTAL_ID is provisioned. ==="
 echo "    Push code to main to deploy the first image via GitHub Actions."
 echo "    To update AgentWorkerSqsFinanceagent IAM policy, add the new queue ARN to the ConsumeTasks statement."
+echo ""
+echo "    IAM (one-time per env): the task role must allow s3:PutObject on the artifacts bucket."
+echo "    Add this statement to AgentWorkerSqsFinanceagent (or attach a separate"
+echo "    AgentWorkerArtifactsFinanceagent managed policy):"
+echo ""
+echo "      { \"Effect\": \"Allow\","
+echo "        \"Action\": [\"s3:PutObject\"],"
+echo "        \"Resource\": \"arn:aws:s3:::${ARTIFACTS_BUCKET}/*\" }"
+echo ""
+echo "    Praxis (read-side): grant the Praxis BPM execution role s3:GetObject + s3:ListBucket"
+echo "    on arn:aws:s3:::${ARTIFACTS_BUCKET} so workflow steps can fetch audit.manifestPath."

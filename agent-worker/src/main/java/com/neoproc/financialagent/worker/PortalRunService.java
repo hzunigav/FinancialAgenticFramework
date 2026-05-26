@@ -6,6 +6,7 @@ import com.neoproc.financialagent.common.credentials.LocalFileCredentialsProvide
 import com.neoproc.financialagent.common.credentials.PortalCredentials;
 import com.neoproc.financialagent.common.session.LocalEncryptedSessionStore;
 import com.neoproc.financialagent.contract.payroll.PayrollSubmitRequest;
+import com.neoproc.financialagent.worker.artifact.S3ArtifactStore;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
 import com.neoproc.financialagent.worker.portal.HarScrubber;
 import com.neoproc.financialagent.worker.portal.PortalDescriptor;
@@ -71,9 +72,15 @@ public class PortalRunService {
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss").withZone(ZoneOffset.UTC);
 
     private final Path artifactsRoot;
+    private final S3ArtifactStore artifactStore;
 
     public PortalRunService(Path artifactsRoot) {
+        this(artifactsRoot, null);
+    }
+
+    public PortalRunService(Path artifactsRoot, S3ArtifactStore artifactStore) {
         this.artifactsRoot = artifactsRoot;
+        this.artifactStore = artifactStore;
     }
 
     /**
@@ -160,12 +167,17 @@ public class PortalRunService {
         manifest.portal.shadowMode = descriptor.isShadowMode();
         manifest.agentWorkerVersion = version(PortalRunService.class.getPackage().getImplementationVersion());
         manifest.playwrightVersion = version(Playwright.class.getPackage().getImplementationVersion());
+        // Set BEFORE adapter.captureToManifest() so Audit.manifestPath
+        // embeds the S3 URI. Null in local dev → adapters fall back to
+        // "manifest.json".
+        manifest.artifactUri = artifactStore != null ? artifactStore.urlFor(portalId, runId) : null;
 
         log.info("run started portal={} shadowMode={} sessionReused={}",
                 descriptor.id(), descriptor.isShadowMode(), savedSession.isPresent());
 
         Path manifestPath = runDir.resolve("manifest.json");
         long runStartNanos = System.nanoTime();
+        String uploadedUri = null;
         try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
              Playwright playwright = Playwright.create();
              Browser browser = playwright.chromium().launch(
@@ -248,6 +260,13 @@ public class PortalRunService {
             new HarScrubber(descriptor.securityContext()).scrub(runDir.resolve("network.har"));
             manifest.finishedAt = Instant.now();
             EnvelopeIo.MAPPER.writeValue(manifestPath.toFile(), manifest);
+            // Upload all run-dir contents (manifest.json, report.png,
+            // network.har, trace.zip, *.v1.json) to S3 so they survive
+            // Fargate task shutdown. Failure is non-fatal — manifest.artifactUri
+            // was already embedded in the envelope and audits can re-check.
+            uploadedUri = artifactStore != null
+                    ? artifactStore.uploadRunDir(runDir, portalId, runId)
+                    : null;
             log.info("run complete status={} envelopeId={} businessKey={}",
                     manifest.status, manifest.envelopeId, manifest.businessKey);
             String metricName = adapter instanceof AbstractCaptureAdapter
@@ -260,7 +279,7 @@ public class PortalRunService {
                     .record(System.nanoTime() - runStartNanos, TimeUnit.NANOSECONDS);
         }
 
-        return new RunOutcome(runDir, manifest.status);
+        return new RunOutcome(runDir, manifest.status, null, uploadedUri);
     }
 
     /**
@@ -311,10 +330,12 @@ public class PortalRunService {
         manifest.portal.id = descriptor.id();
         manifest.portal.baseUrl = descriptor.baseUrl();
         manifest.portal.shadowMode = descriptor.isShadowMode();
+        manifest.artifactUri = artifactStore != null ? artifactStore.urlFor(portalId, runId) : null;
 
         log.info("probe started portal={}", portalId);
 
         String screenshotSha256 = null;
+        String uploadedUri = null;
         Path manifestPath = runDir.resolve("manifest.json");
 
         try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
@@ -356,12 +377,15 @@ public class PortalRunService {
             new HarScrubber(descriptor.securityContext()).scrub(runDir.resolve("network.har"));
             manifest.finishedAt = Instant.now();
             EnvelopeIo.MAPPER.writeValue(manifestPath.toFile(), manifest);
+            uploadedUri = artifactStore != null
+                    ? artifactStore.uploadRunDir(runDir, portalId, runId)
+                    : null;
             log.info("probe complete status={} portal={} screenshotSha256={}",
                     manifest.status, portalId, screenshotSha256);
             MDC.clear();
         }
 
-        return new RunOutcome(runDir, manifest.status, screenshotSha256);
+        return new RunOutcome(runDir, manifest.status, screenshotSha256, uploadedUri);
     }
 
     // --- adapter registry ---------------------------------------------------

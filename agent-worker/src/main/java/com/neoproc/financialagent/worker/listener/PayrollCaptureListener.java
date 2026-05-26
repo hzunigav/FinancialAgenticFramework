@@ -154,12 +154,14 @@ public class PayrollCaptureListener {
         RunOutcome outcome = portalRunService.runProbe(portalId, bindings);
         log.info("probe complete portalId={} status={} screenshotSha256={}",
                 portalId, outcome.status(), outcome.screenshotSha256());
-        return buildProbeResult(request, outcome.status(), outcome.screenshotSha256());
+        return buildProbeResult(request, outcome.status(),
+                outcome.screenshotSha256(), outcome.artifactUri());
     }
 
     private PayrollCaptureResult buildProbeResult(PayrollCaptureRequest request,
                                                    String runStatus,
-                                                   String screenshotSha256) {
+                                                   String screenshotSha256,
+                                                   String artifactUri) {
         String status = "SUCCESS".equals(runStatus) ? "SUCCESS" : "FAILED";
         // employees MUST be an empty array — null fails schema validation and
         // causes Praxis to create a HITL escalation task instead of advancing.
@@ -184,7 +186,7 @@ public class PayrollCaptureListener {
                 CaptureTask.of(portalId, null, null),       // sourcePortal matches inbound for BPMN routing
                 encrypted.meta(),
                 encrypted.result(),
-                new Audit(null, null, screenshotSha256, encrypted.payloadSha256()));
+                new Audit(artifactUri, null, screenshotSha256, encrypted.payloadSha256()));
     }
 
     private PayrollCaptureResult executeRun(PayrollCaptureRequest request) throws Exception {
@@ -195,7 +197,7 @@ public class PayrollCaptureListener {
         if (Files.exists(resultFile)) {
             return EnvelopeIo.read(resultFile, PayrollCaptureResult.class);
         }
-        return buildMinimalResult(request, outcome.status());
+        return buildMinimalResult(request, outcome.status(), outcome.artifactUri());
     }
 
     private void publishResult(PayrollCaptureResult result, String businessKey) {
@@ -214,11 +216,13 @@ public class PayrollCaptureListener {
                                                     String category,
                                                     String message) {
         log.warn("capture failed category={} message={}", category, message);
-        return wrapResult(request, new CaptureResultBody("FAILED", zeroTotals(), List.of()));
+        return wrapResult(request, new CaptureResultBody("FAILED", zeroTotals(), List.of()), null);
     }
 
-    private PayrollCaptureResult buildMinimalResult(PayrollCaptureRequest request, String status) {
-        return wrapResult(request, new CaptureResultBody(status, zeroTotals(), List.of()));
+    private PayrollCaptureResult buildMinimalResult(PayrollCaptureRequest request,
+                                                     String status,
+                                                     String artifactUri) {
+        return wrapResult(request, new CaptureResultBody(status, zeroTotals(), List.of()), artifactUri);
     }
 
     // Schema requires totals to be a fully-populated object; null totals fails
@@ -228,7 +232,9 @@ public class PayrollCaptureListener {
         return new CaptureResultBody.Totals("CRC", BigDecimal.ZERO, null, 0);
     }
 
-    private PayrollCaptureResult wrapResult(PayrollCaptureRequest request, CaptureResultBody body) {
+    private PayrollCaptureResult wrapResult(PayrollCaptureRequest request,
+                                             CaptureResultBody body,
+                                             String artifactUri) {
         long firmId = request.envelope().firmId();
         EnvelopeCipher cipher = EnvelopeIo.defaultCipher();
         EnvelopeIo.EncryptedPayload encrypted = EnvelopeIo.encryptBody(body, cipher, firmId);
@@ -252,7 +258,8 @@ public class PayrollCaptureListener {
                 task,
                 encrypted.meta(),
                 encrypted.result(),
-                new Audit("none", null, null, encrypted.payloadSha256()));
+                new Audit(artifactUri != null ? artifactUri : "none",
+                        null, null, encrypted.payloadSha256()));
     }
 
     // -----------------------------------------------------------------------

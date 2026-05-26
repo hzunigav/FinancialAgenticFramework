@@ -12,6 +12,11 @@ public class RunManifest {
     public String runId;
     public String envelopeId;   // set by adapter after envelope emission
     public String businessKey;  // set by adapter after envelope emission
+    // Deterministic S3 URI for this run's manifest.json, set by
+    // PortalRunService BEFORE the adapter emits its envelope so adapters
+    // can embed it in Audit.manifestPath. Null when no S3 bucket is
+    // configured (local dev) — adapters fall back to the local filename.
+    public String artifactUri;
     public Instant startedAt;
     public Instant finishedAt;
     public String status = "RUNNING";

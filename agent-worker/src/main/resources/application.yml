@@ -22,6 +22,12 @@ portal:
 agent:
   worker:
     artifacts-dir: ${ARTIFACTS_DIR:artifacts}
+    # S3 bucket for post-run artifact upload (manifest.json, report.png,
+    # network.har, trace.zip, *.v1.json envelopes). When unset, uploads
+    # are skipped and Audit.manifestPath falls back to the local
+    # filename. Production task definitions inject ARTIFACTS_BUCKET via
+    # prod-infra-setup.sh; local dev leaves it absent.
+    artifacts-bucket: ${ARTIFACTS_BUCKET:}
     # Queue names follow the SqsMigrationPlan.md §3.3 pattern:
     #   <env>-financeagent-<role>[-<portal-id>]
     queue-prefix: ${SQS_QUEUE_PREFIX:dev}

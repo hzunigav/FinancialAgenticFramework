@@ -127,8 +127,9 @@ abstract class AbstractSubmitAdapter extends BaseAdapter {
                 outcome.clientIdentifier(),
                 null, null);
 
+        String manifestRef = manifest.artifactUri != null ? manifest.artifactUri : "manifest.json";
         Audit audit = new Audit(
-                "manifest.json",
+                manifestRef,
                 null, null,
                 encrypted.payloadSha256());
 

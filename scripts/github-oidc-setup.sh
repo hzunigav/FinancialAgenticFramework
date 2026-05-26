@@ -132,7 +132,10 @@ DEPLOY_POLICY=$(jq -n \
       Sid:    "PassExecutionRole",
       Effect: "Allow",
       Action: "iam:PassRole",
-      Resource: ("arn:aws:iam::" + $account + ":role/financeagent-*"),
+      Resource: [
+        ("arn:aws:iam::" + $account + ":role/financeagent-*"),
+        ("arn:aws:iam::" + $account + ":role/ecsTaskExecutionRole")
+      ],
       Condition: {
         StringEquals: { "iam:PassedToService": "ecs-tasks.amazonaws.com" }
       }

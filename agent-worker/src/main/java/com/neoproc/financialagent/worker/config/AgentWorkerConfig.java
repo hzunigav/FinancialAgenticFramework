@@ -1,11 +1,14 @@
 package com.neoproc.financialagent.worker.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.neoproc.financialagent.worker.PortalRunService;
 import io.awspring.cloud.sqs.listener.QueueNotFoundStrategy;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
+import io.awspring.cloud.sqs.support.converter.SqsMessagingMessageConverter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.messaging.converter.MappingJackson2MessageConverter;
 import software.amazon.awssdk.services.sqs.SqsAsyncClient;
 
 import java.nio.file.Path;
@@ -37,11 +40,19 @@ public class AgentWorkerConfig {
      * queues and requires no CreateQueue permission.
      */
     @Bean
-    SqsTemplate sqsTemplate(SqsAsyncClient sqsAsyncClient) {
+    SqsTemplate sqsTemplate(SqsAsyncClient sqsAsyncClient, ObjectMapper objectMapper) {
+        MappingJackson2MessageConverter payloadConverter = new MappingJackson2MessageConverter();
+        payloadConverter.setObjectMapper(objectMapper);
+        payloadConverter.setSerializedPayloadClass(String.class);
+
+        SqsMessagingMessageConverter converter = new SqsMessagingMessageConverter();
+        converter.setPayloadMessageConverter(payloadConverter);
+
         return SqsTemplate.builder()
                 .sqsAsyncClient(sqsAsyncClient)
                 .configure(options -> options
                         .queueNotFoundStrategy(QueueNotFoundStrategy.FAIL))
+                .messageConverter(converter)
                 .build();
     }
 }

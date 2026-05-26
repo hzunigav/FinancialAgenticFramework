@@ -197,8 +197,8 @@ TD_JSON=$(jq -n \
   }]
 }')
 
-TD_ARN=$(echo "$TD_JSON" | aws ecs register-task-definition \
-  --cli-input-json file:///dev/stdin --region "$REGION" \
+TD_ARN=$(aws ecs register-task-definition \
+  --cli-input-json "$TD_JSON" --region "$REGION" \
   --query 'taskDefinition.taskDefinitionArn' --output text)
 echo "  Registered task definition: $TD_ARN"
 

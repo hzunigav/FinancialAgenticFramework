@@ -2,6 +2,7 @@ package com.neoproc.financialagent.worker.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.neoproc.financialagent.worker.PortalRunService;
+import io.awspring.cloud.sqs.config.SqsMessageListenerContainerFactory;
 import io.awspring.cloud.sqs.listener.QueueNotFoundStrategy;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
 import io.awspring.cloud.sqs.support.converter.SqsMessagingMessageConverter;
@@ -30,6 +31,20 @@ public class AgentWorkerConfig {
     PortalRunService portalRunService() {
         Path root = Paths.get(artifactsDir).toAbsolutePath().normalize();
         return new PortalRunService(root);
+    }
+
+    /**
+     * Override the default listener container factory to use FAIL strategy.
+     * Prevents SCA from calling sqs:CreateQueue on startup for pre-provisioned queues.
+     */
+    @Bean
+    SqsMessageListenerContainerFactory<Object> defaultSqsListenerContainerFactory(
+            SqsAsyncClient sqsAsyncClient) {
+        return SqsMessageListenerContainerFactory.builder()
+                .configure(options -> options
+                        .queueNotFoundStrategy(QueueNotFoundStrategy.FAIL))
+                .sqsAsyncClient(sqsAsyncClient)
+                .build();
     }
 
     /**

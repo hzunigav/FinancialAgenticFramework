@@ -71,11 +71,12 @@ authSteps:
     selector: 'role=link[name=/^Payroll$/]'
 
 steps:
-  - action: click
-    selector: 'role=link[name=/^Payroll$/]'
-
-  - action: click
-    selector: 'role=menuitem[name="CCSS Report"]'
+  # Navigate directly to the CCSS Report URL rather than clicking through
+  # the Bootstrap nav dropdown. The Payroll nav toggle (href="#",
+  # dropdown-toggle) is not stable for headless Playwright clicks, even
+  # though the element resolves and is visible in headed mode.
+  - action: navigate
+    target: /reports/ccss
 
   # MUI MultiSelect interaction pattern (verified via Playwright codegen,
   # May 2026). The planilla field is a multi-select combobox — clicking

@@ -7,11 +7,9 @@
 # Build outputs
 **/target/
 
-# Source trees not in the agent-worker sub-reactor (their pom.xml files are
-# COPYed explicitly in the Dockerfile; their src trees are never compiled).
+# Source trees not needed by any Dockerfile (pom.xml files are still COPYed).
 mcp-payroll-server/src/
 agent-gateway/src/
-testing-harness/src/
 
 # Docs
 *.md

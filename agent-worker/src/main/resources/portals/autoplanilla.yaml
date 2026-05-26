@@ -74,15 +74,16 @@ steps:
   - action: click
     selector: 'role=menuitem[name="CCSS Report"]'
 
-  # Native <select id="payrollId" name="payrollId" data-cy="payrollId">.
-  # Match by <option value="..."> (the stable AutoPlanilla payroll id) —
-  # users can rename a planilla in the AutoPlanilla UI but the underlying
-  # id is permanent. The data-cy attribute disambiguates if another <select>
-  # is added to the page in the future.
-  - action: select
-    selector: 'select[data-cy="payrollId"]'
-    match: value
-    value: "${params.planillaId}"
+  # AutoPlanilla replaced the native <select> with a MUI multi-select
+  # listbox (detected 2026-05-26). Each <li role="option"> carries
+  # data-value="{planillaId}" — match by that stable id, not the
+  # display name which can be renamed by operators.
+  # The subsequent fill on Start Date implicitly closes the dropdown.
+  - action: click
+    selector: '[aria-haspopup="listbox"]'
+
+  - action: click
+    selector: '[role="option"][data-value="${params.planillaId}"]'
 
   - action: fill
     selector: 'role=textbox[name="Start Date"]'

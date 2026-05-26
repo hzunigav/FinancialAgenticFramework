@@ -78,9 +78,12 @@ steps:
   # listbox (detected 2026-05-26). Each <li role="option"> carries
   # data-value="{planillaId}" — match by that stable id, not the
   # display name which can be renamed by operators.
+  # Use #payrollIds (the element's own HTML id) to avoid the strict-mode
+  # violation: the Rows-per-page combobox shares aria-haspopup="listbox"
+  # and is already present on the CCSS Report page before the report loads.
   # The subsequent fill on Start Date implicitly closes the dropdown.
   - action: click
-    selector: '[aria-haspopup="listbox"]'
+    selector: '#payrollIds'
 
   - action: click
     selector: '[role="option"][data-value="${params.planillaId}"]'

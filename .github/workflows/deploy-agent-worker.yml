@@ -27,9 +27,13 @@ env:
 
 jobs:
   # ── Build once, deploy to N portals in parallel ───────────────────────────
+  # ubuntu-24.04-arm builds natively for linux/arm64 (Graviton/Fargate ARM64).
+  # No buildx or QEMU needed — the runner is arm64, so `docker build` produces
+  # an arm64 image directly. Task definitions set runtimePlatform=ARM64 to
+  # schedule onto Graviton capacity (~20% cheaper than x86 Fargate).
   build:
     name: Build and push image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       id-token: write   # required for OIDC token exchange
       contents: read
@@ -97,6 +101,11 @@ jobs:
             echo "Skipping $PORTAL (not in filter: $INPUT)"
           fi
 
+      # NOTE: This step preserves the existing task definition's environment
+      # array (it only swaps .containerDefinitions[0].image), so env vars
+      # provisioned by scripts/prod-infra-setup.sh — including ARTIFACTS_BUCKET
+      # for S3 artifact uploads — carry forward automatically across deploys.
+      # To change an env var, re-run prod-infra-setup.sh for that portal.
       - name: Update ECS service image
         if: steps.filter.outputs.deploy == 'true'
         env:
@@ -118,11 +127,17 @@ jobs:
             --cluster "$CLUSTER" --services "$SERVICE" \
             --query 'services[0].taskDefinition' --output text)
 
+          # Self-migrating: every deploy enforces runtimePlatform=ARM64 so a
+          # service whose TD predates the Graviton migration is moved over on
+          # its next image push. New images are arm64 (built on
+          # ubuntu-24.04-arm above) so leaving runtimePlatform unset would
+          # cause Fargate to provision x86 capacity and fail the task launch.
           TD_JSON=$(aws ecs describe-task-definition \
             --task-definition "$TD_ARN" \
             --query 'taskDefinition' --output json | \
           jq --arg img "$NEW_IMAGE" '
             .containerDefinitions[0].image = $img |
+            .runtimePlatform = {cpuArchitecture: "ARM64", operatingSystemFamily: "LINUX"} |
             del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                 .placementConstraints, .compatibilities, .registeredAt, .registeredBy)
           ')

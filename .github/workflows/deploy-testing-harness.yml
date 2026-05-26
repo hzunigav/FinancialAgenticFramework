@@ -20,7 +20,9 @@ env:
 jobs:
   deploy:
     name: Build, push and deploy testing-harness
-    runs-on: ubuntu-latest
+    # ubuntu-24.04-arm builds natively for linux/arm64 — see deploy-agent-worker.yml
+    # for the rationale (Graviton Fargate is ~20% cheaper).
+    runs-on: ubuntu-24.04-arm
     permissions:
       id-token: write
       contents: read
@@ -58,11 +60,13 @@ jobs:
             --cluster "$CLUSTER" --services "$SERVICE" \
             --query 'services[0].taskDefinition' --output text)
 
+          # Self-migrating to ARM64 — see deploy-agent-worker.yml for rationale.
           TD_JSON=$(aws ecs describe-task-definition \
             --task-definition "$TD_ARN" \
             --query 'taskDefinition' --output json | \
           jq --arg img "$NEW_IMAGE" '
             .containerDefinitions[0].image = $img |
+            .runtimePlatform = {cpuArchitecture: "ARM64", operatingSystemFamily: "LINUX"} |
             del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                 .placementConstraints, .compatibilities, .registeredAt, .registeredBy)
           ')

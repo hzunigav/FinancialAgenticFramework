@@ -139,10 +139,12 @@ class AwsSecretsManagerCredentialsProviderTest {
     }
 
     @Test
-    void perClient_stripsDashesFromCedulaJuridica() {
-        // Praxis sends the legal cédula-jurídica form with dashes; the secret
-        // path segment uses the dash-free internal id. The provider must
-        // normalise so both forms hit the same secret.
+    void perClient_usesClientIdentifierVerbatim() {
+        // Contract (PraxisIntegrationHandoff.md §15.2): the AWS provider resolves
+        // by byte-for-byte equality with task.clientIdentifier — NO dash/case/
+        // whitespace normalization. Praxis stores the secret under the dashed
+        // legal cédula-jurídica form and sends that same value on the envelope,
+        // so the dashed value must flow through to the path unchanged.
         var provider = new AwsSecretsManagerCredentialsProvider(
                 FIRM_ID, id -> "per-client", secretsManager);
 
@@ -158,9 +160,9 @@ class AwsSecretsManagerCredentialsProviderTest {
         provider.get("ccss-sicere", "3-101-680139");
 
         assertEquals(
-                "financeagent/firms/" + FIRM_ID + "/portals/ccss-sicere/3101680139",
+                "financeagent/firms/" + FIRM_ID + "/portals/ccss-sicere/3-101-680139",
                 captured[0],
-                "dashed form must resolve to the same secret as the digits-only form");
+                "dashed clientIdentifier must reach the secret path verbatim — no normalization");
     }
 
     @Test
@@ -186,8 +188,11 @@ class AwsSecretsManagerCredentialsProviderTest {
 
     @Test
     void normalizeClientId_helperContract() {
-        // The shared normaliser is the single source of truth for both
-        // providers; lock its behaviour here so both stay aligned.
+        // The shared normaliser is still used by LocalFileCredentialsProvider
+        // (dev convenience) and by adapters that type the cédula into a portal
+        // form (e.g. InsRtVirtualSubmitAdapter). It is NO LONGER used for AWS
+        // secret-path resolution — lock its behaviour here so those callers stay
+        // aligned.
         assertEquals("3101680139",
                 CredentialsProvider.normalizeClientId("3-101-680139"));
         assertEquals("3101680139",

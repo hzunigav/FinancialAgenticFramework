@@ -99,16 +99,22 @@ public final class AwsSecretsManagerCredentialsProvider implements CredentialsPr
             return envPrefix + "financeagent/shared/portals/" + portalId;
         }
         if (SCOPE_PER_CLIENT.equals(scope)) {
-            // Praxis emits the cédula-jurídica with dashes ("3-101-680139");
-            // the secret-path segment uses the dash-free internal id. Normalise
-            // so either wire form resolves to the same secret.
-            String normalizedClientId = CredentialsProvider.normalizeClientId(clientId);
-            if (normalizedClientId == null || normalizedClientId.isBlank()) {
+            // Verbatim segment — NO normalization. The Praxis contract
+            // (PraxisIntegrationHandoff.md §15.2) requires byte-for-byte equality
+            // between task.clientIdentifier and the <corporateId> path segment;
+            // dashes, casing and whitespace are all significant. Praxis is the
+            // single canonical writer of both the envelope value and the secret
+            // name (trimmed once at input time), so they always agree.
+            //
+            // Dev's LocalFileCredentialsProvider MAY still normalize for
+            // developer convenience — it sits outside this Praxis↔Secrets-Manager
+            // contract and Praxis never writes secrets.properties.
+            if (clientId == null || clientId.isBlank()) {
                 throw new IllegalStateException(
                         "per-client portal '" + portalId + "' requires a clientIdentifier "
                                 + "but the request envelope did not provide one");
             }
-            return envPrefix + "financeagent/firms/" + firmId + "/portals/" + portalId + "/" + normalizedClientId;
+            return envPrefix + "financeagent/firms/" + firmId + "/portals/" + portalId + "/" + clientId;
         }
         return envPrefix + "financeagent/firms/" + firmId + "/portals/" + portalId;
     }

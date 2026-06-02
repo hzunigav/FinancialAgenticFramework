@@ -2,6 +2,14 @@ id: ins-rt-virtual
 description: INS RT-Virtual — shared-creds payroll salary submit (save-only, HITL final-submit).
 baseUrl: https://rtvirtual.grupoins.com/
 
+# Submit-only portal: capture for the INS pipeline is owned by AutoPlanilla,
+# so no capture queue is provisioned for ins-rt-virtual. Declaring the flow
+# here keeps the worker from registering a capture @SqsListener against a
+# queue that doesn't exist (which, under QueueNotFoundStrategy.FAIL, aborts
+# the whole Spring context and silently kills the submit listener too).
+flows:
+  - submit
+
 # Shared-creds scope (PraxisIntegrationHandoff.md §B): one set of
 # credentials accesses every póliza on the platform; the firm scope
 # rides on the envelope as task.clientIdentifier (cédula jurídica,

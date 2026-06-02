@@ -24,11 +24,43 @@ public record PortalDescriptor(
         List<Step> authSteps,
         List<Step> steps,
         Scrape scrape,
-        SecurityContext securityContext) {
+        SecurityContext securityContext,
+        // Which task flows this portal handles. Trailing position so the
+        // existing positional constructor in tests only needs a null appended.
+        List<String> flows) {
 
     public static final String SCOPE_PER_FIRM = "per-firm";
     public static final String SCOPE_SHARED = "shared";
     public static final String SCOPE_PER_CLIENT = "per-client";
+
+    public static final String FLOW_CAPTURE = "capture";
+    public static final String FLOW_SUBMIT = "submit";
+
+    /**
+     * Which task flows this portal handles — drives which {@code @SqsListener}
+     * the worker registers (and therefore which task queues it expects to
+     * exist). Absent → both {@code capture} and {@code submit} (back-compat:
+     * the pre-{@code flows} behaviour where every worker registered both).
+     *
+     * <p>A submit-only portal (e.g. INS RT-Virtual, whose capture is owned by
+     * AutoPlanilla) declares {@code flows: [submit]} so the worker never tries
+     * to resolve a capture queue that was never provisioned — which under the
+     * {@code QueueNotFoundStrategy.FAIL} policy would abort the whole Spring
+     * context and leave the submit listener dead.
+     */
+    public List<String> flows() {
+        return flows == null || flows.isEmpty()
+                ? List.of(FLOW_CAPTURE, FLOW_SUBMIT)
+                : flows;
+    }
+
+    public boolean handlesCapture() {
+        return flows().contains(FLOW_CAPTURE);
+    }
+
+    public boolean handlesSubmit() {
+        return flows().contains(FLOW_SUBMIT);
+    }
 
     public boolean isShadowMode() {
         return Boolean.TRUE.equals(shadowMode);

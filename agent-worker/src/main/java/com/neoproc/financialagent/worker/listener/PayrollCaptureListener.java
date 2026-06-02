@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.messaging.MessageHeaders;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
@@ -40,6 +41,7 @@ import java.util.UUID;
  * cold-cache → EXPIRED_DUPLICATE, fresh → run portal).
  */
 @Component
+@ConditionalOnProperty(name = "agent.worker.capture-enabled", havingValue = "true", matchIfMissing = true)
 public class PayrollCaptureListener {
 
     private static final Logger log = LoggerFactory.getLogger(PayrollCaptureListener.class);

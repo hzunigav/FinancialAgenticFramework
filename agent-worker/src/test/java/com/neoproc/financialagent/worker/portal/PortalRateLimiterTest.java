@@ -102,6 +102,6 @@ class PortalRateLimiterTest {
 
     private static PortalDescriptor minimalDescriptor(String id, PortalDescriptor.RateLimit rateLimit) {
         return new PortalDescriptor(id, null, "http://localhost", false,
-                "per-firm", rateLimit, null, null, null, null, null);
+                "per-firm", rateLimit, null, null, null, null, null, null);
     }
 }

@@ -20,6 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.messaging.MessageHeaders;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
@@ -59,6 +60,7 @@ import java.util.UUID;
  * attempt re-publishes the original result.
  */
 @Component
+@ConditionalOnProperty(name = "agent.worker.submit-enabled", havingValue = "true", matchIfMissing = true)
 public class PayrollTaskListener {
 
     private static final Logger log = LoggerFactory.getLogger(PayrollTaskListener.class);

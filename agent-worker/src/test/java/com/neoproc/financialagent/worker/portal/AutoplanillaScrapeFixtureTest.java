@@ -56,7 +56,7 @@ class AutoplanillaScrapeFixtureTest {
                 </tr>
               </tfoot>
             </table>
-            <p class="MuiTablePagination-displayedRows">1-10 of 14</p>
+            <div class="MuiBox-root css-10gei56"><div class="MuiBox-root css-1llu0od"><span></span><div class="MuiBox-root css-qpxlqp"><div class="MuiTablePagination-root MuiBox-root css-8k4lth"><div class="MuiBox-root css-exd1zr"><label>Rows per page</label></div><span class="MuiTypography-root MuiTypography-body2 MuiTypography-alignCenter css-13lts0x">1-10 of 14</span><div class="MuiBox-root css-192dx0w"></div></div></div></div></div>
             </body></html>
             """;
 
@@ -79,7 +79,7 @@ class AutoplanillaScrapeFixtureTest {
                 </tr>
               </tfoot>
             </table>
-            <p class="MuiTablePagination-displayedRows">1-10 of 92</p>
+            <div class="MuiBox-root css-10gei56"><div class="MuiBox-root css-1llu0od"><span></span><div class="MuiBox-root css-qpxlqp"><div class="MuiTablePagination-root MuiBox-root css-8k4lth"><div class="MuiBox-root css-exd1zr"><label>Rows per page</label></div><span class="MuiTypography-root MuiTypography-body2 MuiTypography-alignCenter css-13lts0x">1-10 of 92</span><div class="MuiBox-root css-192dx0w"></div></div></div></div></div>
             </body></html>
             """;
 

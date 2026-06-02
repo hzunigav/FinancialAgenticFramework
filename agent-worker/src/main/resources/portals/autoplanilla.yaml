@@ -156,11 +156,16 @@ scrape:
     - name: totalRenta
       selector: "tfoot tr td:nth-last-child(1)"
 
-    # Pagination footer text, e.g. "1-10 of 92". Mapper pulls the number
-    # after "of". MuiTablePagination-displayedRows is a stable MUI class
-    # (not an Emotion hash), identical across both report layouts.
+    # Pagination count text, e.g. "1-10 of 92"; mapper pulls the number
+    # after "of". AutoPlanilla's Material React Table wraps pagination in a
+    # MuiTablePagination-root whose ONLY direct-child <span> is the
+    # MuiTypography count — MRT does NOT emit the standard
+    # .MuiTablePagination-displayedRows class (that selector 30s-timed-out
+    # in prod 2026-06-02; confirmed against the live DOM). Anchor on the
+    # stable MuiTablePagination-root class, not an Emotion hash; the toolbar
+    # is identical in the USD and CRC layouts.
     - name: employeeCount
-      selector: ".MuiTablePagination-displayedRows"
+      selector: ".MuiTablePagination-root > span"
 
   # Per-employee row capture. Material React Table renders body rows as
   # <tr class="MuiTableRow-root"> inside <tbody>; tfoot is excluded by

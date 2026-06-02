@@ -118,12 +118,14 @@ steps:
   - action: waitForSelector
     selector: 'text=/of [1-9]\d*/'
 
-  # Bump rows-per-page to 30 so the totals row stays visible without
-  # horizontal paging. Harmless when the dataset is <= 10 rows.
+  # Bump rows-per-page to 100 (the largest option AutoPlanilla offers:
+  # 5/10/15/20/25/30/50/100) so employees[] captures the whole planilla
+  # in one page for any payroll up to 100 employees. Harmless on smaller
+  # datasets. Planillas > 100 still need true pagination (see scrape).
   - action: click
     selector: 'role=combobox[name="Rows per page"]'
   - action: click
-    selector: 'role=option[name="30"]'
+    selector: 'role=option[name="100"]'
 
 scrape:
   # M3 capture shape (path A): payroll-wide totals + employee count only.
@@ -132,48 +134,62 @@ scrape:
   # and the QA check only needs totals to match against the government
   # portal. Revisit in M3b if per-row reconciliation becomes useful.
   #
-  # Selectors below were verified via DevTools → Elements → Copy Selector
-  # against a real report (April 2026). The Emotion/MUI hash classes
-  # (css-1wj4860, css-4bhzvj, css-10gei56) are the only things that
-  # distinguish the two footer cells from each other; expect them to
-  # churn on AutoPlanilla MUI upgrades, at which point re-pick the
-  # hashes from the Elements panel.
+  # The CCSS report renders in two column layouts depending on the
+  # planilla's currency (verified against live reports, June 2026):
+  #
+  #   USD planilla (7 cols): Id | Employee | Total Income (USD) | Income
+  #     Tax | Exchange Rate | Total Income (CRC) | Renta (CRC)
+  #   CRC planilla (4 cols): Id | Employee | Total Income (CRC) | Renta
+  #
+  # In BOTH layouts the CRC gross and CRC renta are the last two columns,
+  # so we anchor on :nth-last-child instead of fixed positions or Emotion
+  # hashes (css-1wj4860 etc.). Those hashes only existed in the wider USD
+  # footer and timed out on CRC-only planillas (the MAP SOLUCIONES
+  # incident, 2026-06-02). nth-last-child is layout-agnostic and
+  # hash-free; innerText() ignores the inner <div>/<b> wrapping.
   fields:
-    # Total Income (CRC) totals cell — middle of the three footer cells.
+    # CRC gross-salary total — second-to-last footer cell in both layouts.
     - name: totalGrossSalaries
-      selector: "tfoot tr td.MuiTableCell-footer.css-1wj4860 > div > b"
+      selector: "tfoot tr td:nth-last-child(2)"
 
-    # Renta (CRC) totals cell — rightmost of the three footer cells.
+    # CRC renta total — last footer cell in both layouts.
     - name: totalRenta
-      selector: "tfoot tr td.MuiTableCell-footer.css-4bhzvj > div > b"
+      selector: "tfoot tr td:nth-last-child(1)"
 
-    # Pagination footer text, e.g. "1-10 of 13". Mapper pulls the
-    # number after "of".
+    # Pagination footer text, e.g. "1-10 of 92". Mapper pulls the number
+    # after "of". MuiTablePagination-displayedRows is a stable MUI class
+    # (not an Emotion hash), identical across both report layouts.
     - name: employeeCount
-      selector: "div.MuiBox-root.css-10gei56 > div > div > div > span"
+      selector: ".MuiTablePagination-displayedRows"
 
   # Per-employee row capture. Material React Table renders body rows as
   # <tr class="MuiTableRow-root"> inside <tbody>; tfoot is excluded by
   # the tbody anchor. Per-row column selectors are evaluated relative
   # to each row.
   #
-  # Column layout (verified against a live April 2026 report):
-  #   1 Identification  2 Employee  3 Total Income (USD)  4 Income Tax
-  #   5 Exchange Rate   6 Total Income (CRC)              7 Renta (CRC)
-  # Body cells render values as plain text (no <b> wrapper), so the
-  # positional :nth-child selector is the cheap, churn-proof choice.
-  # tfoot uses Emotion hashes like css-1wj4860 because the totals row
-  # is bolded, but those hashes are NOT present on tbody cells.
+  # id/name are always the first two columns; grossSalary (CRC) is the
+  # second-to-last column in both the USD (7-col) and CRC (4-col)
+  # layouts — see the fields comment above — so nth-last-child(2) reads
+  # the right cell regardless of currency. Body cells render values as
+  # plain text, so innerText() returns the number directly.
   #
-  # TODO(scaling): rows-per-page is capped at 30 by the descriptor's
-  # combobox click. Larger payrolls will need pagination — out of scope
-  # for this slice; revisit when a planilla > 30 employees ships.
+  # rows-per-page is set to 100 (the max AutoPlanilla offers) in steps,
+  # so employees[] captures every row for planillas up to 100 employees.
+  # totalGrossSalaries / totalRenta / employeeCount come from the footer
+  # + pagination and stay correct for the FULL payroll regardless of
+  # page size.
+  #
+  # TODO(scaling): a planilla > 100 employees still truncates employees[]
+  # to the first 100 (totals/count stay correct) — needs true pagination
+  # (scrape page, click next, repeat), which the single-pass engine does
+  # not yet support. Revisit when a > 100-employee planilla must capture
+  # per-row data.
   rows:
     selector: "tbody > tr.MuiTableRow-root"
     columns:
       id: "td:nth-child(1)"
       name: "td:nth-child(2)"
-      grossSalary: "td:nth-child(6)"
+      grossSalary: "td:nth-last-child(2)"
 
 securityContext:
   scrubHarFields:

@@ -1,5 +1,6 @@
 package com.neoproc.financialagent.worker.listener;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -23,6 +24,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -238,8 +240,82 @@ class PayrollCaptureListenerTest {
     }
 
     // -----------------------------------------------------------------------
+    // Multi-planilla binding extraction
+    // -----------------------------------------------------------------------
+
+    @Test
+    void captureRequestWithPlanillas_bindsPlanillasJsonAndFirstAsRepresentative() throws Exception {
+        when(portalRunService.run(eq(PORTAL_ID), any(), anyMap()))
+                .thenReturn(new RunOutcome(tempDir, "SUCCESS"));
+
+        String envelopeId = UUID.randomUUID().toString();
+        listener.onCaptureRequest(
+                buildPlanillasRequestJson(envelopeId, "2026-05::3-101-578509",
+                        new Planilla("1051", "FEUJI Costa Rica USD"),
+                        new Planilla("1052", "FEUJI Costa Rica CRC")),
+                envelopeId,
+                headersWithReceiveCount(1));
+
+        Map<String, String> bindings = captureRunBindings();
+
+        // Representative singular bindings come from the first planilla.
+        assertEquals("1051", bindings.get("params.planillaId"));
+        assertEquals("FEUJI Costa Rica USD", bindings.get("params.planillaName"));
+
+        // The full ordered list the AutoPlanilla adapter loops over.
+        String json = bindings.get("params.planillasJson");
+        assertNotNull(json, "params.planillasJson must carry the full planilla list");
+        List<Planilla> parsed = MAPPER.readValue(json, new TypeReference<List<Planilla>>() {});
+        assertEquals(2, parsed.size());
+        assertEquals("1051", parsed.get(0).id());
+        assertEquals("1052", parsed.get(1).id());
+    }
+
+    @Test
+    void captureRequestWithSingularPlanilla_stillEmitsOneElementPlanillasJson() throws Exception {
+        when(portalRunService.run(eq(PORTAL_ID), any(), anyMap()))
+                .thenReturn(new RunOutcome(tempDir, "SUCCESS"));
+
+        String envelopeId = UUID.randomUUID().toString();
+        PayrollCaptureRequest request = new PayrollCaptureRequest(
+                PayrollCaptureRequest.SCHEMA,
+                new EnvelopeMeta(envelopeId, "2026-05::3-101-578509", FIRM_ID, "es",
+                        Instant.now(), "praxis", "run-" + envelopeId),
+                CaptureTask.of(PORTAL_ID, null, new Planilla("1051", "FEUJI Costa Rica USD")),
+                null, null, null);
+        listener.onCaptureRequest(MAPPER.writeValueAsString(request), envelopeId,
+                headersWithReceiveCount(1));
+
+        Map<String, String> bindings = captureRunBindings();
+        assertEquals("1051", bindings.get("params.planillaId"));
+        List<Planilla> parsed = MAPPER.readValue(
+                bindings.get("params.planillasJson"), new TypeReference<List<Planilla>>() {});
+        assertEquals(1, parsed.size(),
+                "singular task.planilla must normalise to a one-element params.planillasJson");
+        assertEquals("1051", parsed.get(0).id());
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    @SuppressWarnings("unchecked")
+    private Map<String, String> captureRunBindings() throws Exception {
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(portalRunService).run(eq(PORTAL_ID), any(), captor.capture());
+        return captor.getValue();
+    }
+
+    private String buildPlanillasRequestJson(String envelopeId, String businessKey,
+                                             Planilla... planillas) throws Exception {
+        PayrollCaptureRequest request = new PayrollCaptureRequest(
+                PayrollCaptureRequest.SCHEMA,
+                new EnvelopeMeta(envelopeId, businessKey, FIRM_ID, "es",
+                        Instant.now(), "praxis", "run-" + envelopeId),
+                CaptureTask.ofMulti(PORTAL_ID, null, List.of(planillas)),
+                null, null, null);
+        return MAPPER.writeValueAsString(request);
+    }
 
     private PayrollCaptureResult capturePublished() {
         ArgumentCaptor<PayrollCaptureResult> captor = ArgumentCaptor.forClass(PayrollCaptureResult.class);

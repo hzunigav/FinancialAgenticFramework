@@ -59,6 +59,20 @@
               }
             }
           ]
+        },
+        "planillas": {
+          "description": "Multi-planilla consolidated capture (AutoPlanilla): 1..N planillas selected by stable id and consolidated server-side into one report. When present, supersedes the singular `planilla`. Select by id; name is audit-only.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id"],
+            "additionalProperties": false,
+            "properties": {
+              "id":   { "type": "string", "minLength": 1 },
+              "name": { "type": "string" }
+            }
+          }
         }
       }
     },

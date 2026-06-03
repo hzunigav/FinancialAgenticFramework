@@ -83,6 +83,46 @@ class AutoplanillaScrapeFixtureTest {
             </body></html>
             """;
 
+    // Two-page CRC report. The next-page button matches the descriptor's
+    // pagination.nextSelector; clicking it swaps the tbody to page 2, advances
+    // the "of N" counter, and disables itself — modelling AutoPlanilla's
+    // Material-React-Table paging so scrapeAllRows can be exercised end-to-end
+    // without a live portal. Footer/counter carry the FULL-payroll totals (4).
+    private static final String PAGINATED_REPORT = """
+            <html><body>
+            <table>
+              <tbody id="rows">
+                <tr class="MuiTableRow-root"><td>P1A</td><td>Alice One</td><td>100.00</td><td>0.00</td></tr>
+                <tr class="MuiTableRow-root"><td>P1B</td><td>Bob One</td><td>200.00</td><td>0.00</td></tr>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td class="MuiTableCell-footer" colspan="2">Total (CRC)</td>
+                  <td class="MuiTableCell-footer">1,000.00</td>
+                  <td class="MuiTableCell-footer">50.00</td>
+                </tr>
+              </tfoot>
+            </table>
+            <div class="MuiTablePagination-root MuiBox-root">
+              <label>Rows per page</label>
+              <span>1-2 of 4</span>
+              <button aria-label="Go to next page">Next</button>
+            </div>
+            <script>
+              (function () {
+                var btn = document.querySelector('button[aria-label="Go to next page"]');
+                btn.addEventListener('click', function () {
+                  document.getElementById('rows').innerHTML =
+                    '<tr class="MuiTableRow-root"><td>P2C</td><td>Carol Two</td><td>300.00</td><td>0.00</td></tr>' +
+                    '<tr class="MuiTableRow-root"><td>P2D</td><td>Dan Two</td><td>400.00</td><td>0.00</td></tr>';
+                  document.querySelector('.MuiTablePagination-root > span').innerText = '3-4 of 4';
+                  btn.disabled = true;
+                });
+              })();
+            </script>
+            </body></html>
+            """;
+
     private static PortalDescriptor.Scrape autoplanillaScrape() throws IOException {
         return PortalDescriptorLoader.load("autoplanilla").scrape();
     }
@@ -129,5 +169,31 @@ class AutoplanillaScrapeFixtureTest {
         assertEquals(new BigDecimal("29200.00"),    s.totalRenta());
         assertEquals(92, s.employeeCount());
         assertEquals(new BigDecimal("495000.00"), s.employees().get(0).grossSalary());
+    }
+
+    @Test
+    void paginatedReport_walksEveryPageAndDeduplicates() throws IOException {
+        DescriptorFixture.ScrapeResult result =
+                DescriptorFixture.runScrape(PAGINATED_REPORT, autoplanillaScrape());
+
+        // The counter is read once, from page 1, before pagination advances.
+        assertEquals("1-2 of 4", result.fields().get("employeeCount"));
+
+        // scrapeAllRows followed the next-button across both pages: all four
+        // rows, in page order, with no duplicate from a re-render race.
+        assertEquals(4, result.rows().size());
+        assertEquals("P1A", result.rows().get(0).get("id"));
+        assertEquals("P1B", result.rows().get(1).get("id"));
+        assertEquals("P2C", result.rows().get(2).get("id"));
+        assertEquals("P2D", result.rows().get(3).get("id"));
+        assertEquals("400.00", result.rows().get(3).get("grossSalary"));
+
+        // Reconciliation: footer count (4) == rows actually walked (4).
+        PayrollSummary s = AutoplanillaMapper.toSummary(
+                result.fields(), result.rows(), "Consolidated CRC",
+                LocalDate.of(2026, 5, 1), LocalDate.of(2026, 5, 31));
+        assertEquals(4, s.employeeCount());
+        assertEquals(4, s.employees().size());
+        assertEquals(new BigDecimal("400.00"), s.employees().get(3).grossSalary());
     }
 }

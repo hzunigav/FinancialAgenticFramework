@@ -193,9 +193,48 @@ public record PortalDescriptor(
          * with keys/values from {@code columns}. Selectors in {@code columns}
          * are evaluated relative to each row, not the page. Optional —
          * absent for capture-only-totals portals.
+         *
+         * <p>{@code pagination} is optional; absent → single-page scrape.
          */
         @JsonIgnoreProperties(ignoreUnknown = true)
-        public record RowSpec(String selector, Map<String, String> columns) {}
+        public record RowSpec(String selector,
+                              Map<String, String> columns,
+                              Pagination pagination) {}
+
+        /**
+         * Optional pagination for a row-mode scrape. When present the scraper
+         * walks every page instead of just the visible one: scrape page →
+         * click {@code nextSelector} → wait for {@code rangeSelector}'s text to
+         * advance → repeat until the next control is absent or disabled.
+         *
+         * <ul>
+         *   <li>{@code nextSelector} — control that advances to the next page.
+         *       When it matches nothing, or matches a disabled element, the
+         *       scrape stops — so a not-yet-verified selector degrades safely
+         *       to today's single-page behaviour.</li>
+         *   <li>{@code rangeSelector} — element whose text changes per page
+         *       (e.g. the "1-10 of 92" counter). Used as the page-advanced
+         *       signal after a next-click; omit to fall back to a fixed settle.</li>
+         *   <li>{@code dedupeBy} — row column used to de-duplicate across pages
+         *       (default {@code id}); guards against a re-render race that
+         *       re-scrapes a page from double-counting.</li>
+         *   <li>{@code maxPages} — safety cap on the page loop (default 100).</li>
+         * </ul>
+         */
+        @JsonIgnoreProperties(ignoreUnknown = true)
+        public record Pagination(String nextSelector,
+                                 String rangeSelector,
+                                 String dedupeBy,
+                                 Integer maxPages) {
+
+            public String dedupeByOrDefault() {
+                return dedupeBy == null || dedupeBy.isBlank() ? "id" : dedupeBy;
+            }
+
+            public int maxPagesOrDefault() {
+                return maxPages == null ? 100 : maxPages;
+            }
+        }
     }
 
     /**

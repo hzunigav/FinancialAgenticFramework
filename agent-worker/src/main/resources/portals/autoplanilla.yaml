@@ -178,23 +178,38 @@ scrape:
   # the right cell regardless of currency. Body cells render values as
   # plain text, so innerText() returns the number directly.
   #
-  # rows-per-page is set to 100 (the max AutoPlanilla offers) in steps,
-  # so employees[] captures every row for planillas up to 100 employees.
-  # totalGrossSalaries / totalRenta / employeeCount come from the footer
-  # + pagination and stay correct for the FULL payroll regardless of
-  # page size.
-  #
-  # TODO(scaling): a planilla > 100 employees still truncates employees[]
-  # to the first 100 (totals/count stay correct) — needs true pagination
-  # (scrape page, click next, repeat), which the single-pass engine does
-  # not yet support. Revisit when a > 100-employee planilla must capture
-  # per-row data.
+  # rows-per-page is set to 100 (the max AutoPlanilla offers) in steps, so a
+  # single planilla up to 100 employees captures in one page. The pagination
+  # block below walks additional pages when the dataset is larger — which is
+  # the common case once multiple planillas are consolidated into one report.
+  # totalGrossSalaries / totalRenta / employeeCount come from the footer +
+  # pagination counter and stay correct for the FULL payroll regardless of
+  # page size; employees[] now follows them across pages.
   rows:
     selector: "tbody > tr.MuiTableRow-root"
     columns:
       id: "td:nth-child(1)"
       name: "td:nth-child(2)"
       grossSalary: "td:nth-last-child(2)"
+
+    # True pagination: scrape page -> click next -> wait for the "1-100 of N"
+    # counter to advance -> repeat until the next control is absent/disabled.
+    # Rows de-dupe by `id`, so a Material-React-Table re-render race can't
+    # double-count. A blank/non-matching nextSelector degrades to single-page
+    # (today's behaviour).
+    #
+    # Standard MUI TablePagination actions — VERIFIED against the live DOM on a
+    # 2026-06-03 consolidated report ("1-10 of 101"): the next control is
+    # <button aria-label="Go to next page"> (ChevronRightIcon). On the last page
+    # MUI sets the native `disabled` attribute (confirmed: first/prev render
+    # Mui-disabled, disabled=true on page 1), which scrapeAllRows' isEnabled()
+    # check uses as the stop signal. The empty css-192dx0w div in the older
+    # fixture was just a single-page capture with no pager rendered.
+    pagination:
+      nextSelector: 'button[aria-label="Go to next page"]'
+      rangeSelector: ".MuiTablePagination-root > span"
+      dedupeBy: id
+      maxPages: 50
 
 securityContext:
   scrubHarFields:

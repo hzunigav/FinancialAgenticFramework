@@ -74,7 +74,8 @@ public final class DescriptorFixture {
             Map<String, String> fields = scraper.scrape(scrape);
             List<Map<String, String>> rows = List.of();
             if (scrape.rows() != null && scrape.rows().selector() != null) {
-                rows = scraper.scrapeRows(scrape.rows().selector(), scrape.rows().columns());
+                rows = scraper.scrapeAllRows(scrape.rows().selector(),
+                        scrape.rows().columns(), scrape.rows().pagination());
             }
             return new ScrapeResult(fields, rows);
         }

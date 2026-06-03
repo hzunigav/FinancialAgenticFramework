@@ -55,7 +55,8 @@ class DescriptorFixtureTest {
                         Map.of(
                                 "id", ".id",
                                 "name", ".name",
-                                "grossSalary", ".salary")));
+                                "grossSalary", ".salary"),
+                        null));
 
         DescriptorFixture.ScrapeResult result = DescriptorFixture.runScrape(html, scrape);
 

@@ -224,9 +224,11 @@ public class PortalRunService {
                     ? descriptor.scrape().rows()
                     : null;
             if (rows != null && rows.selector() != null) {
-                scrapedRows = scraper.scrapeRows(rows.selector(), rows.columns());
+                scrapedRows = scraper.scrapeAllRows(
+                        rows.selector(), rows.columns(), rows.pagination());
                 manifest.step("scrape-rows",
-                        rows.selector() + " -> " + scrapedRows.size() + " rows");
+                        rows.selector() + " -> " + scrapedRows.size() + " rows"
+                                + (rows.pagination() != null ? " (paginated)" : ""));
             }
 
             manifest.finalUrl = page.url();

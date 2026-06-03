@@ -9,7 +9,7 @@ shadowMode: true
 # NeoProc's single AutoPlanilla login sees every client's payroll — the
 # planilla selector on the CCSS Report page picks the target client.
 # Credentials live at financeagent/shared/portals/autoplanilla in Vault;
-# the per-firm client selection happens via params.planillaName.
+# the per-firm client selection happens via params.planillas (planilla ids).
 credentialScope: shared
 
 # Shared login — one active session at a time, 5-second gap between runs.
@@ -27,13 +27,18 @@ session:
   ttlMinutes: 0
 
 # Runtime parameters the operator passes via -Dparams.<key>=<value>:
-#   params.planillaId    = stable AutoPlanilla payroll id, e.g. "1051".
-#                          Matched against data-value="..." on the MUI
-#                          multi-select option — operators rename labels,
+#   params.planillas     = list binding the AutoPlanilla adapter populates from
+#                          task.planillas (or the singular task.planilla) via
+#                          params.planillasJson. The forEach below loops it,
+#                          ticking each planilla's checkbox by data-value="<id>".
+#                          Selection is always by id — operators rename labels,
 #                          ids never change.
-#   params.planillaName  = visible label, only used in the run manifest /
-#                          capture envelope for human-readable context. NOT
-#                          used to drive the dropdown.
+#   params.planillaId    = stable id of the first/only planilla, e.g. "1051".
+#                          Singular fallback for CLI single-planilla runs
+#                          (-Dparams.planillaId=...); the adapter wraps it into
+#                          a one-element params.planillas.
+#   params.planillaName  = visible label of the first planilla; manifest /
+#                          envelope context only. NOT used to drive the dropdown.
 #   params.from          = ISO start date, e.g. 2026-04-01 (the Start Date
 #                          input accepts ISO via .fill()). Bound from
 #                          task.period.from in the capture envelope.
@@ -93,8 +98,16 @@ steps:
   - action: click
     selector: 'role=combobox[name="Select one or more payrolls"]'
 
-  - action: click
-    selector: '[role="option"][data-value="${params.planillaId}"] input[type="checkbox"]'
+  # forEach over the planillas the adapter bound (params.planillas) — one
+  # checkbox tick per planilla id. AutoPlanilla consolidates the selected
+  # planillas into a single CCSS report; single-planilla capture is just the
+  # one-element case. data-value is the stable id (operators rename labels).
+  - action: forEach
+    over: params.planillas
+    item: planilla
+    steps:
+      - action: click
+        selector: '[role="option"][data-value="${planilla.id}"] input[type="checkbox"]'
 
   # Close the dropdown by clicking the MUI backdrop (clicking outside the
   # popup). The subsequent fill on Start Date is not sufficient — the

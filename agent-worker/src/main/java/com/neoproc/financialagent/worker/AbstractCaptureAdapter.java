@@ -78,7 +78,8 @@ abstract class AbstractCaptureAdapter extends BaseAdapter {
      * @param businessKey  Flowable correlation key, format {@code "<period>::<planillaId-or-name>"}
      * @param issuer       short identifier for the producer (e.g., {@code "agent-worker/autoplanilla"})
      * @param period       date range the capture covers
-     * @param planilla     identifier or name of the planilla captured
+     * @param planilla     single planilla captured (legacy / single-planilla flows); null for multi
+     * @param planillas    consolidated planillas captured (AutoPlanilla multi-select); null for single
      */
     protected record CaptureOutcome(
             String status,
@@ -87,7 +88,15 @@ abstract class AbstractCaptureAdapter extends BaseAdapter {
             String businessKey,
             String issuer,
             Period period,
-            Planilla planilla) {}
+            Planilla planilla,
+            List<Planilla> planillas) {
+
+        /** Back-compat: single-planilla / no-planilla captures (mock, ccss, legacy). */
+        protected CaptureOutcome(String status, CaptureResultBody body, String sourcePortalId,
+                                 String businessKey, String issuer, Period period, Planilla planilla) {
+            this(status, body, sourcePortalId, businessKey, issuer, period, planilla, null);
+        }
+    }
 
     private void emitCaptureEnvelope(CaptureOutcome outcome,
                                      Map<String, String> bindings,
@@ -117,10 +126,9 @@ abstract class AbstractCaptureAdapter extends BaseAdapter {
                 outcome.issuer(),
                 issuerRunId);
 
-        CaptureTask task = CaptureTask.of(
-                outcome.sourcePortalId(),
-                outcome.period(),
-                outcome.planilla());
+        CaptureTask task = (outcome.planillas() != null && !outcome.planillas().isEmpty())
+                ? CaptureTask.ofMulti(outcome.sourcePortalId(), outcome.period(), outcome.planillas())
+                : CaptureTask.of(outcome.sourcePortalId(), outcome.period(), outcome.planilla());
 
         // manifest.artifactUri is the deterministic S3 URI set by
         // PortalRunService when an artifacts-bucket is configured.

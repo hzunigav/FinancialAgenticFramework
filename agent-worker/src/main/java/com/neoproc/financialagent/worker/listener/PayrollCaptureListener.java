@@ -1,5 +1,6 @@
 package com.neoproc.financialagent.worker.listener;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.contract.payroll.Audit;
@@ -8,6 +9,7 @@ import com.neoproc.financialagent.contract.payroll.CaptureTask;
 import com.neoproc.financialagent.contract.payroll.EnvelopeMeta;
 import com.neoproc.financialagent.contract.payroll.PayrollCaptureRequest;
 import com.neoproc.financialagent.contract.payroll.PayrollCaptureResult;
+import com.neoproc.financialagent.contract.payroll.Planilla;
 import com.neoproc.financialagent.contract.validation.SchemaValidator;
 import com.neoproc.financialagent.worker.PortalRunService;
 import com.neoproc.financialagent.worker.RunOutcome;
@@ -280,14 +282,40 @@ public class PayrollCaptureListener {
                 b.put("params.from", task.period().from().toString());
                 b.put("params.to",   task.period().to().toString());
             }
-            if (task.planilla() != null) {
-                if (task.planilla().id() != null)
-                    b.put("params.planillaId", task.planilla().id());
-                if (task.planilla().name() != null)
-                    b.put("params.planillaName", task.planilla().name());
+            List<Planilla> planillas = resolvePlanillas(task);
+            if (!planillas.isEmpty()) {
+                // Representative singular bindings for manifest/label readers.
+                Planilla first = planillas.get(0);
+                if (first.id() != null)
+                    b.put("params.planillaId", first.id());
+                if (first.name() != null)
+                    b.put("params.planillaName", first.name());
+                // The full list the AutoPlanilla adapter loops over (forEach).
+                try {
+                    b.put("params.planillasJson", MAPPER.writeValueAsString(planillas));
+                } catch (JsonProcessingException e) {
+                    throw new IllegalStateException(
+                            "failed to serialize task.planillas for capture bindings", e);
+                }
             }
         }
         return b;
+    }
+
+    /**
+     * Normalise the request's planilla selection into a list the AutoPlanilla
+     * adapter loops over: prefer the multi-select {@code task.planillas}; fall
+     * back to the singular {@code task.planilla} (single-planilla / legacy
+     * flows) as a one-element list.
+     */
+    private static List<Planilla> resolvePlanillas(CaptureTask task) {
+        if (task.planillas() != null && !task.planillas().isEmpty()) {
+            return task.planillas();
+        }
+        if (task.planilla() != null) {
+            return List.of(task.planilla());
+        }
+        return List.of();
     }
 
     private static void setupMdc(PayrollCaptureRequest request) {

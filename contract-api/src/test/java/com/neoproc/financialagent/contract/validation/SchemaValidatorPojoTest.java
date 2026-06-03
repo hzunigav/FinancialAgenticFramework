@@ -399,6 +399,69 @@ class SchemaValidatorPojoTest {
         SchemaValidator.validate(result, SchemaValidator.SUBMIT_RESULT);
     }
 
+    @Test
+    @DisplayName("Capture result with task.planillas[] (multi-planilla consolidation) validates")
+    void capturePojo_withPlanillas_validates() {
+        PayrollCaptureResult result = new PayrollCaptureResult(
+                PayrollCaptureResult.SCHEMA,
+                envMeta(),
+                CaptureTask.ofMulti("autoplanilla",
+                        new Period(LocalDate.parse("2026-05-01"), LocalDate.parse("2026-05-31")),
+                        List.of(new Planilla("1051", "FEUJI Costa Rica USD"),
+                                new Planilla("1052", "FEUJI Costa Rica CRC"))),
+                null,
+                new CaptureResultBody(
+                        "SUCCESS",
+                        new CaptureResultBody.Totals("CRC",
+                                new BigDecimal("16787554.96"),
+                                new BigDecimal("688920.54"),
+                                101),
+                        List.of()),
+                audit());
+
+        SchemaValidator.validate(result, SchemaValidator.CAPTURE_RESULT);
+    }
+
+    @Test
+    @DisplayName("Capture result with id-only planillas[] (no display name) validates")
+    void capturePojo_planillasIdOnly_validates() {
+        // Praxis may send ids only — name is audit-only. Planilla's @JsonInclude
+        // omits the null name, and the planillas item schema requires only id.
+        PayrollCaptureResult result = new PayrollCaptureResult(
+                PayrollCaptureResult.SCHEMA,
+                envMeta(),
+                CaptureTask.ofMulti("autoplanilla", null,
+                        List.of(new Planilla("1051", null), new Planilla("1052", null))),
+                null,
+                new CaptureResultBody("SUCCESS",
+                        new CaptureResultBody.Totals("CRC", BigDecimal.ZERO, null, 0),
+                        List.of()),
+                audit());
+
+        SchemaValidator.validate(result, SchemaValidator.CAPTURE_RESULT);
+    }
+
+    @Test
+    @DisplayName("Capture result task.planillas item without id fails validation (select-by-id contract)")
+    void capturePojo_planillasMissingId_failsValidation() {
+        // Selection is by stable id (data-value). A planillas entry with only a
+        // name is unusable — lock the schema's required:["id"] so it can't ship.
+        PayrollCaptureResult result = new PayrollCaptureResult(
+                PayrollCaptureResult.SCHEMA,
+                envMeta(),
+                CaptureTask.ofMulti("autoplanilla", null,
+                        List.of(new Planilla(null, "FEUJI Costa Rica USD"))),
+                null,
+                new CaptureResultBody("SUCCESS",
+                        new CaptureResultBody.Totals("CRC", BigDecimal.ZERO, null, 0),
+                        List.of()),
+                audit());
+
+        assertThrows(SchemaValidationException.class,
+                () -> SchemaValidator.validate(result, SchemaValidator.CAPTURE_RESULT),
+                "planillas[].id is required — selection is by id, not name");
+    }
+
     private static EnvelopeMeta envMeta() {
         return new EnvelopeMeta(
                 UUID.randomUUID().toString(),

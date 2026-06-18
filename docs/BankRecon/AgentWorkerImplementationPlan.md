@@ -65,6 +65,18 @@ Everything downstream depends on a confirmed Xero selector map. Do this **before
 
 Spikes can run headed locally (`-Dportal.headless=false`) and use `fixture.capture=true` to snapshot post-step HTML for adapter unit tests.
 
+### Phase 0 — RESULTS (2026-06-18, ✅ complete)
+
+Run via the `agent-worker` demo `XeroLoginSpike` against a real Xero **Practice** ("NeoProc") with client orgs (Feuji SRL, MAP SOLUCIONES, Demo Company — matches D3's one-login-all-orgs).
+
+- **Akamai bot block (new).** Xero login sits behind Akamai Bot Manager; a vanilla Playwright Chromium gets a 403 at the edge. **Bypass:** launch installed Chrome (`channel="chrome"`), drop `--enable-automation`, add `--disable-blink-features=AutomationControlled`, mask `navigator.webdriver`. → **The production worker's Playwright launch needs the same stealth config + a real Chrome in the Fargate image** (today it's bundled headless Chromium). New Phase-2/infra requirement.
+- **Q8 / session — RESOLVED, store works.** 2FA is **TOTP** with a **"Trust this device"** option. A fresh context seeded only with the persisted `storageState` (incl. the trust cookie) **silently re-authenticates** through Xero's OIDC `form_post` hybrid flow and lands logged-in — confirmed by the no-login reuse probe (`-Dxero.reuseStateFile`). → **The persistent Secrets-Manager + KMS session store is viable; the warm-worker fallback is NOT needed.** Worker re-seeds only when the trust cookie expires (confirm Xero trust-device TTL, ~30 days; detect expiry → alert/HITL). Caveat baked into the probe: wait for the silent SSO to leave `login.xero.com/identity` before judging, else false-negative.
+- **Org switch — by SHORT-CODE, not tenant UUID (contract impact).** The switcher uses `OrganisationLogin/!<shortcode>` links (Demo Company = `!0X0!!`); org URL is `go.xero.com/app/!<shortcode>/...`. The tenant UUID is never a UI selector. → **Contract change for Praxis (publish held for this): add optional `xeroShortCode` to `BankStatementTask`**; agent deep-links by short-code, falls back to `xeroOrgName` in the switcher. Keep `xeroOrgUuid`/`xeroOrgName` as API cross-check + label. Supersedes the S0.2 "switch by UUID" assumption.
+- **Q2 — RESOLVED.** Account number is rendered on the Bank accounts list → agent matches `bankAccountNumber`. (IBAN not shown for demo accounts — confirm on real CR accounts.)
+- **Q6 — refined.** Import is a **3-step wizard: Upload → Import settings → Review** (not single-shot). Stable XUI selectors: file input `input[data-automationid="select-file-control--input"]` (accept incl. `.csv`); stepper `[data-automationid="manual-upload-wizard-stepper"]`; advance `[data-automationid="wizard-next-step-button"]`. With the Xero CSV template, step-2 mapping is auto-filled; a forced mapping choice = `COLUMN_MAPPING_FAILED`. Read-back of imported count at step 3 "Review".
+
+**Net effect on §1.5:** the persistent session store path is confirmed (not the warm-worker fallback). **Security:** the spike's `xero-spike/storageState.json` holds a live session and is gitignored — never commit it.
+
 ---
 
 ## 3. Phase 1 — Contracts in `contract-api` (parallelizable with Phase 0) — ✅ LANDED 2026-06-18

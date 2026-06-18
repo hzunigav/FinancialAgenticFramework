@@ -41,3 +41,6 @@ agent-worker/artifacts/
 artifacts/
 logs/
 testing-harness/logs/
+
+# Phase-0 Xero spike output — storageState.json holds a LIVE session cookie
+xero-spike/

@@ -171,6 +171,7 @@ class BankStatementSchemaPojoTest {
         return new BankStatementTask(
                 BankStatementTask.TYPE, BankStatementTask.OPERATION, TargetSystem.XERO,
                 "e1f2a3b4-c5d6-4789-9abc-def012345678", "Neoproc Sociedad Anonima",
+                "!0X0!!",
                 "NEOPROCSOCIEDADANONIMA", "Banco Nacional", "920336542",
                 "CR05015202001026284066", "USD",
                 LocalDate.parse("2026-06-01"), LocalDate.parse("2026-06-17"),

@@ -13,6 +13,7 @@
     "operation": "import",
     "targetSystem": "XERO",
     "xeroOrgUuid": "e1f2a3b4-c5d6-4789-9abc-def012345678",
+    "xeroShortCode": "!0X0!!",
     "bankAccountNumber": "920336542",
     "currency": "USD",
     "periodStart": "2026-06-01",

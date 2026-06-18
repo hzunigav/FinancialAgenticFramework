@@ -43,7 +43,7 @@
         "type",
         "operation",
         "targetSystem",
-        "xeroOrgUuid",
+        "xeroShortCode",
         "bankAccountNumber",
         "currency",
         "periodStart",
@@ -59,11 +59,16 @@
         "xeroOrgUuid": {
           "type": "string",
           "format": "uuid",
-          "description": "Xero tenant UUID. Authoritative org selector — the agent switches to this org."
+          "description": "Xero tenant UUID. API-side cross-check; NOT a UI selector (the org switcher uses the short-code). The agent switches org via xeroShortCode / xeroOrgName."
         },
         "xeroOrgName": {
           "type": ["string", "null"],
-          "description": "Human-readable org name; fallback/confirmation only."
+          "description": "Human-readable org name; org-switcher fallback selector + label."
+        },
+        "xeroShortCode": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Xero org short-code, e.g. '!0X0!!'. The deterministic UI org selector — the agent deep-links to go.xero.com/app/<shortCode>/... . Optional; when absent the agent resolves the org by xeroOrgName in the switcher."
         },
         "clientName": {
           "type": ["string", "null"],

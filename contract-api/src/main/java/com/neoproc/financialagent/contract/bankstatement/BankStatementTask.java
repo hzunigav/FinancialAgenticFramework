@@ -9,9 +9,13 @@ import java.time.LocalDate;
  * (request and result echo it verbatim — the {@code expected*} values are
  * what the result's checks compare against).
  *
- * <p>The authoritative org selector is {@link #xeroOrgUuid} (Xero tenant
- * UUID); {@link #xeroOrgName} is a human-readable fallback. The agent
- * matches the account by {@link #bankAccountNumber} (+ {@link #iban} /
+ * <p>Org selection (Phase-0 finding): the Xero UI switches org by a
+ * <b>short-code</b>, not the tenant UUID. {@link #xeroShortCode} (e.g.
+ * {@code "!0X0!!"}) is the deterministic selector the agent deep-links to
+ * ({@code go.xero.com/app/!<shortcode>/...}); {@link #xeroOrgName} is the
+ * fallback (matched in the org switcher) and human label; {@link #xeroOrgUuid}
+ * is the API-side cross-check (it is never a UI selector). The agent matches
+ * the account by {@link #bankAccountNumber} (+ {@link #iban} /
  * {@link #currency} to disambiguate).
  *
  * <p>Monetary fields are decimal <b>strings</b> (e.g. {@code "1279.50"}),
@@ -26,6 +30,7 @@ public record BankStatementTask(
         TargetSystem targetSystem,
         String xeroOrgUuid,
         String xeroOrgName,
+        String xeroShortCode,
         String clientName,
         String bankName,
         String bankAccountNumber,

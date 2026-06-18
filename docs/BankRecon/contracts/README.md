@@ -16,7 +16,7 @@
 ## Wire shape (recap)
 
 - `envelope` — `EnvelopeMeta` (envelopeId UUID, businessKey, firmId, locale, createdAt, issuer, issuerRunId).
-- `task` — **cleartext** routing metadata. The **authoritative org selector is `xeroOrgUuid`** (Xero tenant UUID); `xeroOrgName` is a fallback label. The agent matches the account by `bankAccountNumber` (+ `iban`/`currency`).
+- `task` — **cleartext** routing metadata. The org selector is **`xeroShortCode`** (required, e.g. `"!0X0!!"`) — the deterministic value the Xero UI switches on; the agent deep-links `go.xero.com/app/<shortCode>/…`. `xeroOrgName` is the org-switcher fallback + label; **`xeroOrgUuid` is optional** (API cross-check only — it is *not* a UI selector). Confirmed by the Phase-0 spike against a real Xero practice. The agent matches the account by `bankAccountNumber` (+ `iban`/`currency`).
 - `encryption` — `null` for cleartext, or `{ scheme: "kms-envelope-v1", keyName, keyVersion, ciphertextField }`.
 - `request` / `result` — the **body**. Cleartext = an object; encrypted = a `vault:vN:` string. `ciphertextField` names which field holds the ciphertext.
 - `audit.payloadSha256` — SHA-256 (lowercase hex) of the canonical JSON of the cleartext body.

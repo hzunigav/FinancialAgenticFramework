@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoproc.com/financialagent/schemas/v1/bank-statement-upload-request.v1.json",
+  "title": "Bank Statement Upload Request (v1)",
+  "description": "Praxis -> agent-worker. Instructs the agent to upload one pre-formatted CSV bank statement into a specific Xero organisation via the Xero UI. Routing metadata is cleartext in `task`; the file bytes live in the `request` body (cleartext object in dev, or a 'vault:vN:' ciphertext string when encryption is enabled).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["envelope", "task", "audit"],
+  "properties": {
+    "envelope": { "$ref": "#/$defs/EnvelopeMeta" },
+    "task": { "$ref": "#/$defs/BankStatementTask" },
+    "encryption": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Encryption" }]
+    },
+    "request": {
+      "description": "Cleartext FileBody object, OR a 'vault:vN:' ciphertext string when `encryption` is present.",
+      "oneOf": [
+        { "type": "string", "pattern": "^vault:v\\d+:" },
+        { "$ref": "#/$defs/FileBody" }
+      ]
+    },
+    "audit": { "$ref": "#/$defs/AuditBundle" }
+  },
+  "$defs": {
+    "EnvelopeMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["envelopeId", "businessKey", "firmId", "createdAt", "issuer"],
+      "properties": {
+        "envelopeId": { "type": "string", "format": "uuid" },
+        "businessKey": { "type": "string", "minLength": 1 },
+        "firmId": { "type": "integer", "minimum": 1 },
+        "locale": { "type": "string", "minLength": 2 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "issuer": { "type": "string", "minLength": 1 },
+        "issuerRunId": { "type": ["string", "null"] }
+      }
+    },
+    "BankStatementTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "operation",
+        "targetSystem",
+        "xeroOrgUuid",
+        "bankAccountNumber",
+        "currency",
+        "periodStart",
+        "periodEnd",
+        "fileName",
+        "expectedRowCount",
+        "expectedNetMovement"
+      ],
+      "properties": {
+        "type": { "const": "bank-statement-upload" },
+        "operation": { "const": "import" },
+        "targetSystem": { "enum": ["XERO", "ZOHO_BOOKS"] },
+        "xeroOrgUuid": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Xero tenant UUID. Authoritative org selector — the agent switches to this org."
+        },
+        "xeroOrgName": {
+          "type": ["string", "null"],
+          "description": "Human-readable org name; fallback/confirmation only."
+        },
+        "clientName": {
+          "type": ["string", "null"],
+          "description": "Filename ClientName token; informational + sanity check."
+        },
+        "bankName": { "type": ["string", "null"] },
+        "bankAccountNumber": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Account number the agent matches on the Xero import screen."
+        },
+        "iban": {
+          "type": ["string", "null"],
+          "description": "Secondary disambiguator when an account number repeats."
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$",
+          "description": "ISO 4217 currency code."
+        },
+        "periodStart": { "type": "string", "format": "date" },
+        "periodEnd": { "type": "string", "format": "date" },
+        "fileName": { "type": "string", "minLength": 1 },
+        "expectedRowCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "CSV data rows excluding the header. Agent's importedLineCount must match (see result)."
+        },
+        "expectedNetMovement": {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$",
+          "description": "Decimal string = sum of the CSV Amount column. Always present; drives the NET_MOVEMENT check."
+        },
+        "expectedOpeningBalance": {
+          "type": ["string", "null"],
+          "pattern": "^-?\\d+(\\.\\d+)?$",
+          "description": "Decimal string, or null when unknown (Q13). Drives the OPENING_BALANCE check; null => check SKIPPED."
+        },
+        "expectedClosingBalance": {
+          "type": ["string", "null"],
+          "pattern": "^-?\\d+(\\.\\d+)?$",
+          "description": "Decimal string, or null when unknown (Q13). Drives the CLOSING_BALANCE check; null => check SKIPPED."
+        }
+      }
+    },
+    "Encryption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme", "keyName", "keyVersion", "ciphertextField"],
+      "properties": {
+        "scheme": { "const": "kms-envelope-v1" },
+        "keyName": { "type": "string", "minLength": 1 },
+        "keyVersion": { "type": "integer", "minimum": 1 },
+        "ciphertextField": {
+          "enum": ["request"],
+          "description": "Which top-level field holds the 'vault:vN:' ciphertext. For requests this is always 'request'."
+        }
+      }
+    },
+    "FileBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file"],
+      "properties": {
+        "file": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contentType", "encoding", "sha256"],
+          "properties": {
+            "contentType": { "const": "text/csv" },
+            "encoding": { "const": "base64" },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "description": "SHA-256 (lowercase hex) of the RAW csv bytes, before base64."
+            },
+            "inline": {
+              "type": ["string", "null"],
+              "description": "Base64 of the raw CSV bytes. Present unless s3 is used."
+            },
+            "s3": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["bucket", "key"],
+                  "properties": {
+                    "bucket": { "type": "string" },
+                    "key": { "type": "string" },
+                    "presignedUrl": { "type": ["string", "null"] },
+                    "expiresAt": { "type": ["string", "null"], "format": "date-time" }
+                  }
+                }
+              ],
+              "description": "Reserved for the future large-file path; null for inline transport (the day-one mode)."
+            }
+          },
+          "oneOf": [
+            {
+              "title": "inline transport",
+              "required": ["inline"],
+              "properties": {
+                "inline": { "type": "string", "minLength": 1 },
+                "s3": { "type": "null" }
+              }
+            },
+            {
+              "title": "s3 transport (reserved)",
+              "required": ["s3"],
+              "properties": {
+                "s3": { "type": "object" },
+                "inline": { "type": "null" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "AuditBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payloadSha256"],
+      "properties": {
+        "payloadSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "SHA-256 (lowercase hex) of the canonical JSON of the cleartext body."
+        }
+      }
+    }
+  }
+}

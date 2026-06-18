@@ -1,0 +1,76 @@
+{
+  "envelope": {
+    "envelopeId": "8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d",
+    "businessKey": "NEOPROCSOCIEDADANONIMA::920336542::USD::20260601-20260617",
+    "firmId": 1,
+    "locale": "es",
+    "createdAt": "2026-06-18T05:03:12Z",
+    "issuer": "financeagent-worker/xero",
+    "issuerRunId": "worker-run-44ab12"
+  },
+  "task": {
+    "type": "bank-statement-upload",
+    "operation": "import",
+    "targetSystem": "XERO",
+    "xeroOrgUuid": "e1f2a3b4-c5d6-4789-9abc-def012345678",
+    "xeroOrgName": "Neoproc Sociedad Anonima",
+    "clientName": "NEOPROCSOCIEDADANONIMA",
+    "bankName": "Banco Nacional",
+    "bankAccountNumber": "920336542",
+    "iban": "CR05015202001026284066",
+    "currency": "USD",
+    "periodStart": "2026-06-01",
+    "periodEnd": "2026-06-17",
+    "fileName": "NEOPROCSOCIEDADANONIMA_920336542_USD_2026060120260617.csv",
+    "expectedRowCount": 2,
+    "expectedNetMovement": "1279.50",
+    "expectedOpeningBalance": "11211.00",
+    "expectedClosingBalance": "12490.50"
+  },
+  "encryption": null,
+  "result": {
+    "status": "SUCCESS",
+    "errorCategory": null,
+    "errorMessage": null,
+    "retryable": false,
+    "failedStage": null,
+    "xeroOrgMatched": "Neoproc Sociedad Anonima",
+    "bankAccountMatched": "920336542 (USD)",
+    "reconciliation": {
+      "currency": "USD",
+      "expectedRowCount": 2,
+      "importedLineCount": 2,
+      "expectedNetMovement": "1279.50",
+      "observedNetMovement": "1279.50",
+      "expectedOpeningBalance": "11211.00",
+      "observedOpeningBalance": "11211.00",
+      "expectedClosingBalance": "12490.50",
+      "observedClosingBalance": "12490.50",
+      "statementDateRange": { "from": "2026-06-01", "to": "2026-06-17" }
+    },
+    "checks": [
+      { "name": "ORG_SELECTED", "passed": true, "expected": "e1f2a3b4-c5d6-4789-9abc-def012345678", "observed": "e1f2a3b4-c5d6-4789-9abc-def012345678", "detail": null },
+      { "name": "ACCOUNT_SELECTED", "passed": true, "expected": "920336542", "observed": "920336542", "detail": null },
+      { "name": "FILE_ACCEPTED", "passed": true, "expected": "accepted", "observed": "accepted", "detail": null },
+      { "name": "NO_DUPLICATE", "passed": true, "expected": "no overlap", "observed": "no overlap", "detail": null },
+      { "name": "ROW_COUNT", "passed": true, "expected": "2", "observed": "2", "detail": null },
+      { "name": "NET_MOVEMENT", "passed": true, "expected": "1279.50", "observed": "1279.50", "detail": null },
+      { "name": "OPENING_BALANCE", "passed": true, "expected": "11211.00", "observed": "11211.00", "detail": null },
+      { "name": "CLOSING_BALANCE", "passed": true, "expected": "12490.50", "observed": "12490.50", "detail": null }
+    ],
+    "rejectedRows": [],
+    "errors": [],
+    "diagnostics": {
+      "workerRunId": "worker-run-44ab12",
+      "attemptCount": 1,
+      "durationMs": 16240,
+      "xeroUrl": "https://go.xero.com/Bank/BankAccount.aspx?accountID=920336542",
+      "xeroMessage": "Statement imported. 2 of 2 lines.",
+      "screenshotRefs": ["bankstmt/firm-1/920336542/2026-06-17/confirm.png"],
+      "logRef": "cloudwatch:/financeagent/xero/worker-run-44ab12"
+    }
+  },
+  "audit": {
+    "payloadSha256": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+  }
+}

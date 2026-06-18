@@ -1,0 +1,43 @@
+{
+  "envelope": {
+    "envelopeId": "1f3c9a2e-4b5d-4e6f-8a90-0b1c2d3e4f50",
+    "businessKey": "NEOPROCSOCIEDADANONIMA::920336542::USD::20260601-20260617",
+    "firmId": 1,
+    "locale": "es",
+    "createdAt": "2026-06-18T05:00:00Z",
+    "issuer": "praxis-bpm/bank-statement-process",
+    "issuerRunId": "proc-inst-7f3a9c"
+  },
+  "task": {
+    "type": "bank-statement-upload",
+    "operation": "import",
+    "targetSystem": "XERO",
+    "xeroOrgUuid": "e1f2a3b4-c5d6-4789-9abc-def012345678",
+    "xeroOrgName": "Neoproc Sociedad Anonima",
+    "clientName": "NEOPROCSOCIEDADANONIMA",
+    "bankName": "Banco Nacional",
+    "bankAccountNumber": "920336542",
+    "iban": "CR05015202001026284066",
+    "currency": "USD",
+    "periodStart": "2026-06-01",
+    "periodEnd": "2026-06-17",
+    "fileName": "NEOPROCSOCIEDADANONIMA_920336542_USD_2026060120260617.csv",
+    "expectedRowCount": 2,
+    "expectedNetMovement": 1279.50,
+    "expectedOpeningBalance": "11211.00",
+    "expectedClosingBalance": "12490.50"
+  },
+  "encryption": null,
+  "request": {
+    "file": {
+      "contentType": "text/csv",
+      "encoding": "base64",
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "inline": "RGF0ZSxBbW91bnQ=",
+      "s3": null
+    }
+  },
+  "audit": {
+    "payloadSha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+  }
+}

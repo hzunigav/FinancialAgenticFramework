@@ -1,0 +1,102 @@
+id: xero
+description: Xero bank-statement CSV upload (BankRecon). One Practice login fronts all client orgs; the agent switches org by short-code and imports a statement.
+baseUrl: https://go.xero.com/
+
+# Bank-statement-only portal. Declaring the flow keeps the worker from
+# registering the payroll capture/submit @SqsListeners (whose queues are not
+# provisioned for a PORTAL_ID=xero worker) — only BankStatementTaskListener,
+# gated on agent.worker.bankstatement-enabled, registers. Same protection as
+# the submit-only INS portal (PortalFlowsEnvironmentPostProcessor).
+flows:
+  - bankstatement
+
+# Shared scope: one Xero Practice login ("NeoProc") has access to every client
+# org. The per-upload org selector rides on the envelope as task.xeroShortCode
+# (e.g. "!0X0!!"); credentials do NOT vary per org. Secret path:
+# financeagent/shared/portals/xero/{username,password,totpSeed}.
+credentialScope: shared
+
+# One session, gentle pacing. Xero login is Akamai-protected, so logins must be
+# rare (we lean on session reuse, below); the per-file import itself is light.
+rateLimit:
+  maxConcurrent: 1
+  minIntervalSeconds: 3.0
+
+# Session reuse is the PRIMARY auth path (Phase-0 confirmed: a persisted
+# storageState incl. the "Trust this device" cookie silently re-authenticates
+# through Xero's OIDC form_post flow). ttlMinutes bounds how long we reuse a
+# saved session before re-validating; set well under Xero's trust-device cookie
+# lifetime (~30 days — CONFIRM) so we re-seed before it lapses server-side.
+# Persisted via the AWS Secrets-Manager+KMS SessionStore in prod so it survives
+# Fargate scale-to-zero. TODO(phase2): wire the AWS SessionStore + verify the
+# reuse path waits for the OIDC redirect to settle (see XeroLoginSpike).
+session:
+  ttlMinutes: 20160   # 14 days
+
+# Runtime bindings the listener (or CLI) supplies:
+#   credentials.username / credentials.password / credentials.totpSeed
+#       — the shared Xero login + its base32 TOTP seed (Secrets Manager).
+#   task.xeroShortCode   — REQUIRED org selector; the adapter deep-links
+#                          go.xero.com/app/<shortCode>/manage-bank-accounts.
+#   task.bankAccountNumber (+ iban/currency) — selects the account.
+#   params.source.* / file bindings — the CSV to import (set by the run path).
+
+# --- AUTH STEPS — PROVISIONAL, NOT YET VALIDATED ---------------------------
+# These run ONLY when no reusable session exists (re-seed path). Phase-0
+# captured the org-switcher / bank-accounts / import DOM but the login form
+# itself was completed by hand, so the selectors below are best-guess and MUST
+# be validated against a real login-DOM capture before relying on headless
+# re-login. Navigating to go.xero.com/ while unauthenticated auto-redirects to
+# the login.xero.com OIDC form. Akamai also requires the stealth Chrome launch
+# (channel=chrome + automation flags off) — a run-path change still pending.
+authSteps:
+  - action: navigate
+    target: /
+
+  # TODO(login-dom-spike): confirm email/password field + submit selectors.
+  - action: fill
+    selector: 'input[name="username"]'
+    value: "${credentials.username}"
+
+  - action: fill
+    selector: 'input[name="password"]'
+    value: "${credentials.password}"
+    redact: true
+
+  - action: click
+    selector: 'button[type="submit"]'
+
+  # 2FA: compute the current RFC-6238 code from the stored base32 seed and type
+  # it. TODO(login-dom-spike): confirm the code field + Confirm button + the
+  # "Trust this device" checkbox selectors (checking it is what makes the saved
+  # session reusable, Phase-0).
+  - action: totp
+    selector: 'input[name="totp"]'
+    value: "${credentials.totpSeed}"
+    redact: true
+
+  - action: click
+    selector: 'input[type="checkbox"]'   # "Trust this device"
+
+  - action: click
+    selector: 'button[type="submit"]'
+
+# The import flow (org switch by short-code, account select, the 3-step
+# Upload->Import settings->Review wizard, duplicate handling, balance read-back)
+# is dynamic and lives in XeroBankStatementAdapter via Playwright, not as
+# declarative steps. Known anchors from Phase-0:
+#   file input : input[data-automationid="select-file-control--input"]
+#   stepper    : [data-automationid="manual-upload-wizard-stepper"]
+#   next        : [data-automationid="wizard-next-step-button"]
+steps: []
+
+scrape:
+  fields: []
+
+securityContext:
+  scrubHarFields:
+    - urlPattern: "**/login.xero.com/**"
+      bodyFields:
+        - password
+        - totp
+        - code

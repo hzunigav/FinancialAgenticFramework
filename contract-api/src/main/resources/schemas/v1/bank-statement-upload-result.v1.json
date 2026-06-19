@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoproc.com/financialagent/schemas/v1/bank-statement-upload-result.v1.json",
+  "title": "Bank Statement Upload Result (v1)",
+  "description": "Agent-worker -> Praxis. Reports the outcome of one Xero bank-statement upload, including per-check verification, reconciliation (row count / net movement / balances), rejected rows, all errors, and diagnostics for HITL troubleshooting. The `task` block echoes the request for correlation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["envelope", "task", "result", "audit"],
+  "properties": {
+    "envelope": { "$ref": "#/$defs/EnvelopeMeta" },
+    "task": { "$ref": "#/$defs/BankStatementTask" },
+    "encryption": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Encryption" }]
+    },
+    "result": {
+      "description": "Cleartext ResultBody object, OR a 'vault:vN:' ciphertext string if ever encrypted.",
+      "oneOf": [
+        { "type": "string", "pattern": "^vault:v\\d+:" },
+        { "$ref": "#/$defs/ResultBody" }
+      ]
+    },
+    "audit": { "$ref": "#/$defs/AuditBundle" }
+  },
+  "$defs": {
+    "EnvelopeMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["envelopeId", "businessKey", "firmId", "createdAt", "issuer"],
+      "properties": {
+        "envelopeId": { "type": "string", "format": "uuid" },
+        "businessKey": { "type": "string", "minLength": 1 },
+        "firmId": { "type": "integer", "minimum": 1 },
+        "locale": { "type": "string", "minLength": 2 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "issuer": { "type": "string", "minLength": 1 },
+        "issuerRunId": { "type": ["string", "null"] }
+      }
+    },
+    "BankStatementTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "operation",
+        "targetSystem",
+        "xeroShortCode",
+        "bankAccountNumber",
+        "currency",
+        "periodStart",
+        "periodEnd",
+        "fileName",
+        "expectedRowCount",
+        "expectedNetMovement"
+      ],
+      "properties": {
+        "type": { "const": "bank-statement-upload" },
+        "operation": { "const": "import" },
+        "targetSystem": { "enum": ["XERO", "ZOHO_BOOKS"] },
+        "xeroOrgUuid": { "type": "string", "format": "uuid" },
+        "xeroOrgName": { "type": ["string", "null"] },
+        "xeroShortCode": { "type": ["string", "null"], "minLength": 1 },
+        "clientName": { "type": ["string", "null"] },
+        "bankName": { "type": ["string", "null"] },
+        "bankAccountNumber": { "type": "string", "minLength": 1 },
+        "iban": { "type": ["string", "null"] },
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "periodStart": { "type": "string", "format": "date" },
+        "periodEnd": { "type": "string", "format": "date" },
+        "fileName": { "type": "string", "minLength": 1 },
+        "expectedRowCount": { "type": "integer", "minimum": 0 },
+        "expectedNetMovement": { "type": "string", "pattern": "^-?\\d+(\\.\\d+)?$" },
+        "expectedOpeningBalance": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d+)?$" },
+        "expectedClosingBalance": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d+)?$" }
+      }
+    },
+    "Encryption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme", "keyName", "keyVersion", "ciphertextField"],
+      "properties": {
+        "scheme": { "const": "kms-envelope-v1" },
+        "keyName": { "type": "string", "minLength": 1 },
+        "keyVersion": { "type": "integer", "minimum": 1 },
+        "ciphertextField": { "enum": ["result"] }
+      }
+    },
+    "ResultBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reconciliation", "checks"],
+      "properties": {
+        "status": {
+          "enum": ["SUCCESS", "PARTIAL", "MISMATCH", "FAILED"],
+          "description": "SUCCESS=imported & every applicable check passed; PARTIAL=imported but incomplete (count short / rejected rows); MISMATCH=imported but a reconciliation check failed (balances / net movement / duplicate); FAILED=nothing imported (access / account / file)."
+        },
+        "errorCategory": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/ErrorCategory" }],
+          "description": "Primary / most-severe category. Required (non-null) whenever status != SUCCESS."
+        },
+        "errorMessage": {
+          "type": ["string", "null"],
+          "description": "One-line human-readable summary for the HITL task."
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "true only for transient failures (XERO_UNREACHABLE / SESSION_EXPIRED / TIMEOUT); false for anything needing a human."
+        },
+        "failedStage": {
+          "oneOf": [
+            { "type": "null" },
+            { "enum": ["AUTH", "ORG_SELECT", "ACCOUNT_SELECT", "UPLOAD", "VERIFY"] }
+          ]
+        },
+        "xeroOrgMatched": { "type": ["string", "null"] },
+        "bankAccountMatched": { "type": ["string", "null"] },
+        "reconciliation": { "$ref": "#/$defs/Reconciliation" },
+        "checks": {
+          "type": "array",
+          "description": "One entry per verification performed. Skipped checks (e.g. balances when expected was null) are omitted.",
+          "items": { "$ref": "#/$defs/Check" }
+        },
+        "rejectedRows": {
+          "type": "array",
+          "description": "Rows Xero did not import. Empty/absent when all rows imported.",
+          "items": { "$ref": "#/$defs/RejectedRow" }
+        },
+        "errors": {
+          "type": "array",
+          "description": "Every problem found (>= 1 when status != SUCCESS). errorCategory is the primary of these.",
+          "items": { "$ref": "#/$defs/ErrorItem" }
+        },
+        "diagnostics": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Diagnostics" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "SUCCESS" } } },
+          "then": { "properties": { "errorCategory": { "type": "null" } } },
+          "else": {
+            "required": ["errorCategory"],
+            "properties": { "errorCategory": { "$ref": "#/$defs/ErrorCategory" } }
+          }
+        }
+      ]
+    },
+    "Reconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "expectedRowCount", "importedLineCount"],
+      "properties": {
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "expectedRowCount": { "type": "integer", "minimum": 0 },
+        "importedLineCount": { "type": "integer", "minimum": 0 },
+        "expectedNetMovement": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d+)?$" },
+        "observedNetMovement": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d+)?$" },
+        "expectedOpeningBalance": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d+)?$" },
+        "observedOpeningBalance": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d+)?$" },
+        "expectedClosingBalance": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d+)?$" },
+        "observedClosingBalance": { "type": ["string", "null"], "pattern": "^-?\\d+(\\.\\d+)?$" },
+        "statementDateRange": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["from", "to"],
+              "properties": {
+                "from": { "type": "string", "format": "date" },
+                "to": { "type": "string", "format": "date" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "Check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "passed"],
+      "properties": {
+        "name": {
+          "enum": [
+            "ORG_SELECTED",
+            "ACCOUNT_SELECTED",
+            "FILE_ACCEPTED",
+            "NO_DUPLICATE",
+            "ROW_COUNT",
+            "NET_MOVEMENT",
+            "OPENING_BALANCE",
+            "CLOSING_BALANCE"
+          ]
+        },
+        "passed": { "type": "boolean" },
+        "expected": { "type": ["string", "null"] },
+        "observed": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
+    "RejectedRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rowNumber", "reason"],
+      "properties": {
+        "rowNumber": { "type": "integer", "minimum": 1 },
+        "rawLine": { "type": ["string", "null"] },
+        "reason": { "type": "string" }
+      }
+    },
+    "ErrorItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "message"],
+      "properties": {
+        "category": { "$ref": "#/$defs/ErrorCategory" },
+        "message": { "type": "string" },
+        "severity": { "enum": ["ERROR", "WARNING"] }
+      }
+    },
+    "Diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workerRunId": { "type": ["string", "null"] },
+        "attemptCount": { "type": ["integer", "null"], "minimum": 0 },
+        "durationMs": { "type": ["integer", "null"], "minimum": 0 },
+        "xeroUrl": { "type": ["string", "null"] },
+        "xeroMessage": { "type": ["string", "null"] },
+        "screenshotRefs": { "type": "array", "items": { "type": "string" } },
+        "logRef": { "type": ["string", "null"] }
+      }
+    },
+    "ErrorCategory": {
+      "enum": [
+        "XERO_UNREACHABLE",
+        "LOGIN_FAILED",
+        "MFA_REQUIRED",
+        "SESSION_EXPIRED",
+        "ORG_NOT_FOUND",
+        "ACCOUNT_NOT_FOUND",
+        "EMPTY_FILE",
+        "FILE_CORRUPT",
+        "UNSUPPORTED_FORMAT",
+        "COLUMN_MAPPING_FAILED",
+        "UPLOAD_REJECTED",
+        "DUPLICATE_STATEMENT",
+        "PARTIAL_IMPORT",
+        "COUNT_MISMATCH",
+        "NET_MOVEMENT_MISMATCH",
+        "OPENING_BALANCE_MISMATCH",
+        "CLOSING_BALANCE_MISMATCH",
+        "TIMEOUT",
+        "UNKNOWN"
+      ]
+    },
+    "AuditBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payloadSha256"],
+      "properties": {
+        "payloadSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

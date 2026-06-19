@@ -1,0 +1,40 @@
+{
+  "envelope": {
+    "envelopeId": "8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d",
+    "businessKey": "NEOPROCSOCIEDADANONIMA::920336542::USD::20260601-20260617",
+    "firmId": 1,
+    "locale": "es",
+    "createdAt": "2026-06-18T05:03:12Z",
+    "issuer": "financeagent-worker/xero",
+    "issuerRunId": "worker-run-44ab12"
+  },
+  "task": {
+    "type": "bank-statement-upload",
+    "operation": "import",
+    "targetSystem": "XERO",
+    "xeroOrgUuid": "e1f2a3b4-c5d6-4789-9abc-def012345678",
+    "xeroShortCode": "!0X0!!",
+    "bankAccountNumber": "920336542",
+    "currency": "USD",
+    "periodStart": "2026-06-01",
+    "periodEnd": "2026-06-17",
+    "fileName": "NEOPROCSOCIEDADANONIMA_920336542_USD_2026060120260617.csv",
+    "expectedRowCount": 2,
+    "expectedNetMovement": "1279.50"
+  },
+  "encryption": null,
+  "result": {
+    "status": "SUCCESS",
+    "errorCategory": "CLOSING_BALANCE_MISMATCH",
+    "retryable": false,
+    "reconciliation": {
+      "currency": "USD",
+      "expectedRowCount": 2,
+      "importedLineCount": 2
+    },
+    "checks": []
+  },
+  "audit": {
+    "payloadSha256": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+  }
+}

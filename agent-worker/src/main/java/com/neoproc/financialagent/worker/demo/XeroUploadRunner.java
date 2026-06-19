@@ -132,9 +132,14 @@ public final class XeroUploadRunner {
 
     private static LocalDate parseDate(String raw) {
         try {
-            return LocalDate.parse(raw);
-        } catch (RuntimeException e) {
-            return null;   // non-ISO date; period falls back to props/today
+            return LocalDate.parse(raw);   // ISO yyyy-MM-dd
+        } catch (RuntimeException notIso) {
+            try {
+                // Xero template uses M/d/yyyy (e.g. 6/1/2026).
+                return LocalDate.parse(raw, java.time.format.DateTimeFormatter.ofPattern("M/d/yyyy"));
+            } catch (RuntimeException e) {
+                return null;   // unknown format; period falls back to props/today
+            }
         }
     }
 

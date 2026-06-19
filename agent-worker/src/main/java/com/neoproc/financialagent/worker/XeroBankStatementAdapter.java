@@ -57,7 +57,6 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     private static final String BANK_WIDGET = "[data-automationid='bankWidget']";
     private static final String FILE_INPUT = "input[data-automationid='select-file-control--input']";
     private static final String WIZARD_NEXT = "[data-automationid='wizard-next-step-button']";
-    private static final String DASHBOARD_URL = "https://go.xero.com/Dashboard/";
     private static final Pattern REVIEW_COUNT =
             Pattern.compile("(\\d+)\\s+transaction\\(s\\)\\s+will be imported");
     // Post-import banner on the BankRec page (confirmed Phase-2d):
@@ -118,25 +117,19 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     // --- UI stages ----------------------------------------------------------
 
     private Locator switchOrgAndSelectAccount(Page page, BankStatementTask task, RunManifest manifest) {
-        // Auth is a SEPARATE, reusable flow (the seeding step persists a
-        // logged-in session to the session store) — we do NOT log in here.
-        // Step 1: confirm the reused session is live by landing on a neutral
-        // authed page first (login before switching). A valid session
-        // silent-auths through Xero's OIDC; a stale one bounces to the login
-        // host → SESSION_EXPIRED, so the login flow can refresh it.
-        page.navigate(DASHBOARD_URL);
+        // Login already happened in the SEPARATE auth phase; here we only switch
+        // org. Navigate to the target org's bank accounts by short-code (Phase-0:
+        // the UI selects org by short-code, not the tenant UUID), letting the
+        // brief OIDC session-check settle off the login host first.
+        String orgUrl = "https://go.xero.com/app/" + task.xeroShortCode() + "/manage-bank-accounts";
+        page.navigate(orgUrl);
         try {
             page.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
                     new Page.WaitForURLOptions().setTimeout(45_000));
         } catch (RuntimeException stuckOnLogin) {
             throw new StageFailure(FailedStage.AUTH, ErrorCategory.SESSION_EXPIRED,
-                    "Landed on the Xero login — the reused session is stale. Refresh it via the login flow (re-seed).");
+                    "Bounced to the Xero login during org switch — auth/session issue");
         }
-
-        // Step 2: now authenticated, switch to the target org's bank accounts
-        // by short-code (Phase-0: the UI selects org by short-code, not UUID).
-        String orgUrl = "https://go.xero.com/app/" + task.xeroShortCode() + "/manage-bank-accounts";
-        page.navigate(orgUrl);
         try {
             page.waitForSelector(BANK_WIDGET, new Page.WaitForSelectorOptions().setTimeout(30_000));
         } catch (RuntimeException e) {

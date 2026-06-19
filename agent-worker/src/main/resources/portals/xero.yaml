@@ -49,37 +49,31 @@ session:
 # re-login. Navigating to go.xero.com/ while unauthenticated auto-redirects to
 # the login.xero.com OIDC form. Akamai also requires the stealth Chrome launch
 # (channel=chrome + automation flags off) — a run-path change still pending.
+# Auth phase — SEPARATE from the upload process (which lives in
+# XeroBankStatementAdapter). Xero requires an email+password login EVERY run;
+# the persisted trust-device cookie (loaded into the context from the session
+# store) only skips 2FA. Selectors confirmed from the Phase-2e login-form
+# capture (#xl-form-*). The run path waits for the redirect to leave
+# login.xero.com before saving the refreshed session.
 authSteps:
   - action: navigate
-    target: /
+    target: /                       # go.xero.com -> redirects to the login form
 
-  # TODO(login-dom-spike): confirm email/password field + submit selectors.
   - action: fill
-    selector: 'input[name="username"]'
+    selector: "[data-automationid='Username--input']"
     value: "${credentials.username}"
 
   - action: fill
-    selector: 'input[name="password"]'
+    selector: "[data-automationid='PassWord--input']"
     value: "${credentials.password}"
     redact: true
 
   - action: click
-    selector: 'button[type="submit"]'
+    selector: "[data-automationid='LoginSubmit--button']"
 
-  # 2FA: compute the current RFC-6238 code from the stored base32 seed and type
-  # it. TODO(login-dom-spike): confirm the code field + Confirm button + the
-  # "Trust this device" checkbox selectors (checking it is what makes the saved
-  # session reusable, Phase-0).
-  - action: totp
-    selector: 'input[name="totp"]'
-    value: "${credentials.totpSeed}"
-    redact: true
-
-  - action: click
-    selector: 'input[type="checkbox"]'   # "Trust this device"
-
-  - action: click
-    selector: 'button[type="submit"]'
+  # 2FA is skipped by the trust-device cookie. If that cookie is ever absent a
+  # 2FA prompt appears after Log in; the future fallback is a conditional totp
+  # step (credentials.totpSeed) once that DOM is captured.
 
 # The import flow (org switch by short-code, account select, the 3-step
 # Upload->Import settings->Review wizard, duplicate handling, balance read-back)

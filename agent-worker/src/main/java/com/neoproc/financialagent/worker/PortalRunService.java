@@ -383,18 +383,19 @@ public class PortalRunService {
                     page, bindings, listBindings, manifest::step,
                     stdinOperatorInput(), descriptor.isShadowMode());
 
-            // With a reused session, skip the auth-service navigate: the Xero
-            // adapter does a SINGLE navigation to the org URL itself. A double
-            // navigate (baseUrl here, then the org URL in the adapter) races
-            // Xero's OIDC silent-auth and drops to the login form. Cold start
-            // (no session) still runs authSteps via the auth service.
-            if (savedSession.isPresent()) {
-                manifest.portal.sessionReused = true;
-                manifest.step("auth-skipped", "session-reused; adapter navigates to the org directly");
-            } else {
-                manifest.portal.sessionReused = PortalAuthService.login(
-                        engine, descriptor, context, page, manifest);
-            }
+            // Auth phase — SEPARATE from the upload process the adapter runs
+            // below. Xero requires an email+password login EVERY run; the
+            // trust-device cookie loaded into the context only skips 2FA. So
+            // always run the descriptor's login authSteps, wait for the redirect
+            // to leave the login host, then refresh the saved session.
+            // (PortalAuthService's reuse-skip semantics don't fit Xero, which
+            // always re-prompts for login.)
+            manifest.portal.sessionReused = savedSession.isPresent();   // trust cookie reused (skips 2FA)
+            engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());
+            page.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
+                    new Page.WaitForURLOptions().setTimeout(60_000));
+            PortalAuthService.saveSessionIfEnabled(SessionStores.defaultStore(), descriptor, context);
+            manifest.step("auth", "login authSteps completed for portal=" + descriptor.id());
 
             adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);
             engine.runSteps(descriptor.baseUrl(), descriptor.steps());

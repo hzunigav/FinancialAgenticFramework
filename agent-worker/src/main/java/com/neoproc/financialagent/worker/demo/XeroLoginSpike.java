@@ -151,10 +151,18 @@ public final class XeroLoginSpike {
             Page page = context.newPage();
             page.navigate(startUrl);
 
+            // Capture the login-form DOM BEFORE you log in — these are the
+            // email/password/Log-in selectors the adapter needs (Xero always
+            // prompts for email+password; the trust-device cookie only skips 2FA).
+            try {
+                page.waitForSelector("input", new Page.WaitForSelectorOptions().setTimeout(15_000));
+            } catch (RuntimeException ignore) { /* capture whatever rendered */ }
+            capture(page, outDir, "00-login-form");
+
             System.out.println();
             System.out.println("=== Xero Phase-0 spike ===");
             System.out.println("A browser window is open at: " + startUrl);
-            prompt(stdin, "Log in + complete 2FA manually, wait for the dashboard, then press Enter...");
+            prompt(stdin, "Log in + complete 2FA manually (tick 'Trust this device'), wait for the dashboard, then press Enter...");
 
             // 1) Session-survival probe ----------------------------------------
             String storageState = context.storageState();

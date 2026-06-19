@@ -152,19 +152,57 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     }
 
     private void openImportWizard(Locator accountWidget, Page page, RunManifest manifest) {
-        // For an account WITH transactions, "Import a bank statement" lives in
-        // the widget's overflow menu (hidden) — clicking the text times out. The
-        // link's href is in the DOM regardless, so read it and navigate directly
-        // (…/manual-transaction-upload/<bankAccountId>).
-        Locator importLink = accountWidget.locator("a[href*='manual-transaction-upload']");
-        if (importLink.count() == 0) {
-            throw new StageFailure(FailedStage.UPLOAD, ErrorCategory.UNKNOWN,
-                    "No 'Import a bank statement' link found for account widget");
+        // Two widget shapes (Phase-2e live finding):
+        //  - Account WITHOUT transactions renders the import action inline as an
+        //    <a href*='manual-transaction-upload'> ("Import a bank statement").
+        //  - Account WITH transactions hides it behind the widget's overflow
+        //    "Manage menu" popover (button data-automationid='managedMenuButton',
+        //    aria-controls='manage-menu-popover-<accountId>'); the import link is
+        //    only rendered once that popover is opened. The inline locator finds
+        //    nothing for these accounts, which is why the direct-href attempt
+        //    failed. Open the menu, then follow the link from the popover.
+        Locator inline = accountWidget.locator("a[href*='manual-transaction-upload']");
+        if (inline.count() > 0) {
+            navigateImport(page, inline.first(), manifest);
+            return;
         }
-        String href = importLink.first().getAttribute("href");
-        String url = href.startsWith("http") ? href : "https://go.xero.com" + href;
-        page.navigate(url);
-        manifest.step("xero", "opened import wizard " + href);
+        Locator menuButton = accountWidget.locator("[data-automationid='managedMenuButton']");
+        if (menuButton.count() == 0) {
+            throw new StageFailure(FailedStage.UPLOAD, ErrorCategory.UNKNOWN,
+                    "No 'Import a bank statement' affordance (inline link or overflow menu) on the account widget");
+        }
+        String popoverId = menuButton.first().getAttribute("aria-controls");
+        menuButton.first().click();
+        Locator scope = (popoverId != null && !popoverId.isBlank())
+                ? page.locator("#" + popoverId)
+                : page.locator("body");
+        Locator importLink = scope.locator("a[href*='manual-transaction-upload']");
+        try {
+            importLink.first().waitFor(new Locator.WaitForOptions().setTimeout(10_000));
+        } catch (RuntimeException notAnchor) {
+            // Fall back to matching the menu item by its visible text.
+            importLink = scope.getByText("Import a bank statement");
+            try {
+                importLink.first().waitFor(new Locator.WaitForOptions().setTimeout(5_000));
+            } catch (RuntimeException stillMissing) {
+                throw new StageFailure(FailedStage.UPLOAD, ErrorCategory.UNKNOWN,
+                        "Overflow menu opened but no 'Import a bank statement' item appeared");
+            }
+        }
+        navigateImport(page, importLink.first(), manifest);
+    }
+
+    /** Follow an import affordance — navigate its href if it has one, else click it. */
+    private void navigateImport(Page page, Locator link, RunManifest manifest) {
+        String href = link.getAttribute("href");
+        if (href != null && !href.isBlank()) {
+            String url = href.startsWith("http") ? href : "https://go.xero.com" + href;
+            page.navigate(url);
+            manifest.step("xero", "opened import wizard " + href);
+        } else {
+            link.click();
+            manifest.step("xero", "opened import wizard via menu click");
+        }
     }
 
     private void uploadCsv(Page page, Path csv, RunManifest manifest) {

@@ -383,8 +383,18 @@ public class PortalRunService {
                     page, bindings, listBindings, manifest::step,
                     stdinOperatorInput(), descriptor.isShadowMode());
 
-            manifest.portal.sessionReused = PortalAuthService.login(
-                    engine, descriptor, context, page, manifest);
+            // With a reused session, skip the auth-service navigate: the Xero
+            // adapter does a SINGLE navigation to the org URL itself. A double
+            // navigate (baseUrl here, then the org URL in the adapter) races
+            // Xero's OIDC silent-auth and drops to the login form. Cold start
+            // (no session) still runs authSteps via the auth service.
+            if (savedSession.isPresent()) {
+                manifest.portal.sessionReused = true;
+                manifest.step("auth-skipped", "session-reused; adapter navigates to the org directly");
+            } else {
+                manifest.portal.sessionReused = PortalAuthService.login(
+                        engine, descriptor, context, page, manifest);
+            }
 
             adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);
             engine.runSteps(descriptor.baseUrl(), descriptor.steps());

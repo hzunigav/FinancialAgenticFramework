@@ -62,6 +62,20 @@ public final class XeroLoginSpike {
             "Accounting > Bank accounts (the account list)",
             "the bank account's 'Import a Statement' screen");
 
+    /**
+     * Import-wizard capture (phase-2d) — the DOM the adapter needs to drive an
+     * upload + read back results. Reuses the saved session (no re-login). Drive
+     * an actual import of the sample CSV through the wizard, capturing each step.
+     */
+    private static final List<String> IMPORT_SCREENS = List.of(
+            "Accounting > Bank accounts for the TARGET org (account list, account numbers visible)",
+            "the account's Import a Statement - STEP 1 Upload (before choosing a file)",
+            "STEP 1 after choosing the sample CSV (file selected, before Next)",
+            "STEP 2 Import settings (date format / column mapping step)",
+            "STEP 3 Review (shows the line count that will be imported)",
+            "the post-import account page (balance in Xero + statement balance, imported count)",
+            "a duplicate/overlap warning IF Xero shows one (else just press Enter to skip)");
+
     public static void main(String[] args) throws IOException {
         Path outDir = Path.of(args.length > 0 ? args[0] : "xero-spike");
         Files.createDirectories(outDir);
@@ -101,6 +115,35 @@ public final class XeroLoginSpike {
                         reuseFile, v.url(), v.loggedIn());
                 System.out.println("See " + outDir.resolve("02-reused-session.png")
                         + " for the settled page.");
+                return;
+            }
+
+            // Import-wizard capture mode: reuse a saved session (no re-login) and
+            // guide an actual import of the sample CSV, capturing each wizard step.
+            //   -Dxero.sessionFile=xero-spike/storageState.json
+            String sessionFile = System.getProperty("xero.sessionFile");
+            if (sessionFile != null && !sessionFile.isBlank()) {
+                BrowserContext ctx = newStealthContext(browser, Files.readString(Path.of(sessionFile)));
+                Page wpage = ctx.newPage();
+                wpage.navigate(dashboardUrl);
+                try {
+                    wpage.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
+                            new Page.WaitForURLOptions().setTimeout(20_000));
+                } catch (RuntimeException ignore) { /* report wherever it settled */ }
+                wpage.waitForLoadState(LoadState.NETWORKIDLE);
+
+                System.out.println();
+                System.out.println("=== Xero import-wizard capture (reusing session) ===");
+                System.out.println("Landed at: " + wpage.url());
+                System.out.println("Upload this sample CSV when prompted: docs/BankRecon/sample/xero-statement-sample.csv");
+                for (int i = 0; i < IMPORT_SCREENS.size(); i++) {
+                    prompt(stdin, "Navigate to: " + IMPORT_SCREENS.get(i) + " — then Enter to capture...");
+                    capture(wpage, outDir, String.format("imp%02d-%s", i + 1,
+                            IMPORT_SCREENS.get(i).replaceAll("[^a-zA-Z0-9]+", "-")));
+                }
+                System.out.println();
+                System.out.println("Done. Import-wizard DOM written to: " + outDir.toAbsolutePath());
+                System.out.println("Send back the imp*.html snapshots for adapter selector work.");
                 return;
             }
 

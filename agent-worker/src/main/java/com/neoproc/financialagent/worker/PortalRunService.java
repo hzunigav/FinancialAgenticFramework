@@ -75,6 +75,11 @@ public class PortalRunService {
     private static final DateTimeFormatter RUN_ID_FMT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss").withZone(ZoneOffset.UTC);
 
+    // Login-form tell on login.xero.com — present only when Xero actually
+    // prompts (cold start / expired session); absent on a warm session reuse.
+    // Mirrors xero.yaml's authSteps Username selector.
+    private static final String XERO_USERNAME_INPUT = "[data-automationid='Username--input']";
+
     private final Path artifactsRoot;
     private final S3ArtifactStore artifactStore;
 
@@ -384,18 +389,36 @@ public class PortalRunService {
                     stdinOperatorInput(), descriptor.isShadowMode());
 
             // Auth phase — SEPARATE from the upload process the adapter runs
-            // below. Xero requires an email+password login EVERY run; the
-            // trust-device cookie loaded into the context only skips 2FA. So
-            // always run the descriptor's login authSteps, wait for the redirect
-            // to leave the login host, then refresh the saved session.
-            // (PortalAuthService's reuse-skip semantics don't fit Xero, which
-            // always re-prompts for login.)
-            manifest.portal.sessionReused = savedSession.isPresent();   // trust cookie reused (skips 2FA)
-            engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());
-            page.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
-                    new Page.WaitForURLOptions().setTimeout(60_000));
+            // below. Xero MAY prompt for an email+password login (cold start, or
+            // the session cookie has expired) or may silently re-authenticate
+            // from the reused cookies (warm window). Navigate to the app first,
+            // then BRANCH on whether the login form actually appeared:
+            //   - form shown  -> run the login authSteps; the trust-device
+            //                     cookie still skips 2FA.
+            //   - form absent -> the reused session carried us straight into the
+            //                     app; skip login.
+            // Unconditionally filling the login form breaks the warm-session case
+            // (no form is rendered -> fill times out, run parks on the homepage)
+            // — observed on the first warm re-run.
+            page.navigate(descriptor.baseUrl());
+            boolean loginFormShown;
+            try {
+                page.waitForSelector(XERO_USERNAME_INPUT,
+                        new Page.WaitForSelectorOptions().setTimeout(15_000));
+                loginFormShown = true;
+            } catch (RuntimeException alreadyAuthenticated) {
+                loginFormShown = false;
+            }
+            if (loginFormShown) {
+                engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());
+                page.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
+                        new Page.WaitForURLOptions().setTimeout(60_000));
+                manifest.step("auth", "logged in via authSteps for portal=" + descriptor.id());
+            } else {
+                manifest.step("auth", "session reuse — already authenticated, login skipped");
+            }
+            manifest.portal.sessionReused = !loginFormShown;
             PortalAuthService.saveSessionIfEnabled(SessionStores.defaultStore(), descriptor, context);
-            manifest.step("auth", "login authSteps completed for portal=" + descriptor.id());
 
             adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);
             engine.runSteps(descriptor.baseUrl(), descriptor.steps());

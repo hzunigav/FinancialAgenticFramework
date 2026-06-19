@@ -368,7 +368,7 @@ public class PortalRunService {
         try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
              Playwright playwright = Playwright.create();
              Browser browser = playwright.chromium().launch(xeroLaunchOptions());
-             BrowserContext context = browser.newContext(newContextOptions(runDir, savedSession))) {
+             BrowserContext context = browser.newContext(xeroContextOptions(runDir, savedSession))) {
 
             // Akamai bot-manager evasion — mask the most common automation tell
             // before any page script runs (Phase-0).
@@ -597,6 +597,17 @@ public class PortalRunService {
                 .setRecordHarContent(HarContentPolicy.EMBED);
         savedSession.ifPresent(opts::setStorageState);
         return opts;
+    }
+
+    // Xero/Akamai treats a bare context as suspicious and bounces it to the
+    // login form even with a valid reused session (seen on the first live run).
+    // Match the Phase-0 spike's context — realistic locale/timezone/viewport —
+    // so the reused session silently re-authenticates.
+    private static Browser.NewContextOptions xeroContextOptions(Path runDir, Optional<String> savedSession) {
+        return newContextOptions(runDir, savedSession)
+                .setLocale("en-US")
+                .setTimezoneId("America/Costa_Rica")
+                .setViewportSize(1366, 768);
     }
 
     private static String sha256Hex(Path path) throws IOException {

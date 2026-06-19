@@ -120,8 +120,19 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         // Deterministic org switch by short-code (Phase-0: UI uses short-code, not tenant UUID).
         String url = "https://go.xero.com/app/" + task.xeroShortCode() + "/manage-bank-accounts";
         page.navigate(url);
+        // Reused session: Xero bounces through the OIDC silent-auth
+        // (login.xero.com/identity/...) before landing in the app. Wait for the
+        // redirect chain to LEAVE the identity host first — otherwise we race
+        // onto the transient login redirect and bail (first live-run lesson).
         try {
-            page.waitForSelector(BANK_WIDGET);
+            page.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
+                    new Page.WaitForURLOptions().setTimeout(45_000));
+        } catch (RuntimeException stuckOnLogin) {
+            throw new StageFailure(FailedStage.AUTH, ErrorCategory.SESSION_EXPIRED,
+                    "Reused session did not silently re-authenticate (stuck on the Xero login) — re-seed the session");
+        }
+        try {
+            page.waitForSelector(BANK_WIDGET, new Page.WaitForSelectorOptions().setTimeout(30_000));
         } catch (RuntimeException e) {
             throw new StageFailure(FailedStage.ORG_SELECT, ErrorCategory.ORG_NOT_FOUND,
                     "Org short-code " + task.xeroShortCode() + " did not load a bank-accounts page");

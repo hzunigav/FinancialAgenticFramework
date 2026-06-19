@@ -1,7 +1,7 @@
 package com.neoproc.financialagent.worker;
 
-import com.neoproc.financialagent.common.session.LocalEncryptedSessionStore;
 import com.neoproc.financialagent.common.session.SessionStore;
+import com.neoproc.financialagent.common.session.SessionStores;
 import com.neoproc.financialagent.worker.portal.PortalDescriptor;
 import com.neoproc.financialagent.worker.portal.PortalEngine;
 import com.microsoft.playwright.BrowserContext;
@@ -39,7 +39,7 @@ final class PortalAuthService {
                          BrowserContext context,
                          Page page,
                          RunManifest manifest) {
-        SessionStore sessionStore = new LocalEncryptedSessionStore();
+        SessionStore sessionStore = SessionStores.defaultStore();
         Optional<String> savedSession = loadSavedSession(sessionStore, descriptor);
 
         if (savedSession.isEmpty()) {

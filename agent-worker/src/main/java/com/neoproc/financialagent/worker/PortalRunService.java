@@ -5,7 +5,7 @@ import com.neoproc.financialagent.common.credentials.CredentialsProvider;
 import com.neoproc.financialagent.common.credentials.LocalFileCredentialsProvider;
 import com.neoproc.financialagent.common.credentials.PortalCredentials;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
-import com.neoproc.financialagent.common.session.LocalEncryptedSessionStore;
+import com.neoproc.financialagent.common.session.SessionStores;
 import com.neoproc.financialagent.contract.bankstatement.BankStatementUploadRequest;
 import com.neoproc.financialagent.contract.bankstatement.FileBody;
 import com.neoproc.financialagent.contract.payroll.PayrollSubmitRequest;
@@ -160,7 +160,7 @@ public class PortalRunService {
         // loads it internally to decide whether to replay authSteps — the two
         // reads are cheap and idempotent).
         Optional<String> savedSession = PortalAuthService.loadSavedSession(
-                new LocalEncryptedSessionStore(), descriptor);
+                SessionStores.defaultStore(), descriptor);
 
         RunManifest manifest = new RunManifest();
         manifest.runId = runId;
@@ -344,7 +344,7 @@ public class PortalRunService {
         }
 
         Optional<String> savedSession = PortalAuthService.loadSavedSession(
-                new LocalEncryptedSessionStore(), descriptor);
+                SessionStores.defaultStore(), descriptor);
 
         RunManifest manifest = new RunManifest();
         manifest.runId = runId;

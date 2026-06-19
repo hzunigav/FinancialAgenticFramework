@@ -16,7 +16,6 @@ import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
 import com.neoproc.financialagent.worker.portal.PortalDescriptor;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
-import com.microsoft.playwright.options.AriaRole;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,11 +41,13 @@ import java.util.regex.Pattern;
  * does not depend on the live run.
  *
  * <p>Two Phase-2d findings baked in: (1) Xero's column-mapping step is
- * mandatory and remembered per org — we verify Date/Amount are mapped and
- * advance rather than driving the (automationid-less) dropdowns every run, the
- * mapping being a one-time onboarding step; (2) Xero silently suppresses
+ * mandatory, but Praxis guarantees the CSV matches Xero's expected structure
+ * and Xero remembers the mapping per org — so we accept the auto-mapping as-is
+ * and just advance (no dropdown manipulation, no assumption about Reference);
+ * our only concern is a successful import. (2) Xero silently suppresses
  * duplicates instead of prompting, so {@code NO_DUPLICATE} is inferred from the
- * imported vs expected counts, not caught from a dialog.
+ * imported vs expected counts, not caught from a dialog (pending a live
+ * duplicate-import capture to confirm the exact behavior).
  */
 final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
 
@@ -55,7 +56,6 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     private static final String BANK_WIDGET = "[data-automationid='bankWidget']";
     private static final String FILE_INPUT = "input[data-automationid='select-file-control--input']";
     private static final String WIZARD_NEXT = "[data-automationid='wizard-next-step-button']";
-    private static final String SKIP_HEADER_LABEL = "Don't import the first line";
     private static final Pattern REVIEW_COUNT =
             Pattern.compile("(\\d+)\\s+transaction\\(s\\)\\s+will be imported");
     // "Statement balance (Jun 9) 8,315.64" — VALIDATE-LIVE against the widget DOM.
@@ -66,7 +66,6 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     private boolean orgSelected;
     private boolean accountSelected;
     private boolean fileAccepted;
-    private boolean noColumnMappingPrompt = true;
     private Integer importedLineCount;
     private String observedOpeningBalance;   // statement balance before import
     private String observedClosingBalance;   // statement balance after import
@@ -151,21 +150,15 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     }
 
     private void advanceThroughImportSettings(Page page, RunManifest manifest) {
-        // Mapping is remembered per org (one-time onboarding). Ensure the
-        // header row is skipped, sanity-check the required fields look mapped,
-        // then advance. VALIDATE-LIVE: these controls have no data-automationid.
-        try {
-            Locator skip = page.getByText(SKIP_HEADER_LABEL);
-            if (skip.count() > 0) {
-                Locator checkbox = page.getByRole(AriaRole.CHECKBOX);
-                if (checkbox.count() > 0 && !checkbox.first().isChecked()) {
-                    checkbox.first().check();
-                }
-            }
-        } catch (RuntimeException ignore) {
-            // best-effort; the default is checked
-        }
-        manifest.step("xero", "import settings verified (mapping remembered per org)");
+        // Praxis guarantees the CSV matches Xero's expected structure, and Xero
+        // remembers the column mapping per org, so we accept the auto-mapping
+        // exactly as-is and just advance — no dropdown/checkbox manipulation,
+        // and no assumption about which columns map where. Our only concern is a
+        // successful import. (If Xero ever blocked here on a genuinely malformed
+        // file, the Review step would not render a count and surface as a
+        // VERIFY-stage failure.)
+        page.waitForSelector(WIZARD_NEXT);
+        manifest.step("xero", "import settings accepted as-is (CSV structure guaranteed upstream)");
         clickNext(page);   // Import settings -> Review
     }
 

@@ -351,7 +351,9 @@ public class PortalRunService {
         manifest.startedAt = Instant.now();
         manifest.portal.id = descriptor.id();
         manifest.portal.baseUrl = descriptor.baseUrl();
-        manifest.portal.username = credentials.require("username");
+        // Session-reuse runs need no credentials (auth via the persisted
+        // session), so don't hard-require a username here.
+        manifest.portal.username = credentials.values().getOrDefault("username", "(session-reuse)");
         manifest.portal.shadowMode = descriptor.isShadowMode();
         manifest.agentWorkerVersion = version(PortalRunService.class.getPackage().getImplementationVersion());
         manifest.playwrightVersion = version(Playwright.class.getPackage().getImplementationVersion());

@@ -49,9 +49,12 @@ final class PortalAuthService {
             return false;
         } else {
             page.navigate(descriptor.baseUrl());
-            page.waitForLoadState(LoadState.NETWORKIDLE);
+            // DOMCONTENTLOADED, not NETWORKIDLE: SPA portals (e.g. Xero) keep
+            // background traffic alive and never reach network-idle, which would
+            // hang this reuse path. Adapters wait on concrete selectors anyway.
+            page.waitForLoadState(LoadState.DOMCONTENTLOADED);
             manifest.step("auth-skipped",
-                    "session-reused; navigated to " + descriptor.baseUrl() + " (networkidle)");
+                    "session-reused; navigated to " + descriptor.baseUrl() + " (domcontentloaded)");
             return true;
         }
     }

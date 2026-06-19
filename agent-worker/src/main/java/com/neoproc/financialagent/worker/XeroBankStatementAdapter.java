@@ -99,7 +99,7 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         try {
             Locator widget = switchOrgAndSelectAccount(page, task, manifest);
             observedOpeningBalance = readStatementBalance(widget);
-            openImportWizard(widget, manifest);
+            openImportWizard(widget, page, manifest);
             uploadCsv(page, csv, manifest);
             advanceThroughImportSettings(page, manifest);
             completeImportAndReadBack(page, manifest);
@@ -151,10 +151,20 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         return widget.first();
     }
 
-    private void openImportWizard(Locator accountWidget, RunManifest manifest) {
-        // VALIDATE-LIVE: the "Import a bank statement" affordance within the widget.
-        accountWidget.getByText("Import a bank statement").first().click();
-        manifest.step("xero", "opened import wizard");
+    private void openImportWizard(Locator accountWidget, Page page, RunManifest manifest) {
+        // For an account WITH transactions, "Import a bank statement" lives in
+        // the widget's overflow menu (hidden) — clicking the text times out. The
+        // link's href is in the DOM regardless, so read it and navigate directly
+        // (…/manual-transaction-upload/<bankAccountId>).
+        Locator importLink = accountWidget.locator("a[href*='manual-transaction-upload']");
+        if (importLink.count() == 0) {
+            throw new StageFailure(FailedStage.UPLOAD, ErrorCategory.UNKNOWN,
+                    "No 'Import a bank statement' link found for account widget");
+        }
+        String href = importLink.first().getAttribute("href");
+        String url = href.startsWith("http") ? href : "https://go.xero.com" + href;
+        page.navigate(url);
+        manifest.step("xero", "opened import wizard " + href);
     }
 
     private void uploadCsv(Page page, Path csv, RunManifest manifest) {

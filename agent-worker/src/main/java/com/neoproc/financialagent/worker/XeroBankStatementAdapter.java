@@ -44,10 +44,11 @@ import java.util.regex.Pattern;
  * mandatory, but Praxis guarantees the CSV matches Xero's expected structure
  * and Xero remembers the mapping per org — so we accept the auto-mapping as-is
  * and just advance (no dropdown manipulation, no assumption about Reference);
- * our only concern is a successful import. (2) Xero silently suppresses
- * duplicates instead of prompting, so {@code NO_DUPLICATE} is inferred from the
- * imported vs expected counts, not caught from a dialog (pending a live
- * duplicate-import capture to confirm the exact behavior).
+ * our only concern is a successful import. (2) Xero does not prompt on
+ * duplicates — it imports, then reports them in a post-import banner on the
+ * BankRec page ("0 statement lines were imported. 29 were duplicates."). We
+ * parse that banner for the authoritative imported + duplicate counts and drive
+ * {@code NO_DUPLICATE}/{@code DUPLICATE_STATEMENT} from it.
  */
 final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
 
@@ -58,15 +59,25 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     private static final String WIZARD_NEXT = "[data-automationid='wizard-next-step-button']";
     private static final Pattern REVIEW_COUNT =
             Pattern.compile("(\\d+)\\s+transaction\\(s\\)\\s+will be imported");
-    // "Statement balance (Jun 9) 8,315.64" — VALIDATE-LIVE against the widget DOM.
+    // Post-import banner on the BankRec page (confirmed Phase-2d):
+    // "0 statement lines were imported. 29 were duplicates." — group 1 = actually
+    // imported, group 2 = duplicates (absent when there were none).
+    private static final Pattern IMPORT_BANNER = Pattern.compile(
+            "(\\d+)\\s+statement lines?\\s+were imported(?:\\.\\s*(\\d+)\\s+were duplicates)?",
+            Pattern.CASE_INSENSITIVE);
+    // Pre-import widget: "Statement balance (Jun 9) 8,315.64" (label then amount).
     private static final Pattern STATEMENT_BALANCE =
-            Pattern.compile("Statement balance[^\\d-]*(-?[\\d,]+\\.\\d{2})");
+            Pattern.compile("Statement balance[^\\d(-]*(\\(?-?[\\d,]+\\.\\d{2}\\)?)", Pattern.CASE_INSENSITIVE);
+    // Post-import BankRec page: "(1,823.49) Statement Balance" (amount then label).
+    private static final Pattern BANKREC_BALANCE =
+            Pattern.compile("(\\(?-?[\\d,]+\\.\\d{2}\\)?)\\s*Statement Balance", Pattern.CASE_INSENSITIVE);
 
     // --- observations collected during beforeSteps, consumed by buildUploadOutcome ---
     private boolean orgSelected;
     private boolean accountSelected;
     private boolean fileAccepted;
-    private Integer importedLineCount;
+    private Integer importedLineCount;   // actually imported (from the post-import banner)
+    private Integer duplicatesCount;     // lines Xero skipped as duplicates
     private String observedOpeningBalance;   // statement balance before import
     private String observedClosingBalance;   // statement balance after import
     private FailedStage failedStage;
@@ -91,9 +102,9 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
             openImportWizard(widget, manifest);
             uploadCsv(page, csv, manifest);
             advanceThroughImportSettings(page, manifest);
-            importedLineCount = readReviewCountAndComplete(page, manifest);
-            observedClosingBalance = readStatementBalanceAfterImport(page, task, manifest);
-            manifest.step("xero", "import complete importedLineCount=" + importedLineCount);
+            completeImportAndReadBack(page, manifest);
+            manifest.step("xero", "import complete imported=" + importedLineCount
+                    + " duplicates=" + duplicatesCount);
         } catch (StageFailure f) {
             failedStage = f.stage;
             errorCategory = f.category;
@@ -162,29 +173,68 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         clickNext(page);   // Import settings -> Review
     }
 
-    private Integer readReviewCountAndComplete(Page page, RunManifest manifest) {
+    /**
+     * Completes the import and reads Xero's authoritative post-import banner on
+     * the BankRec reconcile page (confirmed Phase-2d), e.g.
+     * "0 statement lines were imported. 29 were duplicates." — group 1 is the
+     * count actually imported, group 2 the duplicates Xero skipped. Also
+     * best-effort reads the post-import statement balance from that page. Waits
+     * on the BankRec URL, never {@code networkidle} (the Xero SPA never idles).
+     */
+    private void completeImportAndReadBack(Page page, RunManifest manifest) {
         page.waitForSelector(WIZARD_NEXT);
-        int count = parseReviewCount(page.locator("body").textContent());
-        manifest.step("xero", "review count=" + count + " — completing import");
+        int attempted = parseReviewCount(page.locator("body").textContent());
+        manifest.step("xero", "review attempted=" + attempted + " — completing import");
         clickNext(page);   // Review -> Complete import (same button on the last step)
-        page.waitForLoadState();
-        return count;
-    }
 
-    private String readStatementBalanceAfterImport(Page page, BankStatementTask task, RunManifest manifest) {
-        // Post-import lands on the Reconcile view; re-navigate to the accounts
-        // list to read the updated statement balance from the widget.
-        page.navigate("https://go.xero.com/app/" + task.xeroShortCode() + "/manage-bank-accounts");
-        page.waitForSelector(BANK_WIDGET);
-        Locator widget = page.locator(BANK_WIDGET)
-                .filter(new Locator.FilterOptions().setHasText(task.bankAccountNumber())).first();
-        String balance = readStatementBalance(widget);
-        manifest.step("xero", "post-import statement balance=" + balance);
-        return balance;
+        try {
+            page.waitForURL(u -> u.contains("/BankRec/"),
+                    new Page.WaitForURLOptions().setTimeout(30_000));
+        } catch (RuntimeException settleTimeout) {
+            // proceed with whatever rendered
+        }
+        String body = page.locator("body").textContent();
+
+        int[] banner = parseImportBanner(body);
+        if (banner != null) {
+            importedLineCount = banner[0];
+            duplicatesCount = banner[1];
+        } else {
+            // No banner — fall back to the Review "will be imported" count.
+            importedLineCount = attempted;
+            duplicatesCount = 0;
+        }
+        observedClosingBalance = parseBankRecBalance(body);
+        manifest.step("xero", "post-import imported=" + importedLineCount
+                + " duplicates=" + duplicatesCount + " stmtBalance=" + observedClosingBalance);
     }
 
     private void clickNext(Page page) {
         page.locator(WIZARD_NEXT).first().click();
+    }
+
+    /** {imported, duplicates} from the post-import banner, or null if not present. */
+    private static int[] parseImportBanner(String body) {
+        if (body == null) return null;
+        Matcher m = IMPORT_BANNER.matcher(body);
+        if (!m.find()) return null;
+        int imported = Integer.parseInt(m.group(1));
+        int duplicates = m.group(2) != null ? Integer.parseInt(m.group(2)) : 0;
+        return new int[]{imported, duplicates};
+    }
+
+    /** Best-effort statement balance from the BankRec page ("(1,823.49) Statement Balance"). */
+    private static String parseBankRecBalance(String body) {
+        if (body == null) return null;
+        Matcher m = BANKREC_BALANCE.matcher(body);
+        return m.find() ? normalizeMoney(m.group(1)) : null;
+    }
+
+    /** Normalises "(1,823.49)" -> "-1823.49", "8,315.64" -> "8315.64". */
+    private static String normalizeMoney(String raw) {
+        boolean negative = raw.startsWith("(") && raw.endsWith(")");
+        String num = raw.replace("(", "").replace(")", "").replace(",", "");
+        return negative && !num.startsWith("-") ? "-" + num : num;
     }
 
     /** VALIDATE-LIVE: parse "Statement balance (...) 8,315.64" from the widget text. */
@@ -192,7 +242,7 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         String text = widget.textContent();
         if (text == null) return null;
         Matcher m = STATEMENT_BALANCE.matcher(text);
-        return m.find() ? m.group(1).replace(",", "") : null;
+        return m.find() ? normalizeMoney(m.group(1)) : null;
     }
 
     private static int parseReviewCount(String bodyText) {
@@ -233,11 +283,12 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
             checks.add(new Check(CheckName.ROW_COUNT, rowCountOk,
                     String.valueOf(task.expectedRowCount()), String.valueOf(imported),
                     rowCountOk ? null : "imported " + imported + " of " + task.expectedRowCount()));
-            // NO_DUPLICATE inferred: Xero suppresses duplicates silently, so a
-            // short import (imported < expected) is the duplicate signal.
-            boolean noDup = imported >= task.expectedRowCount();
-            checks.add(new Check(CheckName.NO_DUPLICATE, noDup, "no overlap",
-                    noDup ? "no overlap" : "possible suppressed duplicate(s)", null));
+            // NO_DUPLICATE from Xero's post-import banner ("N were duplicates").
+            int dupes = duplicatesCount != null ? duplicatesCount : 0;
+            boolean noDup = dupes == 0;
+            checks.add(new Check(CheckName.NO_DUPLICATE, noDup, "0 duplicates",
+                    dupes + " duplicate(s)",
+                    noDup ? null : dupes + " line(s) were duplicates of an existing statement"));
             addMoney(checks, CheckName.NET_MOVEMENT, task.expectedNetMovement(), observedNet, errors);
             addMoney(checks, CheckName.OPENING_BALANCE, task.expectedOpeningBalance(), observedOpeningBalance, errors);
             addMoney(checks, CheckName.CLOSING_BALANCE, task.expectedClosingBalance(), observedClosingBalance, errors);
@@ -251,7 +302,9 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
                 new Reconciliation.DateRange(task.periodStart(), task.periodEnd()));
 
         BankStatementStatus status = deriveStatus(checks, imported, task.expectedRowCount());
-        ErrorCategory primary = errorCategory != null ? errorCategory : firstFailureCategory(checks, status);
+        ErrorCategory primary = errorCategory != null ? errorCategory
+                : (duplicatesCount != null && duplicatesCount > 0) ? ErrorCategory.DUPLICATE_STATEMENT
+                : firstFailureCategory(checks, status);
         String message = errorMessage != null ? errorMessage : summarize(status, checks);
         if (status != BankStatementStatus.SUCCESS && errors.isEmpty() && primary != null) {
             errors.add(new ErrorItem(primary, message, ErrorSeverity.ERROR));
@@ -277,13 +330,18 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
                 passed ? null : "stage not completed"));
     }
 
-    /** Adds a monetary check; SKIPPED (omitted) when the expected value is null (Q13). */
+    /**
+     * Adds a monetary check; SKIPPED (omitted) when the expected value is null
+     * (Q13) OR when we couldn't read the observed value off the Xero UI — we
+     * don't fail a successful import on an unreadable balance (balances are
+     * best-effort; the import succeeding is the primary concern).
+     */
     private static void addMoney(List<Check> checks, CheckName name,
                                  String expected, String observed, List<ErrorItem> errors) {
-        if (expected == null) {
-            return;   // SKIPPED — Praxis did not supply this expected value
+        if (expected == null || observed == null) {
+            return;   // SKIPPED — no expected value, or balance not readable
         }
-        boolean ok = observed != null && new BigDecimal(expected).compareTo(new BigDecimal(observed)) == 0;
+        boolean ok = new BigDecimal(expected).compareTo(new BigDecimal(observed)) == 0;
         checks.add(new Check(name, ok, expected, observed,
                 ok ? null : "expected " + expected + " observed " + observed));
         if (!ok) {
@@ -314,11 +372,15 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         if (!orgSelected || !accountSelected || !fileAccepted || importedLineCount == null) {
             return BankStatementStatus.FAILED;
         }
+        // Duplicates take precedence — the statement (wholly or partly) overlaps
+        // one already imported; a human must decide if that's expected.
+        if (duplicatesCount != null && duplicatesCount > 0) {
+            return BankStatementStatus.MISMATCH;
+        }
         boolean anyReconFail = checks.stream().anyMatch(c ->
                 !c.passed() && (c.name() == CheckName.NET_MOVEMENT
                         || c.name() == CheckName.OPENING_BALANCE
-                        || c.name() == CheckName.CLOSING_BALANCE
-                        || c.name() == CheckName.NO_DUPLICATE));
+                        || c.name() == CheckName.CLOSING_BALANCE));
         if (imported < expected) {
             return BankStatementStatus.PARTIAL;
         }

@@ -130,7 +130,7 @@ public final class XeroLoginSpike {
                     wpage.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
                             new Page.WaitForURLOptions().setTimeout(20_000));
                 } catch (RuntimeException ignore) { /* report wherever it settled */ }
-                wpage.waitForLoadState(LoadState.NETWORKIDLE);
+                wpage.waitForLoadState(LoadState.DOMCONTENTLOADED);
 
                 System.out.println();
                 System.out.println("=== Xero import-wizard capture (reusing session) ===");
@@ -243,7 +243,7 @@ public final class XeroLoginSpike {
                 // Timed out on the identity host → a real login/2FA wall, not a
                 // silent SSO hop. Fall through and report the (login) URL.
             }
-            page.waitForLoadState(LoadState.NETWORKIDLE);
+            page.waitForLoadState(LoadState.DOMCONTENTLOADED);
             String url = page.url();
             boolean loggedIn = !url.contains("/identity/")
                     && !url.toLowerCase().contains("login.xero.com");

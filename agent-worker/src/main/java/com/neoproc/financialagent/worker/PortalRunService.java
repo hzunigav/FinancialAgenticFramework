@@ -4,7 +4,10 @@ import com.neoproc.financialagent.common.credentials.AwsSecretsManagerCredential
 import com.neoproc.financialagent.common.credentials.CredentialsProvider;
 import com.neoproc.financialagent.common.credentials.LocalFileCredentialsProvider;
 import com.neoproc.financialagent.common.credentials.PortalCredentials;
+import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.common.session.LocalEncryptedSessionStore;
+import com.neoproc.financialagent.contract.bankstatement.BankStatementUploadRequest;
+import com.neoproc.financialagent.contract.bankstatement.FileBody;
 import com.neoproc.financialagent.contract.payroll.PayrollSubmitRequest;
 import com.neoproc.financialagent.worker.artifact.S3ArtifactStore;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
@@ -41,6 +44,7 @@ import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -280,6 +284,169 @@ public class PortalRunService {
         }
 
         return new RunOutcome(runDir, manifest.status, null, uploadedUri);
+    }
+
+    /**
+     * Executes a Xero bank-statement upload run. Parallel to {@link #run} but
+     * for the bank-statement contract: stages the inbound request envelope and
+     * decodes its CSV to the run dir, drives the {@link XeroBankStatementAdapter}
+     * (which emits {@code bank-statement-upload-result.v1.json}), and reuses the
+     * shared auth / manifest / artifact plumbing. Launches a stealth Chrome so
+     * Xero's Akamai bot-manager doesn't 403 the login (Phase-0 finding).
+     *
+     * @param portalId      descriptor id ({@code "xero"})
+     * @param request       the inbound {@code bank-statement-upload-request.v1}
+     * @param extraBindings {@code params.*} runtime bindings (firmId, businessKey,
+     *                      issuerRunId); supplemented with credential + runtime bindings
+     */
+    public RunOutcome runBankStatement(String portalId,
+                                       BankStatementUploadRequest request,
+                                       Map<String, String> extraBindings)
+            throws IOException, InterruptedException {
+
+        PortalDescriptor descriptor = PortalDescriptorLoader.load(portalId);
+        XeroBankStatementAdapter adapter = new XeroBankStatementAdapter();
+
+        String firmId = extraBindings.getOrDefault(
+                "params.firmId", String.valueOf(request.envelope().firmId()));
+        CredentialsProvider credentialsProvider = buildCredentialsProvider(descriptor, firmId);
+        String credClientId = "shared".equalsIgnoreCase(descriptor.credentialScope())
+                ? null : extraBindings.get("params.clientIdentifier");
+        PortalCredentials credentials = credentialsProvider.get(portalId, credClientId);
+
+        Map<String, String> bindings = buildBindings(credentials, extraBindings);
+        Map<String, List<Map<String, String>>> listBindings = new HashMap<>();
+
+        String runId = newRunId();
+        Path runDir = artifactsRoot.resolve(runId);
+        Files.createDirectories(runDir);
+        bindings.put("runtime.runId", runId);
+        bindings.put("runtime.runDir", runDir.toString());
+
+        // Stage the request so the adapter can echo its task; decode the CSV
+        // (cleartext FileBody object, or a vault: ciphertext string under KMS).
+        Path requestFile = runDir.resolve("bank-statement-upload-request.v1.json");
+        EnvelopeIo.write(request, requestFile);
+        bindings.put(AbstractBankStatementAdapter.REQUEST_BINDING, requestFile.toString());
+
+        EnvelopeCipher cipher = EnvelopeIo.defaultCipher();
+        FileBody fileBody = request.encryption() != null && request.request() instanceof String ct
+                ? EnvelopeIo.decryptBody(ct, request.encryption(), cipher, FileBody.class)
+                : EnvelopeIo.MAPPER.convertValue(request.request(), FileBody.class);
+        Path csvFile = runDir.resolve("statement.csv");
+        Files.write(csvFile, Base64.getDecoder().decode(fileBody.file().inline()));
+        bindings.put("params.source.csvPath", csvFile.toString());
+
+        MDC.put("issuerRunId", bindings.getOrDefault("params.issuerRunId", runId));
+        MDC.put("firmId", firmId);
+        if (bindings.containsKey("params.businessKey")) {
+            MDC.put("businessKey", bindings.get("params.businessKey"));
+        }
+
+        Optional<String> savedSession = PortalAuthService.loadSavedSession(
+                new LocalEncryptedSessionStore(), descriptor);
+
+        RunManifest manifest = new RunManifest();
+        manifest.runId = runId;
+        manifest.startedAt = Instant.now();
+        manifest.portal.id = descriptor.id();
+        manifest.portal.baseUrl = descriptor.baseUrl();
+        manifest.portal.username = credentials.require("username");
+        manifest.portal.shadowMode = descriptor.isShadowMode();
+        manifest.agentWorkerVersion = version(PortalRunService.class.getPackage().getImplementationVersion());
+        manifest.playwrightVersion = version(Playwright.class.getPackage().getImplementationVersion());
+        manifest.artifactUri = artifactStore != null ? artifactStore.urlFor(portalId, runId) : null;
+
+        log.info("bank-statement run started portal={} sessionReused={}",
+                descriptor.id(), savedSession.isPresent());
+
+        Path manifestPath = runDir.resolve("manifest.json");
+        long runStartNanos = System.nanoTime();
+        String uploadedUri = null;
+        try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
+             Playwright playwright = Playwright.create();
+             Browser browser = playwright.chromium().launch(xeroLaunchOptions());
+             BrowserContext context = browser.newContext(newContextOptions(runDir, savedSession))) {
+
+            // Akamai bot-manager evasion — mask the most common automation tell
+            // before any page script runs (Phase-0).
+            context.addInitScript(
+                    "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });");
+
+            context.tracing().start(new Tracing.StartOptions()
+                    .setScreenshots(true).setSnapshots(true).setSources(true));
+
+            Page page = context.newPage();
+            PortalEngine engine = new PortalEngine(
+                    page, bindings, listBindings, manifest::step,
+                    stdinOperatorInput(), descriptor.isShadowMode());
+
+            manifest.portal.sessionReused = PortalAuthService.login(
+                    engine, descriptor, context, page, manifest);
+
+            adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);
+            engine.runSteps(descriptor.baseUrl(), descriptor.steps());
+
+            manifest.step("screenshot", "report.png");
+            page.screenshot(new Page.ScreenshotOptions()
+                    .setPath(runDir.resolve("report.png")).setFullPage(true));
+
+            manifest.finalUrl = page.url();
+            manifest.finalTitle = page.title();
+            // No descriptor scrape for Xero — the adapter builds the result body
+            // and emits bank-statement-upload-result.v1.json.
+            manifest.status = adapter.captureToManifest(
+                    Map.of(), List.of(), bindings, credentials, manifest);
+
+            try {
+                adapter.afterCapture(page, bindings, manifest);
+            } catch (RuntimeException teardownEx) {
+                log.warn("afterCapture failed (non-fatal) portal={} error={}",
+                        descriptor.id(), teardownEx.toString());
+            }
+
+            context.tracing().stop(new Tracing.StopOptions().setPath(runDir.resolve("trace.zip")));
+
+        } catch (PortalEngine.ShadowHalt e) {
+            manifest.status = "SHADOW_HALT";
+            manifest.error = e.getMessage();
+        } catch (RuntimeException e) {
+            manifest.status = "FAILED";
+            manifest.error = e.getClass().getSimpleName() + ": " + e.getMessage();
+            throw e;
+        } finally {
+            new HarScrubber(descriptor.securityContext()).scrub(runDir.resolve("network.har"));
+            manifest.finishedAt = Instant.now();
+            EnvelopeIo.MAPPER.writeValue(manifestPath.toFile(), manifest);
+            uploadedUri = artifactStore != null
+                    ? artifactStore.uploadRunDir(runDir, portalId, runId) : null;
+            log.info("bank-statement run complete status={} envelopeId={} businessKey={}",
+                    manifest.status, manifest.envelopeId, manifest.businessKey);
+            String terminalStatus = manifest.status != null ? manifest.status : "UNKNOWN";
+            Timer.builder("agent_bankstatement_duration_seconds")
+                    .tags("portal", portalId, "status", terminalStatus)
+                    .register(Metrics.globalRegistry)
+                    .record(System.nanoTime() - runStartNanos, TimeUnit.NANOSECONDS);
+        }
+
+        return new RunOutcome(runDir, manifest.status, null, uploadedUri);
+    }
+
+    // Xero login is fronted by Akamai Bot Manager, which 403s a vanilla
+    // Playwright Chromium. Launch the installed Chrome and drop the automation
+    // switches so it presents as an ordinary browser (Phase-0 confirmed).
+    private static BrowserType.LaunchOptions xeroLaunchOptions() {
+        BrowserType.LaunchOptions opts = new BrowserType.LaunchOptions()
+                .setHeadless(headless())
+                .setIgnoreDefaultArgs(List.of("--enable-automation"))
+                .setArgs(List.of("--disable-blink-features=AutomationControlled"));
+        String channel = System.getProperty("xero.channel");
+        if (channel == null) channel = System.getenv("XERO_BROWSER_CHANNEL");
+        if (channel == null) channel = "chrome";
+        if (!channel.isBlank()) {
+            opts.setChannel(channel);
+        }
+        return opts;
     }
 
     /**

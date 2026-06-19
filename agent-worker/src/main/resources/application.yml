@@ -34,6 +34,11 @@ agent:
     submit-queue: ${agent.worker.queue-prefix}-financeagent-tasks-submit-${portal.id}
     capture-queue: ${agent.worker.queue-prefix}-financeagent-tasks-capture-${portal.id}
     results-queue: ${agent.worker.queue-prefix}-financeagent-results
+    # Bank-statement (Xero) flow — dedicated queues (BankStatementUploadDesign Q4).
+    # Resolved only on a PORTAL_ID=xero worker (BankStatementTaskListener is gated
+    # on agent.worker.bankstatement-enabled, set from the descriptor's flows).
+    bankstatement-task-queue: ${agent.worker.queue-prefix}-financeagent-tasks-bankstatement-xero
+    bankstatement-results-queue: ${agent.worker.queue-prefix}-financeagent-bankstatement-results
 
 management:
   endpoints:

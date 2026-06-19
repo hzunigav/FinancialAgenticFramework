@@ -83,6 +83,7 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     private FailedStage failedStage;
     private ErrorCategory errorCategory;
     private String errorMessage;
+    private Path runDir;   // for diagnostic HTML/screenshot dumps on failure
 
     @Override
     public void beforeSteps(PortalDescriptor descriptor,
@@ -95,6 +96,8 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
                 Path.of(require(bindings, REQUEST_BINDING)),
                 BankStatementUploadRequest.class).task();
         Path csv = Path.of(require(bindings, "params.source.csvPath"));
+        String runDirBinding = bindings.get("runtime.runDir");
+        this.runDir = runDirBinding != null ? Path.of(runDirBinding) : null;
 
         try {
             Locator widget = switchOrgAndSelectAccount(page, task, manifest);
@@ -111,6 +114,17 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
             errorMessage = f.getMessage();
             log.warn("xero upload failed stage={} category={} msg={}", f.stage, f.category, f.getMessage());
             manifest.step("xero-failed", f.stage + "/" + f.category + ": " + f.getMessage());
+        } catch (RuntimeException unexpected) {
+            // Never let an unhandled Playwright error escape — buildUploadOutcome
+            // must still run so we always emit a result envelope (a bare throw
+            // here leaves PortalRunService with no result for Praxis to correlate).
+            // Capture the page for diagnosis and record it as a VERIFY failure.
+            dumpDebug(page, "beforeSteps-unexpected");
+            failedStage = failedStage != null ? failedStage : FailedStage.VERIFY;
+            errorCategory = ErrorCategory.UNKNOWN;
+            errorMessage = unexpected.getClass().getSimpleName() + ": " + unexpected.getMessage();
+            log.warn("xero upload unexpected failure", unexpected);
+            manifest.step("xero-failed", "unexpected/" + errorMessage);
         }
     }
 
@@ -243,7 +257,25 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         page.waitForSelector(WIZARD_NEXT);
         int attempted = parseReviewCount(page.locator("body").textContent());
         manifest.step("xero", "review attempted=" + attempted + " — completing import");
-        clickNext(page);   // Review -> Complete import (same button on the last step)
+
+        // Click Complete. A statement whose date range OVERLAPS one already
+        // imported (a re-run / the idempotency cold path) triggers a blocking
+        // duplicate-statement dialog that covers the wizard button, so the click
+        // is intercepted and times out. Bound the click, then confirm any dialog
+        // and proceed — the per-line duplicate counts still come from the
+        // post-import banner below.
+        try {
+            page.locator(WIZARD_NEXT).first().click(new Locator.ClickOptions().setTimeout(10_000));
+        } catch (RuntimeException intercepted) {
+            if (confirmOverlapDialog(page, manifest)) {
+                manifest.step("xero", "confirmed duplicate-overlap dialog");
+            } else {
+                dumpDebug(page, "complete-click-blocked");
+                throw new StageFailure(FailedStage.VERIFY, ErrorCategory.UNKNOWN,
+                        "Complete-import click was blocked and no confirmable dialog was found: "
+                                + intercepted.getMessage());
+            }
+        }
 
         try {
             page.waitForURL(u -> u.contains("/BankRec/"),
@@ -269,6 +301,51 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
 
     private void clickNext(Page page) {
         page.locator(WIZARD_NEXT).first().click();
+    }
+
+    /**
+     * Confirms Xero's duplicate-statement / date-overlap dialog that can block
+     * the Complete step on a re-import. The dialog's exact markup wasn't in the
+     * Phase-0 capture, so we dump it for the record and try the common confirm
+     * affordances (primary button, or a button labelled Import/Continue/Yes).
+     * Returns true if a dialog was found and a confirm control was clicked.
+     */
+    private boolean confirmOverlapDialog(Page page, RunManifest manifest) {
+        Locator dialog = page.locator(
+                "[role='dialog'], [role='alertdialog'], [data-automationid*='dialog'], [data-automationid*='modal']");
+        if (dialog.count() == 0) {
+            return false;
+        }
+        dumpDebug(page, "overlap-dialog");   // capture the real DOM to refine selectors
+        Locator confirm = dialog.first().locator(
+                "button:has-text('Import anyway'), button:has-text('Import'), "
+                        + "button:has-text('Continue'), button:has-text('Yes'), "
+                        + "[data-automationid*='confirm'], [data-automationid*='primary']");
+        if (confirm.count() == 0) {
+            return false;
+        }
+        try {
+            confirm.first().click(new Locator.ClickOptions().setTimeout(10_000));
+            return true;
+        } catch (RuntimeException e) {
+            log.warn("found duplicate-overlap dialog but confirm click failed: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** Best-effort HTML + screenshot dump to the run dir for post-mortem of a UI hang. */
+    private void dumpDebug(Page page, String name) {
+        if (runDir == null) {
+            return;
+        }
+        try {
+            java.nio.file.Files.writeString(runDir.resolve(name + ".html"), page.content());
+            page.screenshot(new Page.ScreenshotOptions()
+                    .setPath(runDir.resolve(name + ".png")).setFullPage(true));
+            log.info("captured diagnostic dump {} to {}", name, runDir);
+        } catch (Exception ignore) {
+            // diagnostics are best-effort; never mask the original failure
+        }
     }
 
     /** {imported, duplicates} from the post-import banner, or null if not present. */

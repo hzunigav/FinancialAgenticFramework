@@ -1,0 +1,82 @@
+{
+  "envelope": {
+    "envelopeId": "3d2c1b0a-9f8e-4d7c-8b6a-5f4e3d2c1b0a",
+    "businessKey": "NEOPROCSOCIEDADANONIMA::920336542::USD::20260601-20260617",
+    "firmId": 1,
+    "locale": "es",
+    "createdAt": "2026-06-18T05:04:48Z",
+    "issuer": "financeagent-worker/xero",
+    "issuerRunId": "worker-run-44ab12"
+  },
+  "task": {
+    "type": "bank-statement-upload",
+    "operation": "import",
+    "targetSystem": "XERO",
+    "xeroOrgUuid": "e1f2a3b4-c5d6-4789-9abc-def012345678",
+    "xeroOrgName": "Neoproc Sociedad Anonima",
+    "xeroShortCode": "!0X0!!",
+    "clientName": "NEOPROCSOCIEDADANONIMA",
+    "bankName": "Banco Nacional",
+    "bankAccountNumber": "920336542",
+    "iban": "CR05015202001026284066",
+    "currency": "USD",
+    "periodStart": "2026-06-01",
+    "periodEnd": "2026-06-17",
+    "fileName": "NEOPROCSOCIEDADANONIMA_920336542_USD_2026060120260617.csv",
+    "expectedRowCount": 2,
+    "expectedNetMovement": "1279.50",
+    "expectedOpeningBalance": "11211.00",
+    "expectedClosingBalance": "12490.50"
+  },
+  "encryption": null,
+  "result": {
+    "status": "MISMATCH",
+    "errorCategory": "CLOSING_BALANCE_MISMATCH",
+    "errorMessage": "Imported 2 lines but the closing balance is off by 230.50 (net movement also short by 230.50).",
+    "retryable": false,
+    "failedStage": "VERIFY",
+    "xeroOrgMatched": "Neoproc Sociedad Anonima",
+    "bankAccountMatched": "920336542 (USD)",
+    "reconciliation": {
+      "currency": "USD",
+      "expectedRowCount": 2,
+      "importedLineCount": 2,
+      "expectedNetMovement": "1279.50",
+      "observedNetMovement": "1049.00",
+      "expectedOpeningBalance": "11211.00",
+      "observedOpeningBalance": "11211.00",
+      "expectedClosingBalance": "12490.50",
+      "observedClosingBalance": "12260.00",
+      "statementDateRange": { "from": "2026-06-01", "to": "2026-06-17" }
+    },
+    "checks": [
+      { "name": "ORG_SELECTED", "passed": true, "expected": "e1f2a3b4-c5d6-4789-9abc-def012345678", "observed": "e1f2a3b4-c5d6-4789-9abc-def012345678", "detail": null },
+      { "name": "ACCOUNT_SELECTED", "passed": true, "expected": "920336542", "observed": "920336542", "detail": null },
+      { "name": "FILE_ACCEPTED", "passed": true, "expected": "accepted", "observed": "accepted", "detail": null },
+      { "name": "NO_DUPLICATE", "passed": true, "expected": "no overlap", "observed": "no overlap", "detail": null },
+      { "name": "ROW_COUNT", "passed": true, "expected": "2", "observed": "2", "detail": null },
+      { "name": "NET_MOVEMENT", "passed": false, "expected": "1279.50", "observed": "1049.00", "detail": "off by 230.50" },
+      { "name": "OPENING_BALANCE", "passed": true, "expected": "11211.00", "observed": "11211.00", "detail": null },
+      { "name": "CLOSING_BALANCE", "passed": false, "expected": "12490.50", "observed": "12260.00", "detail": "off by 230.50" }
+    ],
+    "rejectedRows": [
+      { "rowNumber": 2, "rawLine": "2026-06-12,-230.50,Bank Fee,Wire fee,FEE-0612", "reason": "Xero flagged as possible duplicate of an existing transaction" }
+    ],
+    "errors": [
+      { "category": "CLOSING_BALANCE_MISMATCH", "message": "Closing balance off by 230.50", "severity": "ERROR" },
+      { "category": "NET_MOVEMENT_MISMATCH", "message": "Net movement off by 230.50", "severity": "ERROR" }
+    ],
+    "diagnostics": {
+      "workerRunId": "worker-run-44ab12",
+      "attemptCount": 1,
+      "durationMs": 18432,
+      "xeroUrl": "https://go.xero.com/Bank/BankAccount.aspx?accountID=920336542",
+      "xeroMessage": "Statement imported. 1 of 2 lines (1 skipped as possible duplicate).",
+      "screenshotRefs": ["bankstmt/firm-1/920336542/2026-06-17/duplicate-warning.png"],
+      "logRef": "cloudwatch:/financeagent/xero/worker-run-44ab12"
+    }
+  },
+  "audit": {
+    "payloadSha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7"
+  }
+}

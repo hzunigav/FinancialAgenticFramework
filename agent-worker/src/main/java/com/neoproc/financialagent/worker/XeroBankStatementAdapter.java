@@ -57,11 +57,7 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     private static final String BANK_WIDGET = "[data-automationid='bankWidget']";
     private static final String FILE_INPUT = "input[data-automationid='select-file-control--input']";
     private static final String WIZARD_NEXT = "[data-automationid='wizard-next-step-button']";
-    // Login form (Phase-2e capture). Xero requires email+password each run; the
-    // persisted trust-device cookie only skips 2FA.
-    private static final String LOGIN_EMAIL = "[data-automationid='Username--input']";
-    private static final String LOGIN_PASSWORD = "[data-automationid='PassWord--input']";
-    private static final String LOGIN_SUBMIT = "[data-automationid='LoginSubmit--button']";
+    private static final String DASHBOARD_URL = "https://go.xero.com/Dashboard/";
     private static final Pattern REVIEW_COUNT =
             Pattern.compile("(\\d+)\\s+transaction\\(s\\)\\s+will be imported");
     // Post-import banner on the BankRec page (confirmed Phase-2d):
@@ -102,7 +98,7 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         Path csv = Path.of(require(bindings, "params.source.csvPath"));
 
         try {
-            Locator widget = switchOrgAndSelectAccount(page, task, credentials, manifest);
+            Locator widget = switchOrgAndSelectAccount(page, task, manifest);
             observedOpeningBalance = readStatementBalance(widget);
             openImportWizard(widget, manifest);
             uploadCsv(page, csv, manifest);
@@ -121,28 +117,26 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
 
     // --- UI stages ----------------------------------------------------------
 
-    private Locator switchOrgAndSelectAccount(Page page, BankStatementTask task,
-                                              PortalCredentials credentials, RunManifest manifest) {
-        // Deterministic org switch by short-code (Phase-0: UI uses short-code, not tenant UUID).
-        String orgUrl = "https://go.xero.com/app/" + task.xeroShortCode() + "/manage-bank-accounts";
-        page.navigate(orgUrl);
-
-        // Xero requires an email+password login each run (the session cookie is
-        // short-lived); the persisted trust-device cookie only skips 2FA. If the
-        // login form is showing, authenticate, then return to the org URL.
-        if (loginIfPrompted(page, credentials, manifest)) {
-            page.navigate(orgUrl);
-        }
-
-        // Let the OIDC redirect chain settle off the identity host before
-        // expecting the bank widget (don't race the transient login redirect).
+    private Locator switchOrgAndSelectAccount(Page page, BankStatementTask task, RunManifest manifest) {
+        // Auth is a SEPARATE, reusable flow (the seeding step persists a
+        // logged-in session to the session store) — we do NOT log in here.
+        // Step 1: confirm the reused session is live by landing on a neutral
+        // authed page first (login before switching). A valid session
+        // silent-auths through Xero's OIDC; a stale one bounces to the login
+        // host → SESSION_EXPIRED, so the login flow can refresh it.
+        page.navigate(DASHBOARD_URL);
         try {
             page.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
                     new Page.WaitForURLOptions().setTimeout(45_000));
         } catch (RuntimeException stuckOnLogin) {
             throw new StageFailure(FailedStage.AUTH, ErrorCategory.SESSION_EXPIRED,
-                    "Stuck on the Xero login after authenticating — check credentials / re-seed the trust-device session");
+                    "Landed on the Xero login — the reused session is stale. Refresh it via the login flow (re-seed).");
         }
+
+        // Step 2: now authenticated, switch to the target org's bank accounts
+        // by short-code (Phase-0: the UI selects org by short-code, not UUID).
+        String orgUrl = "https://go.xero.com/app/" + task.xeroShortCode() + "/manage-bank-accounts";
+        page.navigate(orgUrl);
         try {
             page.waitForSelector(BANK_WIDGET, new Page.WaitForSelectorOptions().setTimeout(30_000));
         } catch (RuntimeException e) {
@@ -162,34 +156,6 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         accountSelected = true;
         manifest.step("xero", "account matched " + task.bankAccountNumber());
         return widget.first();
-    }
-
-    /**
-     * Logs in via the email+password form if it is showing; returns true if it
-     * authenticated, false if no form was present (already authenticated). 2FA
-     * is expected to be skipped by the persisted trust-device cookie — if Xero
-     * still sits on the login host after the password, the cookie is gone and a
-     * 2FA prompt is up, so we fail {@code MFA_REQUIRED} (re-seed the trusted
-     * session). Selectors confirmed from the Phase-2e login-form capture.
-     */
-    private boolean loginIfPrompted(Page page, PortalCredentials credentials, RunManifest manifest) {
-        if (page.locator(LOGIN_EMAIL).count() == 0) {
-            return false;   // already authenticated (no login form)
-        }
-        manifest.step("xero", "login form present — authenticating (email+password)");
-        page.locator(LOGIN_EMAIL).first().fill(credentials.require("username"));
-        page.locator(LOGIN_PASSWORD).first().fill(credentials.require("password"));
-        page.locator(LOGIN_SUBMIT).first().click();
-        try {
-            page.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
-                    new Page.WaitForURLOptions().setTimeout(45_000));
-        } catch (RuntimeException stillOnLogin) {
-            throw new StageFailure(FailedStage.AUTH, ErrorCategory.MFA_REQUIRED,
-                    "Xero still on the login host after password — 2FA likely required "
-                            + "(trust-device cookie absent/expired). Re-seed the trusted session.");
-        }
-        manifest.step("xero", "login complete");
-        return true;
     }
 
     private void openImportWizard(Locator accountWidget, RunManifest manifest) {

@@ -258,23 +258,18 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         int attempted = parseReviewCount(page.locator("body").textContent());
         manifest.step("xero", "review attempted=" + attempted + " — completing import");
 
-        // Click Complete. A statement whose date range OVERLAPS one already
-        // imported (a re-run / the idempotency cold path) triggers a blocking
-        // duplicate-statement dialog that covers the wizard button, so the click
-        // is intercepted and times out. Bound the click, then confirm any dialog
-        // and proceed — the per-line duplicate counts still come from the
-        // post-import banner below.
+        // Click "Complete import". On a normal import the button is enabled and
+        // the click drives the import → BankRec. On a FULL-overlap re-import
+        // (every line is a duplicate of an already-imported statement — a re-run
+        // / the idempotency cold path) Xero DISABLES the button (nothing new to
+        // import) and transitions to BankRec on its own (LIVE 2026-06-19). So a
+        // non-clickable / detached button is NOT a failure: best-effort the
+        // click, then verify completion via the BankRec banner below. Only a run
+        // that reaches neither the banner nor BankRec is a genuine VERIFY failure.
         try {
-            page.locator(WIZARD_NEXT).first().click(new Locator.ClickOptions().setTimeout(10_000));
-        } catch (RuntimeException intercepted) {
-            if (confirmOverlapDialog(page, manifest)) {
-                manifest.step("xero", "confirmed duplicate-overlap dialog");
-            } else {
-                dumpDebug(page, "complete-click-blocked");
-                throw new StageFailure(FailedStage.VERIFY, ErrorCategory.UNKNOWN,
-                        "Complete-import click was blocked and no confirmable dialog was found: "
-                                + intercepted.getMessage());
-            }
+            page.locator(WIZARD_NEXT).first().click(new Locator.ClickOptions().setTimeout(12_000));
+        } catch (RuntimeException notClickable) {
+            manifest.step("xero", "Complete not clickable (likely full-duplicate) — verifying via BankRec");
         }
 
         try {
@@ -284,8 +279,14 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
             // proceed with whatever rendered
         }
         String body = page.locator("body").textContent();
-
         int[] banner = parseImportBanner(body);
+        if (banner == null && !page.url().contains("/BankRec/")) {
+            // Never reached completion — still on the wizard with no banner.
+            dumpDebug(page, "no-completion");
+            throw new StageFailure(FailedStage.VERIFY, ErrorCategory.UNKNOWN,
+                    "Import did not complete: Complete button not actionable and no BankRec banner rendered");
+        }
+
         if (banner != null) {
             importedLineCount = banner[0];
             duplicatesCount = banner[1];
@@ -301,36 +302,6 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
 
     private void clickNext(Page page) {
         page.locator(WIZARD_NEXT).first().click();
-    }
-
-    /**
-     * Confirms Xero's duplicate-statement / date-overlap dialog that can block
-     * the Complete step on a re-import. The dialog's exact markup wasn't in the
-     * Phase-0 capture, so we dump it for the record and try the common confirm
-     * affordances (primary button, or a button labelled Import/Continue/Yes).
-     * Returns true if a dialog was found and a confirm control was clicked.
-     */
-    private boolean confirmOverlapDialog(Page page, RunManifest manifest) {
-        Locator dialog = page.locator(
-                "[role='dialog'], [role='alertdialog'], [data-automationid*='dialog'], [data-automationid*='modal']");
-        if (dialog.count() == 0) {
-            return false;
-        }
-        dumpDebug(page, "overlap-dialog");   // capture the real DOM to refine selectors
-        Locator confirm = dialog.first().locator(
-                "button:has-text('Import anyway'), button:has-text('Import'), "
-                        + "button:has-text('Continue'), button:has-text('Yes'), "
-                        + "[data-automationid*='confirm'], [data-automationid*='primary']");
-        if (confirm.count() == 0) {
-            return false;
-        }
-        try {
-            confirm.first().click(new Locator.ClickOptions().setTimeout(10_000));
-            return true;
-        } catch (RuntimeException e) {
-            log.warn("found duplicate-overlap dialog but confirm click failed: {}", e.getMessage());
-            return false;
-        }
     }
 
     /** Best-effort HTML + screenshot dump to the run dir for post-mortem of a UI hang. */

@@ -7,8 +7,12 @@
 #   ./scripts/prod-infra-setup.sh <portal-id> <queue-type> <image-tag>
 #
 #   portal-id   Portal identifier matching the YAML descriptor filename, e.g. ccss-sicere
-#   queue-type  Which task queues to create: capture | submit | both
+#   queue-type  Which task queues to create: capture | submit | both | bankstatement
 #   image-tag   ECR image tag to use in the initial task definition, e.g. prod-abc1234
+#
+#   bankstatement (Xero) creates a dedicated task queue + a dedicated results
+#   queue (the payroll results queue is shared and provisioned elsewhere), and
+#   wires the Xero-only env (browser channel for the Akamai-stealth launch).
 #
 # Environment (set these before running, or export them):
 #   CLUSTER          ECS cluster name       (default: financeagent)
@@ -63,7 +67,7 @@ fi
 
 # ── Argument validation ────────────────────────────────────────────────────────
 if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 <portal-id> <capture|submit|both> <image-tag>" >&2
+  echo "Usage: $0 <portal-id> <capture|submit|both|bankstatement> <image-tag>" >&2
   exit 1
 fi
 
@@ -133,6 +137,31 @@ create_queue() {
 [[ "$QUEUE_TYPE" == "submit" || "$QUEUE_TYPE" == "both" ]] && \
   create_queue "${ENV_PREFIX}-financeagent-tasks-submit-${PORTAL_ID}"
 
+# Bank-statement (Xero) flow: a dedicated task queue (DLQ-backed) plus a
+# dedicated results queue. Unlike payroll, the bankstatement results queue is
+# NOT shared, so we create it here. A results queue has no redrive — the worker
+# only produces to it and Praxis consumes; a poison result should surface, not
+# silently DLQ.
+create_results_queue() {
+  local NAME="$1"
+  if aws sqs get-queue-url --queue-name "$NAME" --region "$REGION" &>/dev/null; then
+    echo "  Queue already exists: $NAME"
+    return
+  fi
+  aws sqs create-queue --queue-name "$NAME" --region "$REGION" \
+    --attributes "{
+      \"VisibilityTimeout\":            \"60\",
+      \"ReceiveMessageWaitTimeSeconds\": \"20\",
+      \"MessageRetentionPeriod\":       \"345600\"
+    }" > /dev/null
+  echo "  Created results queue: $NAME"
+}
+
+if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
+  create_queue         "${ENV_PREFIX}-financeagent-tasks-bankstatement-${PORTAL_ID}"
+  create_results_queue "${ENV_PREFIX}-financeagent-bankstatement-results"
+fi
+
 # ── Step 2: CloudWatch log group ──────────────────────────────────────────────
 LOG_GROUP="/ecs/financeagent-worker-${PORTAL_ID}"
 if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region "$REGION" \
@@ -159,6 +188,18 @@ ENV_JSON="[
 
 if [[ "$PORTAL_ID" == "mock-payroll" ]]; then
   ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"MOCK_PORTAL_BASE_URL","value":"http://testing-harness:3000"}]')
+fi
+
+# Xero (bankstatement): the adapter launches a stealth real-Chrome to clear
+# Akamai Bot Manager (a vanilla Chromium gets a 403). XERO_BROWSER_CHANNEL picks
+# the channel; the runtime image must actually contain that channel (see the
+# OPEN ITEM note at the end — branded Chrome + headless on Fargate is unverified).
+# The shared Xero login + TOTP seed come from Secrets Manager via
+# FINANCEAGENT_CREDENTIALS=aws (path: <prefix>/financeagent/shared/portals/xero/ui-login),
+# and the persisted browser session is stored via the AWS Secrets-Manager+KMS
+# SessionStore so it survives scale-to-zero.
+if [[ "$PORTAL_ID" == "xero" ]]; then
+  ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"XERO_BROWSER_CHANNEL","value":"chrome"}]')
 fi
 
 TD_JSON=$(jq -n \
@@ -241,3 +282,27 @@ echo "        \"Resource\": \"arn:aws:s3:::${ARTIFACTS_BUCKET}/*\" }"
 echo ""
 echo "    Praxis (read-side): grant the Praxis BPM execution role s3:GetObject + s3:ListBucket"
 echo "    on arn:aws:s3:::${ARTIFACTS_BUCKET} so workflow steps can fetch audit.manifestPath."
+
+if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
+  echo ""
+  echo "  === Xero (bankstatement) extra steps ==="
+  echo "    1. Secrets Manager — create the shared login + TOTP seed:"
+  echo "         aws secretsmanager create-secret \\"
+  echo "           --name ${ENV_PREFIX}/financeagent/shared/portals/xero/ui-login \\"
+  echo "           --secret-string '{\"username\":\"...\",\"password\":\"...\",\"totpSeed\":\"BASE32SEED\"}'"
+  echo "       The task role must allow secretsmanager:GetSecretValue on that ARN (and the"
+  echo "       session-store secret), plus kms:Encrypt/Decrypt on the session-store KMS key."
+  echo "    2. Seed the browser session once (so the worker reuses it through scale-to-zero):"
+  echo "       run the assisted login locally and persist storageState via SessionSeeder."
+  echo "    3. IAM: add the task queue ARN"
+  echo "         arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-tasks-bankstatement-${PORTAL_ID}"
+  echo "       to AgentWorkerSqsFinanceagent ConsumeTasks, and the results queue ARN"
+  echo "         arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-bankstatement-results"
+  echo "       to the PublishResults statement."
+  echo ""
+  echo "    OPEN ITEM — Akamai + headless: the adapter uses a stealth real-Chrome launch"
+  echo "    (XERO_BROWSER_CHANNEL=chrome). The playwright/java:v1.48.0-jammy runtime image"
+  echo "    ships Chromium, NOT branded Chrome, and the stealth launch is unverified headless"
+  echo "    in-container. Validate on first deploy; if Akamai 403s, add a Chrome layer to the"
+  echo "    Dockerfile and/or run headed via xvfb. This does not affect the Praxis contract."
+fi

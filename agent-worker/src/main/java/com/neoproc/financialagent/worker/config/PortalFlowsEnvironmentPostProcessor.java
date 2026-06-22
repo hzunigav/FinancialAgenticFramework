@@ -35,6 +35,7 @@ public class PortalFlowsEnvironmentPostProcessor implements EnvironmentPostProce
 
     static final String CAPTURE_ENABLED = "agent.worker.capture-enabled";
     static final String SUBMIT_ENABLED = "agent.worker.submit-enabled";
+    static final String BANKSTATEMENT_ENABLED = "agent.worker.bankstatement-enabled";
     private static final String PROPERTY_SOURCE_NAME = "portalFlows";
 
     @Override
@@ -58,6 +59,7 @@ public class PortalFlowsEnvironmentPostProcessor implements EnvironmentPostProce
         Map<String, Object> props = new LinkedHashMap<>();
         props.put(CAPTURE_ENABLED, descriptor.handlesCapture());
         props.put(SUBMIT_ENABLED, descriptor.handlesSubmit());
+        props.put(BANKSTATEMENT_ENABLED, descriptor.handlesBankStatement());
         // First in the list = highest precedence; deliberately authoritative over
         // any application.yml default so the descriptor is the single source of truth.
         environment.getPropertySources().addFirst(new MapPropertySource(PROPERTY_SOURCE_NAME, props));

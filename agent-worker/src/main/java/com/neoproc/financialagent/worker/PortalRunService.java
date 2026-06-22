@@ -4,7 +4,10 @@ import com.neoproc.financialagent.common.credentials.AwsSecretsManagerCredential
 import com.neoproc.financialagent.common.credentials.CredentialsProvider;
 import com.neoproc.financialagent.common.credentials.LocalFileCredentialsProvider;
 import com.neoproc.financialagent.common.credentials.PortalCredentials;
-import com.neoproc.financialagent.common.session.LocalEncryptedSessionStore;
+import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
+import com.neoproc.financialagent.common.session.SessionStores;
+import com.neoproc.financialagent.contract.bankstatement.BankStatementUploadRequest;
+import com.neoproc.financialagent.contract.bankstatement.FileBody;
 import com.neoproc.financialagent.contract.payroll.PayrollSubmitRequest;
 import com.neoproc.financialagent.worker.artifact.S3ArtifactStore;
 import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
@@ -14,9 +17,11 @@ import com.neoproc.financialagent.worker.portal.PortalDescriptorLoader;
 import com.neoproc.financialagent.worker.portal.PortalEngine;
 import com.neoproc.financialagent.worker.portal.PortalRateLimiter;
 import com.neoproc.financialagent.worker.portal.PortalScraper;
+import com.neoproc.financialagent.worker.auth.TotpGenerator;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
+import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.Tracing;
@@ -41,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -70,6 +76,40 @@ public class PortalRunService {
 
     private static final DateTimeFormatter RUN_ID_FMT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss").withZone(ZoneOffset.UTC);
+
+    // Login-form tell on login.xero.com — present only when Xero actually
+    // prompts (cold start / expired session); absent on a warm session reuse.
+    // Mirrors xero.yaml's authSteps Username selector.
+    private static final String XERO_USERNAME_INPUT = "[data-automationid='Username--input']";
+
+    // 2FA challenge selectors. Xero only shows a TOTP prompt after the password
+    // step when the trust-device cookie has expired (~30 days) or been revoked.
+    // The exact DOM wasn't in the Phase-0 capture, so these are candidate sets
+    // matching Xero's XUI conventions (X--input / X--button) plus generic
+    // one-time-code fallbacks; the first real challenge is auto-dumped so they
+    // can be hardened. The "trust this device" check re-mints the ~30-day cookie
+    // so 2FA stays rare (≈ monthly per worker).
+    private static final String XERO_2FA_CODE_INPUT = String.join(", ",
+            "[data-automationid='AuthenticationCode--input']",
+            "[data-automationid='Confirmation--input']",
+            "[data-automationid='TwoStepAuthentication--input']",
+            "[data-automationid='Totp--input']",
+            "input[autocomplete='one-time-code']",
+            "input[name='AuthenticationCode']",
+            "input[name='Code']",
+            "input[id*='totp' i]",
+            "input[id*='authentication-code' i]");
+    private static final String XERO_2FA_TRUST_CHECKBOX = String.join(", ",
+            "[data-automationid='RememberMe--checkbox']",
+            "[data-automationid='TrustThisDevice--checkbox']",
+            "input[type='checkbox'][name*='emember' i]",
+            "input[type='checkbox'][name*='rust' i]",
+            "input[type='checkbox']");
+    private static final String XERO_2FA_CONFIRM_BUTTON = String.join(", ",
+            "[data-automationid='ConfirmAuthentication--button']",
+            "[data-automationid='Confirm--button']",
+            "[data-automationid='LoginSubmit--button']",
+            "button[type='submit']");
 
     private final Path artifactsRoot;
     private final S3ArtifactStore artifactStore;
@@ -156,7 +196,7 @@ public class PortalRunService {
         // loads it internally to decide whether to replay authSteps — the two
         // reads are cheap and idempotent).
         Optional<String> savedSession = PortalAuthService.loadSavedSession(
-                new LocalEncryptedSessionStore(), descriptor);
+                SessionStores.defaultStore(), descriptor);
 
         RunManifest manifest = new RunManifest();
         manifest.runId = runId;
@@ -282,6 +322,199 @@ public class PortalRunService {
         }
 
         return new RunOutcome(runDir, manifest.status, null, uploadedUri);
+    }
+
+    /**
+     * Executes a Xero bank-statement upload run. Parallel to {@link #run} but
+     * for the bank-statement contract: stages the inbound request envelope and
+     * decodes its CSV to the run dir, drives the {@link XeroBankStatementAdapter}
+     * (which emits {@code bank-statement-upload-result.v1.json}), and reuses the
+     * shared auth / manifest / artifact plumbing. Launches a stealth Chrome so
+     * Xero's Akamai bot-manager doesn't 403 the login (Phase-0 finding).
+     *
+     * @param portalId      descriptor id ({@code "xero"})
+     * @param request       the inbound {@code bank-statement-upload-request.v1}
+     * @param extraBindings {@code params.*} runtime bindings (firmId, businessKey,
+     *                      issuerRunId); supplemented with credential + runtime bindings
+     */
+    public RunOutcome runBankStatement(String portalId,
+                                       BankStatementUploadRequest request,
+                                       Map<String, String> extraBindings)
+            throws IOException, InterruptedException {
+
+        PortalDescriptor descriptor = PortalDescriptorLoader.load(portalId);
+        XeroBankStatementAdapter adapter = new XeroBankStatementAdapter();
+
+        String firmId = extraBindings.getOrDefault(
+                "params.firmId", String.valueOf(request.envelope().firmId()));
+        CredentialsProvider credentialsProvider = buildCredentialsProvider(descriptor, firmId);
+        String credClientId = "shared".equalsIgnoreCase(descriptor.credentialScope())
+                ? null : extraBindings.get("params.clientIdentifier");
+        PortalCredentials credentials = credentialsProvider.get(portalId, credClientId);
+
+        Map<String, String> bindings = buildBindings(credentials, extraBindings);
+        Map<String, List<Map<String, String>>> listBindings = new HashMap<>();
+
+        String runId = newRunId();
+        Path runDir = artifactsRoot.resolve(runId);
+        Files.createDirectories(runDir);
+        bindings.put("runtime.runId", runId);
+        bindings.put("runtime.runDir", runDir.toString());
+
+        // Stage the request so the adapter can echo its task; decode the CSV
+        // (cleartext FileBody object, or a vault: ciphertext string under KMS).
+        Path requestFile = runDir.resolve("bank-statement-upload-request.v1.json");
+        EnvelopeIo.write(request, requestFile);
+        bindings.put(AbstractBankStatementAdapter.REQUEST_BINDING, requestFile.toString());
+
+        EnvelopeCipher cipher = EnvelopeIo.defaultCipher();
+        FileBody fileBody = request.encryption() != null && request.request() instanceof String ct
+                ? EnvelopeIo.decryptBody(ct, request.encryption(), cipher, FileBody.class)
+                : EnvelopeIo.MAPPER.convertValue(request.request(), FileBody.class);
+        Path csvFile = runDir.resolve("statement.csv");
+        Files.write(csvFile, Base64.getDecoder().decode(fileBody.file().inline()));
+        bindings.put("params.source.csvPath", csvFile.toString());
+
+        MDC.put("issuerRunId", bindings.getOrDefault("params.issuerRunId", runId));
+        MDC.put("firmId", firmId);
+        if (bindings.containsKey("params.businessKey")) {
+            MDC.put("businessKey", bindings.get("params.businessKey"));
+        }
+
+        Optional<String> savedSession = PortalAuthService.loadSavedSession(
+                SessionStores.defaultStore(), descriptor);
+
+        RunManifest manifest = new RunManifest();
+        manifest.runId = runId;
+        manifest.startedAt = Instant.now();
+        manifest.portal.id = descriptor.id();
+        manifest.portal.baseUrl = descriptor.baseUrl();
+        // Session-reuse runs need no credentials (auth via the persisted
+        // session), so don't hard-require a username here.
+        manifest.portal.username = credentials.values().getOrDefault("username", "(session-reuse)");
+        manifest.portal.shadowMode = descriptor.isShadowMode();
+        manifest.agentWorkerVersion = version(PortalRunService.class.getPackage().getImplementationVersion());
+        manifest.playwrightVersion = version(Playwright.class.getPackage().getImplementationVersion());
+        manifest.artifactUri = artifactStore != null ? artifactStore.urlFor(portalId, runId) : null;
+
+        log.info("bank-statement run started portal={} sessionReused={}",
+                descriptor.id(), savedSession.isPresent());
+
+        Path manifestPath = runDir.resolve("manifest.json");
+        long runStartNanos = System.nanoTime();
+        String uploadedUri = null;
+        try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
+             Playwright playwright = Playwright.create();
+             Browser browser = playwright.chromium().launch(xeroLaunchOptions());
+             BrowserContext context = browser.newContext(xeroContextOptions(runDir, savedSession))) {
+
+            // Akamai bot-manager evasion — mask the most common automation tell
+            // before any page script runs (Phase-0).
+            context.addInitScript(
+                    "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });");
+
+            context.tracing().start(new Tracing.StartOptions()
+                    .setScreenshots(true).setSnapshots(true).setSources(true));
+
+            Page page = context.newPage();
+            PortalEngine engine = new PortalEngine(
+                    page, bindings, listBindings, manifest::step,
+                    stdinOperatorInput(), descriptor.isShadowMode());
+
+            // Auth phase — SEPARATE from the upload process the adapter runs
+            // below. Xero MAY prompt for an email+password login (cold start, or
+            // the session cookie has expired) or may silently re-authenticate
+            // from the reused cookies (warm window). Navigate to the app first,
+            // then BRANCH on whether the login form actually appeared:
+            //   - form shown  -> run the login authSteps; the trust-device
+            //                     cookie still skips 2FA.
+            //   - form absent -> the reused session carried us straight into the
+            //                     app; skip login.
+            // Unconditionally filling the login form breaks the warm-session case
+            // (no form is rendered -> fill times out, run parks on the homepage)
+            // — observed on the first warm re-run.
+            page.navigate(descriptor.baseUrl());
+            boolean loginFormShown;
+            try {
+                page.waitForSelector(XERO_USERNAME_INPUT,
+                        new Page.WaitForSelectorOptions().setTimeout(15_000));
+                loginFormShown = true;
+            } catch (RuntimeException alreadyAuthenticated) {
+                loginFormShown = false;
+            }
+            if (loginFormShown) {
+                engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());   // navigate + fill user/pass + submit
+                completeXeroLogin(page, credentials, manifest, runDir);          // optional TOTP 2FA, then wait into the app
+                manifest.step("auth", "logged in via authSteps for portal=" + descriptor.id());
+            } else {
+                manifest.step("auth", "session reuse — already authenticated, login skipped");
+            }
+            manifest.portal.sessionReused = !loginFormShown;
+            PortalAuthService.saveSessionIfEnabled(SessionStores.defaultStore(), descriptor, context);
+
+            adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);
+            engine.runSteps(descriptor.baseUrl(), descriptor.steps());
+
+            manifest.step("screenshot", "report.png");
+            page.screenshot(new Page.ScreenshotOptions()
+                    .setPath(runDir.resolve("report.png")).setFullPage(true));
+
+            manifest.finalUrl = page.url();
+            manifest.finalTitle = page.title();
+            // No descriptor scrape for Xero — the adapter builds the result body
+            // and emits bank-statement-upload-result.v1.json.
+            manifest.status = adapter.captureToManifest(
+                    Map.of(), List.of(), bindings, credentials, manifest);
+
+            try {
+                adapter.afterCapture(page, bindings, manifest);
+            } catch (RuntimeException teardownEx) {
+                log.warn("afterCapture failed (non-fatal) portal={} error={}",
+                        descriptor.id(), teardownEx.toString());
+            }
+
+            context.tracing().stop(new Tracing.StopOptions().setPath(runDir.resolve("trace.zip")));
+
+        } catch (PortalEngine.ShadowHalt e) {
+            manifest.status = "SHADOW_HALT";
+            manifest.error = e.getMessage();
+        } catch (RuntimeException e) {
+            manifest.status = "FAILED";
+            manifest.error = e.getClass().getSimpleName() + ": " + e.getMessage();
+            throw e;
+        } finally {
+            new HarScrubber(descriptor.securityContext()).scrub(runDir.resolve("network.har"));
+            manifest.finishedAt = Instant.now();
+            EnvelopeIo.MAPPER.writeValue(manifestPath.toFile(), manifest);
+            uploadedUri = artifactStore != null
+                    ? artifactStore.uploadRunDir(runDir, portalId, runId) : null;
+            log.info("bank-statement run complete status={} envelopeId={} businessKey={}",
+                    manifest.status, manifest.envelopeId, manifest.businessKey);
+            String terminalStatus = manifest.status != null ? manifest.status : "UNKNOWN";
+            Timer.builder("agent_bankstatement_duration_seconds")
+                    .tags("portal", portalId, "status", terminalStatus)
+                    .register(Metrics.globalRegistry)
+                    .record(System.nanoTime() - runStartNanos, TimeUnit.NANOSECONDS);
+        }
+
+        return new RunOutcome(runDir, manifest.status, null, uploadedUri);
+    }
+
+    // Xero login is fronted by Akamai Bot Manager, which 403s a vanilla
+    // Playwright Chromium. Launch the installed Chrome and drop the automation
+    // switches so it presents as an ordinary browser (Phase-0 confirmed).
+    private static BrowserType.LaunchOptions xeroLaunchOptions() {
+        BrowserType.LaunchOptions opts = new BrowserType.LaunchOptions()
+                .setHeadless(headless())
+                .setIgnoreDefaultArgs(List.of("--enable-automation"))
+                .setArgs(List.of("--disable-blink-features=AutomationControlled"));
+        String channel = System.getProperty("xero.channel");
+        if (channel == null) channel = System.getenv("XERO_BROWSER_CHANNEL");
+        if (channel == null) channel = "chrome";
+        if (!channel.isBlank()) {
+            opts.setChannel(channel);
+        }
+        return opts;
     }
 
     /**
@@ -430,6 +663,105 @@ public class PortalRunService {
                 .setRecordHarContent(HarContentPolicy.EMBED);
         savedSession.ifPresent(opts::setStorageState);
         return opts;
+    }
+
+    // Xero/Akamai treats a bare context as suspicious and bounces it to the
+    // login form even with a valid reused session (seen on the first live run).
+    // Match the Phase-0 spike's context — realistic locale/timezone/viewport —
+    // so the reused session silently re-authenticates.
+    private static Browser.NewContextOptions xeroContextOptions(Path runDir, Optional<String> savedSession) {
+        return newContextOptions(runDir, savedSession)
+                .setLocale("en-US")
+                .setTimezoneId("America/Costa_Rica")
+                .setViewportSize(1366, 768);
+    }
+
+    /** True once the page has left Xero's login/identity host (i.e. we're in the app). */
+    private static boolean offLogin(String url) {
+        String u = url.toLowerCase(Locale.ROOT);
+        return !u.contains("/identity/") && !u.contains("login.xero.com");
+    }
+
+    /**
+     * Completes a Xero credential login that may or may not be followed by a 2FA
+     * challenge, and blocks until we're in the app (or throws).
+     *
+     * <p>After username+password submit Xero either redirects straight into the
+     * app (the persisted trust-device cookie is still valid → 2FA skipped) or
+     * holds us on {@code login.xero.com} with a TOTP prompt (the ~30-day
+     * trust-device cookie has expired/been revoked). This handles the latter
+     * autonomously: compute the TOTP from the {@code totpSeed} credential, fill
+     * it, check "trust this device" (re-minting the cookie so 2FA stays rare),
+     * and submit. The first real challenge is dumped to the run dir so the
+     * candidate selectors can be hardened against the live DOM.
+     *
+     * @throws IllegalStateException if a 2FA challenge appears but no totpSeed is
+     *                               configured (operator must re-seed / add the seed)
+     */
+    private static void completeXeroLogin(Page page, PortalCredentials credentials,
+                                          RunManifest manifest, Path runDir) {
+        // Fast path: trust cookie still valid → straight into the app, no 2FA.
+        try {
+            page.waitForURL(PortalRunService::offLogin,
+                    new Page.WaitForURLOptions().setTimeout(12_000));
+            return;
+        } catch (RuntimeException stillOnLogin) {
+            // still on the login host after the password step — likely a TOTP challenge
+        }
+
+        Locator code = page.locator(XERO_2FA_CODE_INPUT);
+        boolean challenge;
+        try {
+            code.first().waitFor(new Locator.WaitForOptions().setTimeout(8_000));
+            challenge = true;
+        } catch (RuntimeException notShown) {
+            challenge = false;
+        }
+
+        if (challenge) {
+            dumpDebug(page, runDir, "2fa-challenge");   // capture the live DOM to harden selectors
+            String seed = credentials.values().get("totpSeed");
+            if (seed == null || seed.isBlank()) {
+                throw new IllegalStateException(
+                        "Xero presented a 2FA challenge but no totpSeed is configured — the "
+                                + "trust-device cookie has expired. Add totpSeed to the xero credential "
+                                + "secret or re-seed the session via SessionSeeder.");
+            }
+            // Generate at fill time to minimise the 30s-window boundary risk.
+            code.first().fill(TotpGenerator.now(seed));
+            Locator trust = page.locator(XERO_2FA_TRUST_CHECKBOX);
+            if (trust.count() > 0) {
+                try {
+                    trust.first().check(new Locator.CheckOptions().setTimeout(3_000));
+                } catch (RuntimeException ignore) {
+                    // best-effort: if we can't tick "trust this device", 2FA just recurs sooner
+                }
+            }
+            page.locator(XERO_2FA_CONFIRM_BUTTON).first().click();
+            manifest.step("auth", "submitted TOTP 2FA + trusted device (trust-device cookie had expired)");
+        } else {
+            // Neither in the app nor a recognised 2FA screen — capture for diagnosis;
+            // the wait below will throw if we genuinely never reach the app.
+            dumpDebug(page, runDir, "post-login-unrecognised");
+        }
+
+        // Block until we're in the app (post-2FA redirect or a slow login).
+        page.waitForURL(PortalRunService::offLogin,
+                new Page.WaitForURLOptions().setTimeout(60_000));
+    }
+
+    /** Best-effort HTML + screenshot dump to the run dir for post-mortem of an auth hang. */
+    private static void dumpDebug(Page page, Path runDir, String name) {
+        if (runDir == null) {
+            return;
+        }
+        try {
+            Files.writeString(runDir.resolve(name + ".html"), page.content());
+            page.screenshot(new Page.ScreenshotOptions()
+                    .setPath(runDir.resolve(name + ".png")).setFullPage(true));
+        } catch (Exception ignore) {
+            // diagnostics are best-effort; never mask the original failure
+        }
     }
 
     private static String sha256Hex(Path path) throws IOException {

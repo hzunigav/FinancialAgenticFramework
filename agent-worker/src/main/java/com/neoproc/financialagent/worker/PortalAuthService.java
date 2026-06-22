@@ -1,7 +1,7 @@
 package com.neoproc.financialagent.worker;
 
-import com.neoproc.financialagent.common.session.LocalEncryptedSessionStore;
 import com.neoproc.financialagent.common.session.SessionStore;
+import com.neoproc.financialagent.common.session.SessionStores;
 import com.neoproc.financialagent.worker.portal.PortalDescriptor;
 import com.neoproc.financialagent.worker.portal.PortalEngine;
 import com.microsoft.playwright.BrowserContext;
@@ -39,7 +39,7 @@ final class PortalAuthService {
                          BrowserContext context,
                          Page page,
                          RunManifest manifest) {
-        SessionStore sessionStore = new LocalEncryptedSessionStore();
+        SessionStore sessionStore = SessionStores.defaultStore();
         Optional<String> savedSession = loadSavedSession(sessionStore, descriptor);
 
         if (savedSession.isEmpty()) {
@@ -49,9 +49,12 @@ final class PortalAuthService {
             return false;
         } else {
             page.navigate(descriptor.baseUrl());
-            page.waitForLoadState(LoadState.NETWORKIDLE);
+            // DOMCONTENTLOADED, not NETWORKIDLE: SPA portals (e.g. Xero) keep
+            // background traffic alive and never reach network-idle, which would
+            // hang this reuse path. Adapters wait on concrete selectors anyway.
+            page.waitForLoadState(LoadState.DOMCONTENTLOADED);
             manifest.step("auth-skipped",
-                    "session-reused; navigated to " + descriptor.baseUrl() + " (networkidle)");
+                    "session-reused; navigated to " + descriptor.baseUrl() + " (domcontentloaded)");
             return true;
         }
     }

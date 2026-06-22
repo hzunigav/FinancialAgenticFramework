@@ -5,6 +5,7 @@ import org.springframework.core.env.StandardEnvironment;
 
 import java.util.function.Consumer;
 
+import static com.neoproc.financialagent.worker.config.PortalFlowsEnvironmentPostProcessor.BANKSTATEMENT_ENABLED;
 import static com.neoproc.financialagent.worker.config.PortalFlowsEnvironmentPostProcessor.CAPTURE_ENABLED;
 import static com.neoproc.financialagent.worker.config.PortalFlowsEnvironmentPostProcessor.SUBMIT_ENABLED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,6 +36,17 @@ class PortalFlowsEnvironmentPostProcessorTest {
         withPortalId("mock-payroll", env -> {
             assertEquals(Boolean.TRUE, env.getProperty(CAPTURE_ENABLED, Boolean.class));
             assertEquals(Boolean.TRUE, env.getProperty(SUBMIT_ENABLED, Boolean.class));
+        });
+    }
+
+    @Test
+    void bankStatementPortalEnablesOnlyBankStatement() {
+        // A PORTAL_ID=xero worker must register ONLY the bank-statement listener
+        // — the payroll capture/submit queues don't exist for it.
+        withPortalId("xero", env -> {
+            assertEquals(Boolean.FALSE, env.getProperty(CAPTURE_ENABLED, Boolean.class));
+            assertEquals(Boolean.FALSE, env.getProperty(SUBMIT_ENABLED, Boolean.class));
+            assertEquals(Boolean.TRUE, env.getProperty(BANKSTATEMENT_ENABLED, Boolean.class));
         });
     }
 

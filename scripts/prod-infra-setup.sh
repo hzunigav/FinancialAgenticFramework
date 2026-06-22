@@ -7,8 +7,12 @@
 #   ./scripts/prod-infra-setup.sh <portal-id> <queue-type> <image-tag>
 #
 #   portal-id   Portal identifier matching the YAML descriptor filename, e.g. ccss-sicere
-#   queue-type  Which task queues to create: capture | submit | both
+#   queue-type  Which task queues to create: capture | submit | both | bankstatement
 #   image-tag   ECR image tag to use in the initial task definition, e.g. prod-abc1234
+#
+#   bankstatement (Xero) creates a dedicated task queue + a dedicated results
+#   queue (the payroll results queue is shared and provisioned elsewhere), and
+#   wires the Xero-only env (browser channel for the Akamai-stealth launch).
 #
 # Environment (set these before running, or export them):
 #   CLUSTER          ECS cluster name       (default: financeagent)
@@ -63,7 +67,7 @@ fi
 
 # ── Argument validation ────────────────────────────────────────────────────────
 if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 <portal-id> <capture|submit|both> <image-tag>" >&2
+  echo "Usage: $0 <portal-id> <capture|submit|both|bankstatement> <image-tag>" >&2
   exit 1
 fi
 
@@ -79,7 +83,22 @@ for VAR in SUBNET_ID SG_ID EXEC_ROLE_ARN TASK_ROLE_ARN NS_ARN; do
   fi
 done
 
-echo "=== Provisioning portal: $PORTAL_ID (queue-type=$QUEUE_TYPE) ==="
+# ── Service naming ──────────────────────────────────────────────────────────
+# Payroll flows use financeagent-worker-<portal>. The bankstatement flow uses
+# financeagent-bankstatement-<portal> instead: it mirrors the queue naming
+# (bankstatement- is the flow-distinguishing token) and — deliberately — stays
+# OUT of the monthly scaling Lambda's "financeagent-worker-" prefix match, so a
+# daily-cadence Xero worker isn't swept into the payroll scaling window. (To put
+# it on its own daily window later, add "financeagent-bankstatement-" to a
+# sibling scaling schedule's SERVICE_PREFIXES.) Drives the service name, the
+# task-definition family, and the log group below.
+if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
+  SERVICE_BASENAME="financeagent-bankstatement-${PORTAL_ID}"
+else
+  SERVICE_BASENAME="financeagent-worker-${PORTAL_ID}"
+fi
+
+echo "=== Provisioning portal: $PORTAL_ID (queue-type=$QUEUE_TYPE, service=$SERVICE_BASENAME) ==="
 
 # ── Step 0: S3 artifacts bucket (idempotent, one-time per env) ────────────────
 # Holds post-run artifact uploads from every worker:
@@ -133,8 +152,33 @@ create_queue() {
 [[ "$QUEUE_TYPE" == "submit" || "$QUEUE_TYPE" == "both" ]] && \
   create_queue "${ENV_PREFIX}-financeagent-tasks-submit-${PORTAL_ID}"
 
+# Bank-statement (Xero) flow: a dedicated task queue (DLQ-backed) plus a
+# dedicated results queue. Unlike payroll, the bankstatement results queue is
+# NOT shared, so we create it here. A results queue has no redrive — the worker
+# only produces to it and Praxis consumes; a poison result should surface, not
+# silently DLQ.
+create_results_queue() {
+  local NAME="$1"
+  if aws sqs get-queue-url --queue-name "$NAME" --region "$REGION" &>/dev/null; then
+    echo "  Queue already exists: $NAME"
+    return
+  fi
+  aws sqs create-queue --queue-name "$NAME" --region "$REGION" \
+    --attributes "{
+      \"VisibilityTimeout\":            \"60\",
+      \"ReceiveMessageWaitTimeSeconds\": \"20\",
+      \"MessageRetentionPeriod\":       \"345600\"
+    }" > /dev/null
+  echo "  Created results queue: $NAME"
+}
+
+if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
+  create_queue         "${ENV_PREFIX}-financeagent-tasks-bankstatement-${PORTAL_ID}"
+  create_results_queue "${ENV_PREFIX}-financeagent-bankstatement-results"
+fi
+
 # ── Step 2: CloudWatch log group ──────────────────────────────────────────────
-LOG_GROUP="/ecs/financeagent-worker-${PORTAL_ID}"
+LOG_GROUP="/ecs/${SERVICE_BASENAME}"
 if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region "$REGION" \
     --query "logGroups[?logGroupName=='$LOG_GROUP']" --output text | grep -q .; then
   echo "  Log group already exists: $LOG_GROUP"
@@ -144,7 +188,7 @@ else
 fi
 
 # ── Step 3: Task definition ───────────────────────────────────────────────────
-SERVICE_NAME="financeagent-worker-${PORTAL_ID}"
+SERVICE_NAME="${SERVICE_BASENAME}"
 
 # Build environment array; add MOCK_PORTAL_BASE_URL only for mock-payroll
 ENV_JSON="[
@@ -159,6 +203,21 @@ ENV_JSON="[
 
 if [[ "$PORTAL_ID" == "mock-payroll" ]]; then
   ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"MOCK_PORTAL_BASE_URL","value":"http://testing-harness:3000"}]')
+fi
+
+# Xero (bankstatement): the adapter launches a STEALTH browser to clear Akamai
+# Bot Manager. XERO_BROWSER_CHANNEL is set EMPTY here so the worker uses the
+# image's BUNDLED Chromium rather than branded Chrome: the playwright/java image
+# has no branded Chrome, and it isn't available for ARM64 Linux anyway. Validated
+# 2026-06-20 (XeroAkamaiProbe inside this exact image): bundled Chromium + the
+# stealth launch, headless, renders the Xero login with NO Akamai block. Locally
+# the code defaults to channel=chrome (devs have it); the empty env overrides it
+# in-container. The shared Xero login + TOTP seed come from Secrets Manager via
+# FINANCEAGENT_CREDENTIALS=aws (path: <prefix>/financeagent/shared/portals/xero),
+# and the persisted browser session is stored via the AWS Secrets-Manager+KMS
+# SessionStore so it survives scale-to-zero.
+if [[ "$PORTAL_ID" == "xero" ]]; then
+  ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"XERO_BROWSER_CHANNEL","value":""}]')
 fi
 
 TD_JSON=$(jq -n \
@@ -241,3 +300,33 @@ echo "        \"Resource\": \"arn:aws:s3:::${ARTIFACTS_BUCKET}/*\" }"
 echo ""
 echo "    Praxis (read-side): grant the Praxis BPM execution role s3:GetObject + s3:ListBucket"
 echo "    on arn:aws:s3:::${ARTIFACTS_BUCKET} so workflow steps can fetch audit.manifestPath."
+
+if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
+  echo ""
+  echo "  === Xero (bankstatement) extra steps ==="
+  echo "    1. Secrets Manager — create the shared login + TOTP seed (JSON key-value map;"
+  echo "       AwsSecretsManagerCredentialsProvider resolves shared scope to this exact path):"
+  echo "         aws secretsmanager create-secret \\"
+  echo "           --name ${ENV_PREFIX}/financeagent/shared/portals/xero \\"
+  echo "           --secret-string '{\"username\":\"...\",\"password\":\"...\",\"totpSeed\":\"BASE32SEED\"}'"
+  echo "    2. Session secret — ${ENV_PREFIX}/financeagent/sessions/xero is created/updated by the"
+  echo "       worker itself (AwsSecretsManagerSessionStore). Optionally pre-create it, and to use"
+  echo "       a customer-managed KMS key set FINANCEAGENT_SESSION_KMS_KEY_ID on the task def."
+  echo "       (Optional) seed it once via SessionSeeder so the FIRST prod run skips 2FA."
+  echo "    3. IAM — the task role needs:"
+  echo "         secretsmanager:GetSecretValue on  ${ENV_PREFIX}/financeagent/shared/portals/xero"
+  echo "         secretsmanager:GetSecretValue/PutSecretValue/CreateSecret/DeleteSecret on"
+  echo "                                           ${ENV_PREFIX}/financeagent/sessions/xero"
+  echo "         kms:Encrypt/Decrypt/GenerateDataKey on the session KMS key (if a CMK is used)"
+  echo "         sqs:ReceiveMessage/DeleteMessage/GetQueueAttributes on the task queue ARN"
+  echo "           arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-tasks-bankstatement-${PORTAL_ID}"
+  echo "         sqs:SendMessage on the results queue ARN"
+  echo "           arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-bankstatement-results"
+  echo "       (add to AgentWorkerSqsFinanceagent ConsumeTasks / PublishResults statements)."
+  echo ""
+  echo "    Akamai + headless: RESOLVED 2026-06-20. The stealth launch with the image's"
+  echo "    BUNDLED Chromium (XERO_BROWSER_CHANNEL empty, set above) renders the Xero login"
+  echo "    headless with no Akamai block — verified via XeroAkamaiProbe inside this exact"
+  echo "    playwright/java:v1.48.0-jammy image. No branded-Chrome layer or xvfb needed; stay"
+  echo "    on ARM64. Re-run the probe if the base image or Playwright version changes."
+fi

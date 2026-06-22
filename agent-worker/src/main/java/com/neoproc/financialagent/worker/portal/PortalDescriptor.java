@@ -35,6 +35,7 @@ public record PortalDescriptor(
 
     public static final String FLOW_CAPTURE = "capture";
     public static final String FLOW_SUBMIT = "submit";
+    public static final String FLOW_BANKSTATEMENT = "bankstatement";
 
     /**
      * Which task flows this portal handles — drives which {@code @SqsListener}
@@ -60,6 +61,16 @@ public record PortalDescriptor(
 
     public boolean handlesSubmit() {
         return flows().contains(FLOW_SUBMIT);
+    }
+
+    /**
+     * Bank-statement upload flow (Xero). A bankstatement-only portal must
+     * declare {@code flows: [bankstatement]} explicitly — otherwise the empty
+     * default ({@code [capture, submit]}) would register the payroll listeners
+     * and never the bank-statement one.
+     */
+    public boolean handlesBankStatement() {
+        return flows().contains(FLOW_BANKSTATEMENT);
     }
 
     public boolean isShadowMode() {
@@ -165,7 +176,7 @@ public record PortalDescriptor(
     }
 
     public enum Action {
-        navigate, fill, click, waitForUrl, waitForSelector, select, pause, forEach,
+        navigate, fill, click, waitForUrl, waitForSelector, select, pause, totp, forEach,
         when, expect,
         @JsonProperty("while") whileLoop
     }

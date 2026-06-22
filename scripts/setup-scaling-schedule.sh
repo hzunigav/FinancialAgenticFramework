@@ -1,23 +1,39 @@
 #!/usr/bin/env bash
 # setup-scaling-schedule.sh — one-time provisioning for calendar-based
-# scale-to-zero of the financeagent worker services.
+# scale-to-zero of the financeagent ECS services across two cadences.
 #
 # Creates (idempotently):
-#   - IAM role for the scaling Lambda (ecs:UpdateService on the cluster)
+#   - IAM role for the scaling Lambda (ecs:UpdateService + ecs:ListServices)
 #   - Lambda function `financeagent-scaling` (code: scaling-lambda.py)
 #   - IAM role for EventBridge Scheduler (lambda:InvokeFunction)
-#   - Two schedules in America/Costa_Rica timezone:
-#       financeagent-scale-up   → cron(0 0 L-2 * ? *)   (midnight CR, L-2 of prior month)
-#       financeagent-scale-down → cron(0 0 9 * ? *)     (midnight CR, day 9 of new month)
+#   - Four schedules in America/Costa_Rica timezone:
 #
-# Active window: L-2 of prior month 00:00 CR → day 9 00:00 CR (~11 calendar days).
+#       MONTHLY (payroll workers + testing-harness, ~11 days/month active):
+#         financeagent-monthly-scale-up   cron(0 0 L-2 * ? *)  — L-2 of prior month 00:00
+#         financeagent-monthly-scale-down cron(0 0 9 * ? *)    — day 9 of new month 00:00
+#         Prefixes: financeagent-worker-,testing-harness
 #
-# Run from AWS CloudShell. Requires zip (preinstalled) and the scaling-lambda.py
-# file present alongside this script.
+#       DAILY (bank-statement portals such as Xero, ~2 hours/day active):
+#         financeagent-daily-scale-up   cron(0 6 * * ? *)  — every day 06:00
+#         financeagent-daily-scale-down cron(0 8 * * ? *)  — every day 08:00
+#         Prefixes: financeagent-bankstatement-
 #
-# Cost impact: 6 services scaled to 0 for ~19 days/month → ~$60/mo Fargate
-# (down from ~$164 always-on on Graviton). EventBridge + Lambda invocations
-# are free at this volume.
+# Each schedule passes its own prefixes in the event payload, so the same
+# Lambda handles both cadences. New portals are picked up automatically by
+# whichever schedule's prefix matches their service name.
+#
+# Run from AWS CloudShell. Requires zip (preinstalled) and scaling-lambda.py
+# alongside this script.
+#
+# Cost impact (Graviton, us-east-1):
+#   - 5 workers + harness on monthly cadence: ~$60/mo
+#   - 1 Xero portal on daily 2-hour window:  ~$2.50/mo
+#   EventBridge + Lambda invocations are free at this volume.
+#
+# Override the daily window with env vars:
+#   DAILY_UP_HOUR=6      (default 06:00 CR scale-up)
+#   DAILY_DOWN_HOUR=8    (default 08:00 CR scale-down)
+#   DAILY_PREFIXES=financeagent-bankstatement-
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
@@ -29,10 +45,16 @@ LAMBDA_NAME="financeagent-scaling"
 LAMBDA_ROLE_NAME="FinanceAgentScalingLambdaRole"
 SCHEDULER_ROLE_NAME="FinanceAgentSchedulerRole"
 
-# The Lambda discovers services by prefix at runtime. New portals are picked
-# up automatically as long as their ECS service name starts with one of these.
-# Prefixes end with "-"; bare names match by exact equality.
-SERVICE_PREFIXES="financeagent-worker-,testing-harness"
+# Cadence configuration. Each cadence has its own service-name prefix list;
+# the Lambda receives the relevant list in the schedule's event payload.
+MONTHLY_PREFIXES="${MONTHLY_PREFIXES:-financeagent-worker-,testing-harness}"
+DAILY_PREFIXES="${DAILY_PREFIXES:-financeagent-bankstatement-}"
+DAILY_UP_HOUR="${DAILY_UP_HOUR:-6}"
+DAILY_DOWN_HOUR="${DAILY_DOWN_HOUR:-8}"
+
+# Fallback env var for ad-hoc Lambda invocations that omit `prefixes`.
+# Schedules always supply prefixes per-event, so this is only a convenience.
+FALLBACK_PREFIXES="$MONTHLY_PREFIXES"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LAMBDA_SRC="$SCRIPT_DIR/scaling-lambda.py"
@@ -88,7 +110,7 @@ TMP=$(mktemp -d)
 cp "$LAMBDA_SRC" "$TMP/lambda_function.py"
 (cd "$TMP" && zip -q lambda.zip lambda_function.py)
 
-ENV_VARS="Variables={CLUSTER=$CLUSTER,SERVICE_PREFIXES=$SERVICE_PREFIXES}"
+ENV_VARS="Variables={CLUSTER=$CLUSTER,SERVICE_PREFIXES=$FALLBACK_PREFIXES}"
 
 if aws lambda get-function --function-name "$LAMBDA_NAME" --region "$REGION" &>/dev/null; then
   aws lambda update-function-code --function-name "$LAMBDA_NAME" \
@@ -155,7 +177,17 @@ aws iam put-role-policy --role-name "$SCHEDULER_ROLE_NAME" \
 SCHEDULER_ROLE_ARN=$(aws iam get-role --role-name "$SCHEDULER_ROLE_NAME" --query 'Role.Arn' --output text)
 echo "  ARN: $SCHEDULER_ROLE_ARN"
 
-# ── 4. Schedules ──────────────────────────────────────────────────────────────
+# ── 4. Cleanup of legacy schedule names ───────────────────────────────────────
+# Earlier versions of this script used unsuffixed names. Remove them so the
+# only live schedules are the monthly-/daily- pair below.
+for OLD in financeagent-scale-up financeagent-scale-down; do
+  if aws scheduler get-schedule --name "$OLD" --region "$REGION" &>/dev/null; then
+    aws scheduler delete-schedule --name "$OLD" --region "$REGION" > /dev/null
+    echo "  Deleted legacy schedule: $OLD"
+  fi
+done
+
+# ── 5. Schedules ──────────────────────────────────────────────────────────────
 echo "── Schedules ──"
 
 upsert_schedule() {
@@ -180,21 +212,36 @@ upsert_schedule() {
 }
 
 # INPUT must be a JSON STRING containing JSON (double-encoded for the API).
-upsert_schedule "financeagent-scale-up"   "cron(0 0 L-2 * ? *)" '"{\"action\":\"up\"}"'
-upsert_schedule "financeagent-scale-down" "cron(0 0 9 * ? *)"   '"{\"action\":\"down\"}"'
+# Build the per-cadence payloads with prefixes embedded so the Lambda routes
+# to the correct service set regardless of which schedule fires.
+MONTHLY_UP_INPUT="\"{\\\"action\\\":\\\"up\\\",\\\"prefixes\\\":\\\"${MONTHLY_PREFIXES}\\\"}\""
+MONTHLY_DOWN_INPUT="\"{\\\"action\\\":\\\"down\\\",\\\"prefixes\\\":\\\"${MONTHLY_PREFIXES}\\\"}\""
+DAILY_UP_INPUT="\"{\\\"action\\\":\\\"up\\\",\\\"prefixes\\\":\\\"${DAILY_PREFIXES}\\\"}\""
+DAILY_DOWN_INPUT="\"{\\\"action\\\":\\\"down\\\",\\\"prefixes\\\":\\\"${DAILY_PREFIXES}\\\"}\""
+
+upsert_schedule "financeagent-monthly-scale-up"   "cron(0 0 L-2 * ? *)" "$MONTHLY_UP_INPUT"
+upsert_schedule "financeagent-monthly-scale-down" "cron(0 0 9 * ? *)"   "$MONTHLY_DOWN_INPUT"
+upsert_schedule "financeagent-daily-scale-up"     "cron(0 ${DAILY_UP_HOUR} * * ? *)"   "$DAILY_UP_INPUT"
+upsert_schedule "financeagent-daily-scale-down"   "cron(0 ${DAILY_DOWN_HOUR} * * ? *)" "$DAILY_DOWN_INPUT"
 
 echo ""
 echo "=== Setup complete ==="
-echo "Active window: L-2 of prior month 00:00 $TIMEZONE → day 9 00:00 $TIMEZONE"
-echo "Services managed:"
-echo "$SERVICES" | tr ',' '\n' | sed 's/^/  - /'
+echo "Monthly cadence: L-2 of prior month 00:00 → day 9 00:00 $TIMEZONE"
+echo "  Prefixes: $MONTHLY_PREFIXES"
+echo "Daily cadence: ${DAILY_UP_HOUR}:00 → ${DAILY_DOWN_HOUR}:00 $TIMEZONE"
+echo "  Prefixes: $DAILY_PREFIXES"
 echo ""
-echo "Smoke test (scale UP now):"
+echo "Smoke test (scale UP the monthly set now):"
 echo "  aws lambda invoke --function-name $LAMBDA_NAME \\"
-echo "    --payload '{\"action\":\"up\"}' \\"
+echo "    --payload '{\"action\":\"up\",\"prefixes\":\"$MONTHLY_PREFIXES\"}' \\"
 echo "    --cli-binary-format raw-in-base64-out /tmp/scale.json && cat /tmp/scale.json"
 echo ""
-echo "Disable schedules (e.g. for an off-cycle freeze):"
-echo "  aws scheduler get-schedule --name financeagent-scale-up --region $REGION \\"
+echo "Smoke test (scale UP the daily set now):"
+echo "  aws lambda invoke --function-name $LAMBDA_NAME \\"
+echo "    --payload '{\"action\":\"up\",\"prefixes\":\"$DAILY_PREFIXES\"}' \\"
+echo "    --cli-binary-format raw-in-base64-out /tmp/scale.json && cat /tmp/scale.json"
+echo ""
+echo "Disable a schedule (e.g. for an off-cycle freeze):"
+echo "  aws scheduler get-schedule --name financeagent-monthly-scale-up --region $REGION \\"
 echo "    | jq '.State = \"DISABLED\"' \\"
 echo "    | aws scheduler update-schedule --cli-input-json file:///dev/stdin --region $REGION"

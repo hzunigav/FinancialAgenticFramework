@@ -2,6 +2,7 @@ package com.neoproc.financialagent.worker.portal;
 
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.SelectOption;
+import com.neoproc.financialagent.worker.auth.TotpGenerator;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -112,6 +113,16 @@ public final class PortalEngine {
                             "select.match must be 'label' or 'value', got: " + step.match());
                 };
                 page.locator(resolvedSelector).selectOption(opt);
+            }
+            case totp -> {
+                // Generate a fresh RFC 6238 code from the base32 seed (resolved
+                // from a credentials binding, e.g. ${credentials.totpSeed}) and
+                // type it into the 2FA field. Seed and code are never audited.
+                String resolvedSelector = resolve(step.selector());
+                String seed = resolve(step.value());
+                String code = TotpGenerator.now(seed);
+                audit("totp", resolvedSelector + " (code redacted)");
+                page.locator(resolvedSelector).fill(code);
             }
             case pause -> {
                 String bindTo = step.bindTo();

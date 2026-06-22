@@ -1,21 +1,35 @@
 """
-scaling-lambda — flips the desired-count of every financeagent worker service
-between 0 and 1 to implement calendar-based scale-to-zero.
+scaling-lambda — flips the desired-count of one or more financeagent ECS
+services between 0 and 1 to implement calendar-based scale-to-zero.
 
-Triggered by two EventBridge Scheduler rules (see setup-scaling-schedule.sh):
-  - financeagent-scale-up   fires at midnight CR on L-2 of each month
-  - financeagent-scale-down fires at midnight CR on day 9 of each month
+Triggered by EventBridge Scheduler rules (see setup-scaling-schedule.sh).
+Two cadences are wired by default:
 
-Event payload: {"action": "up"} or {"action": "down"}
+  Monthly (payroll workers + testing-harness):
+    financeagent-monthly-scale-up   — L-2 of prior month 00:00 CR
+    financeagent-monthly-scale-down — day 9 of new month 00:00 CR
+
+  Daily (bank-statement portals such as Xero):
+    financeagent-daily-scale-up   — every day at DAILY_UP_HOUR CR
+    financeagent-daily-scale-down — every day at DAILY_DOWN_HOUR CR
+
+Event payload:
+  {"action": "up"|"down", "prefixes": "<csv-of-prefixes>"}
+
+  The `prefixes` field is normally supplied by the schedule and determines
+  which services this firing targets. For ad-hoc invocations, the
+  SERVICE_PREFIXES env var is used as a fallback if the event omits it.
+
 Env vars:
   CLUSTER          ECS cluster name (e.g. financeagent)
-  SERVICE_PREFIXES Comma-separated list of service name prefixes to match
-                   (e.g. "financeagent-worker-,testing-harness"). Trailing
-                   "-" makes it a prefix; exact name (no "-") matches by equality.
+  SERVICE_PREFIXES Fallback prefixes for ad-hoc invocations only — schedules
+                   pass their own prefixes per-event so this env can be
+                   absent in normal operation.
 
-Service discovery is dynamic: new portals provisioned via prod-infra-setup.sh
-are picked up automatically on the next schedule firing, as long as their
-service name starts with one of the configured prefixes.
+Prefix semantics: a value ending in "-" matches any service whose name
+starts with it (prefix); a bare name matches only on equality. So
+"financeagent-worker-,testing-harness" matches every payroll worker plus
+the exact name "testing-harness".
 
 Idempotent: re-firing the same action is a no-op (ECS UpdateService accepts
 the same desiredCount silently).
@@ -28,18 +42,28 @@ from botocore.exceptions import ClientError
 
 ecs = boto3.client("ecs")
 CLUSTER = os.environ["CLUSTER"]
-PREFIXES = [p.strip() for p in os.environ["SERVICE_PREFIXES"].split(",") if p.strip()]
 
 
-def _discover_services():
-    """List active services in the cluster matching any configured prefix."""
+def _resolve_prefixes(event):
+    """Prefer event.prefixes (scheduled invocation); fall back to env (ad-hoc)."""
+    raw = event.get("prefixes") or os.environ.get("SERVICE_PREFIXES", "")
+    prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+    if not prefixes:
+        raise ValueError(
+            "No prefixes — pass event.prefixes or set SERVICE_PREFIXES env"
+        )
+    return prefixes
+
+
+def _discover_services(prefixes):
+    """List active services in the cluster matching any prefix."""
     matched = []
     paginator = ecs.get_paginator("list_services")
     for page in paginator.paginate(cluster=CLUSTER, maxResults=100):
         for arn in page["serviceArns"]:
             # ARN tail: arn:aws:ecs:region:account:service/cluster/<service-name>
             name = arn.rsplit("/", 1)[-1]
-            if any(name == p or (p.endswith("-") and name.startswith(p)) for p in PREFIXES):
+            if any(name == p or (p.endswith("-") and name.startswith(p)) for p in prefixes):
                 matched.append(name)
     return matched
 
@@ -53,11 +77,12 @@ def lambda_handler(event, _context):
     else:
         raise ValueError(f"event.action must be 'up' or 'down', got {action!r}")
 
-    services = _discover_services()
+    prefixes = _resolve_prefixes(event)
+    services = _discover_services(prefixes)
     if not services:
-        msg = f"No services matched prefixes {PREFIXES} in cluster {CLUSTER}"
-        print(json.dumps({"action": action, "warning": msg}))
-        return {"action": action, "warning": msg}
+        msg = f"No services matched prefixes {prefixes} in cluster {CLUSTER}"
+        print(json.dumps({"action": action, "prefixes": prefixes, "warning": msg}))
+        return {"action": action, "prefixes": prefixes, "warning": msg}
 
     results = []
     for svc in services:
@@ -74,5 +99,5 @@ def lambda_handler(event, _context):
                 "error": str(e),
             })
 
-    print(json.dumps({"action": action, "results": results}))
-    return {"action": action, "results": results}
+    print(json.dumps({"action": action, "prefixes": prefixes, "results": results}))
+    return {"action": action, "prefixes": prefixes, "results": results}

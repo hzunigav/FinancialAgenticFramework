@@ -233,7 +233,14 @@ public class BankStatementTaskListener {
     }
 
     private static String extractStatus(BankStatementUploadResult result) {
-        if (result.result() instanceof ResultBody body) return body.status().name();
+        Object body = result.result();
+        if (body instanceof ResultBody rb) return rb.status().name();
+        // Cleartext bodies round-trip through JSON as a Map (the field is Object),
+        // so read the status from it directly — only a genuine ciphertext String
+        // is "ENCRYPTED" (logging only; doesn't affect the published envelope).
+        if (body instanceof java.util.Map<?, ?> m && m.get("status") != null) {
+            return String.valueOf(m.get("status"));
+        }
         return "ENCRYPTED";
     }
 }

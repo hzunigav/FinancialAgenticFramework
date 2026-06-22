@@ -102,8 +102,11 @@ safety net — but please avoid blind redelivery of an already-succeeded `busine
 - Results queue: `<prefix>-financeagent-bankstatement-results`
 - DLQ: the shared `<prefix>-financeagent-dlq` (`maxReceiveCount=5`)
 - Shared Xero login secret (one Practice login fronts all client orgs):
-  proposed **`<prefix>/financeagent/shared/portals/xero/ui-login`** with
-  `{username, password, totpSeed}`. Confirm the path and we'll wire it.
+  **`<prefix>/financeagent/shared/portals/xero`** — a JSON map
+  `{username, password, totpSeed}` (the path the worker's shared-scope credential
+  provider resolves to).
+- Session secret: **`<prefix>/financeagent/sessions/xero`** — managed by the worker
+  (persisted Playwright session; survives scale-to-zero). NeoProc-side only.
 
 ---
 

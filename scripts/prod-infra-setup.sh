@@ -198,7 +198,7 @@ fi
 # stealth launch, headless, renders the Xero login with NO Akamai block. Locally
 # the code defaults to channel=chrome (devs have it); the empty env overrides it
 # in-container. The shared Xero login + TOTP seed come from Secrets Manager via
-# FINANCEAGENT_CREDENTIALS=aws (path: <prefix>/financeagent/shared/portals/xero/ui-login),
+# FINANCEAGENT_CREDENTIALS=aws (path: <prefix>/financeagent/shared/portals/xero),
 # and the persisted browser session is stored via the AWS Secrets-Manager+KMS
 # SessionStore so it survives scale-to-zero.
 if [[ "$PORTAL_ID" == "xero" ]]; then
@@ -289,19 +289,25 @@ echo "    on arn:aws:s3:::${ARTIFACTS_BUCKET} so workflow steps can fetch audit.
 if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
   echo ""
   echo "  === Xero (bankstatement) extra steps ==="
-  echo "    1. Secrets Manager — create the shared login + TOTP seed:"
+  echo "    1. Secrets Manager — create the shared login + TOTP seed (JSON key-value map;"
+  echo "       AwsSecretsManagerCredentialsProvider resolves shared scope to this exact path):"
   echo "         aws secretsmanager create-secret \\"
-  echo "           --name ${ENV_PREFIX}/financeagent/shared/portals/xero/ui-login \\"
+  echo "           --name ${ENV_PREFIX}/financeagent/shared/portals/xero \\"
   echo "           --secret-string '{\"username\":\"...\",\"password\":\"...\",\"totpSeed\":\"BASE32SEED\"}'"
-  echo "       The task role must allow secretsmanager:GetSecretValue on that ARN (and the"
-  echo "       session-store secret), plus kms:Encrypt/Decrypt on the session-store KMS key."
-  echo "    2. Seed the browser session once (so the worker reuses it through scale-to-zero):"
-  echo "       run the assisted login locally and persist storageState via SessionSeeder."
-  echo "    3. IAM: add the task queue ARN"
-  echo "         arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-tasks-bankstatement-${PORTAL_ID}"
-  echo "       to AgentWorkerSqsFinanceagent ConsumeTasks, and the results queue ARN"
-  echo "         arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-bankstatement-results"
-  echo "       to the PublishResults statement."
+  echo "    2. Session secret — ${ENV_PREFIX}/financeagent/sessions/xero is created/updated by the"
+  echo "       worker itself (AwsSecretsManagerSessionStore). Optionally pre-create it, and to use"
+  echo "       a customer-managed KMS key set FINANCEAGENT_SESSION_KMS_KEY_ID on the task def."
+  echo "       (Optional) seed it once via SessionSeeder so the FIRST prod run skips 2FA."
+  echo "    3. IAM — the task role needs:"
+  echo "         secretsmanager:GetSecretValue on  ${ENV_PREFIX}/financeagent/shared/portals/xero"
+  echo "         secretsmanager:GetSecretValue/PutSecretValue/CreateSecret/DeleteSecret on"
+  echo "                                           ${ENV_PREFIX}/financeagent/sessions/xero"
+  echo "         kms:Encrypt/Decrypt/GenerateDataKey on the session KMS key (if a CMK is used)"
+  echo "         sqs:ReceiveMessage/DeleteMessage/GetQueueAttributes on the task queue ARN"
+  echo "           arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-tasks-bankstatement-${PORTAL_ID}"
+  echo "         sqs:SendMessage on the results queue ARN"
+  echo "           arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-bankstatement-results"
+  echo "       (add to AgentWorkerSqsFinanceagent ConsumeTasks / PublishResults statements)."
   echo ""
   echo "    Akamai + headless: RESOLVED 2026-06-20. The stealth launch with the image's"
   echo "    BUNDLED Chromium (XERO_BROWSER_CHANNEL empty, set above) renders the Xero login"

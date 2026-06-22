@@ -80,6 +80,7 @@ jobs:
           - ccss-sicere
           - ins-rt-virtual
           - hacienda-ovi
+          - xero
       fail-fast: false   # one portal failure doesn't block the others
 
     steps:

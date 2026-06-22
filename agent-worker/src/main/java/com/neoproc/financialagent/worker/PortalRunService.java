@@ -7,6 +7,7 @@ import com.neoproc.financialagent.common.credentials.PortalCredentials;
 import com.neoproc.financialagent.common.crypto.EnvelopeCipher;
 import com.neoproc.financialagent.common.session.SessionStores;
 import com.neoproc.financialagent.contract.bankstatement.BankStatementUploadRequest;
+import com.neoproc.financialagent.contract.bankstatement.ErrorCategory;
 import com.neoproc.financialagent.contract.bankstatement.FileBody;
 import com.neoproc.financialagent.contract.payroll.PayrollSubmitRequest;
 import com.neoproc.financialagent.worker.artifact.S3ArtifactStore;
@@ -85,30 +86,30 @@ public class PortalRunService {
     // 2FA challenge selectors. Xero only shows a TOTP prompt after the password
     // step when the trust-device cookie has expired (~30 days) or been revoked.
     // The exact DOM wasn't in the Phase-0 capture, so these are candidate sets
-    // matching Xero's XUI conventions (X--input / X--button) plus generic
-    // one-time-code fallbacks; the first real challenge is auto-dumped so they
-    // can be hardened. The "trust this device" check re-mints the ~30-day cookie
-    // so 2FA stays rare (≈ monthly per worker).
+    // matching Xero's XUI conventions. The PRIMARY selectors below were
+    // confirmed live in prod (2026-06-22, post-login-unrecognised.html dump):
+    // Xero's 2FA page uses lowercase hyphenated automationids
+    // (auth-onetimepassword--input / auth-remembermecheckbox--input /
+    // auth-submitcodebutton). The remaining entries are fallbacks. The "remember
+    // me" check re-mints the ~30-day trust-device cookie so 2FA stays rare.
     private static final String XERO_2FA_CODE_INPUT = String.join(", ",
+            "[data-automationid='auth-onetimepassword--input']",
             "[data-automationid='AuthenticationCode--input']",
-            "[data-automationid='Confirmation--input']",
-            "[data-automationid='TwoStepAuthentication--input']",
-            "[data-automationid='Totp--input']",
+            "input[placeholder='123456']",
             "input[autocomplete='one-time-code']",
             "input[name='AuthenticationCode']",
-            "input[name='Code']",
-            "input[id*='totp' i]",
-            "input[id*='authentication-code' i]");
+            "input[id*='onetimepassword' i]",
+            "input[id*='totp' i]");
     private static final String XERO_2FA_TRUST_CHECKBOX = String.join(", ",
+            "[data-automationid='auth-remembermecheckbox--input']",
             "[data-automationid='RememberMe--checkbox']",
-            "[data-automationid='TrustThisDevice--checkbox']",
             "input[type='checkbox'][name*='emember' i]",
             "input[type='checkbox'][name*='rust' i]",
             "input[type='checkbox']");
     private static final String XERO_2FA_CONFIRM_BUTTON = String.join(", ",
+            "[data-automationid='auth-submitcodebutton']",
+            "[data-automationid='auth-continuebutton']",
             "[data-automationid='ConfirmAuthentication--button']",
-            "[data-automationid='Confirm--button']",
-            "[data-automationid='LoginSubmit--button']",
             "button[type='submit']");
 
     private final Path artifactsRoot;
@@ -431,27 +432,42 @@ public class PortalRunService {
             // Unconditionally filling the login form breaks the warm-session case
             // (no form is rendered -> fill times out, run parks on the homepage)
             // — observed on the first warm re-run.
-            page.navigate(descriptor.baseUrl());
-            boolean loginFormShown;
+            boolean authOk = true;
             try {
-                page.waitForSelector(XERO_USERNAME_INPUT,
-                        new Page.WaitForSelectorOptions().setTimeout(15_000));
-                loginFormShown = true;
-            } catch (RuntimeException alreadyAuthenticated) {
-                loginFormShown = false;
+                page.navigate(descriptor.baseUrl());
+                boolean loginFormShown;
+                try {
+                    page.waitForSelector(XERO_USERNAME_INPUT,
+                            new Page.WaitForSelectorOptions().setTimeout(15_000));
+                    loginFormShown = true;
+                } catch (RuntimeException alreadyAuthenticated) {
+                    loginFormShown = false;
+                }
+                if (loginFormShown) {
+                    engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());   // navigate + fill user/pass + submit
+                    completeXeroLogin(page, credentials, manifest, runDir);          // optional TOTP 2FA, then wait into the app
+                    manifest.step("auth", "logged in via authSteps for portal=" + descriptor.id());
+                } else {
+                    manifest.step("auth", "session reuse — already authenticated, login skipped");
+                }
+                manifest.portal.sessionReused = !loginFormShown;
+                PortalAuthService.saveSessionIfEnabled(SessionStores.defaultStore(), descriptor, context);
+            } catch (RuntimeException authEx) {
+                // Auth/2FA didn't settle. DON'T throw — record it so the adapter
+                // still emits a retryable AUTH result for Praxis (a bare throw
+                // would leave the results queue empty). beforeSteps is skipped.
+                authOk = false;
+                adapter.markAuthFailure(ErrorCategory.SESSION_EXPIRED,
+                        "Xero login/2FA did not complete: " + authEx.getClass().getSimpleName()
+                                + ": " + authEx.getMessage());
+                log.warn("xero auth failed portal={} error={}", descriptor.id(), authEx.toString());
+                manifest.step("auth-failed", authEx.getClass().getSimpleName() + ": " + authEx.getMessage());
             }
-            if (loginFormShown) {
-                engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());   // navigate + fill user/pass + submit
-                completeXeroLogin(page, credentials, manifest, runDir);          // optional TOTP 2FA, then wait into the app
-                manifest.step("auth", "logged in via authSteps for portal=" + descriptor.id());
-            } else {
-                manifest.step("auth", "session reuse — already authenticated, login skipped");
-            }
-            manifest.portal.sessionReused = !loginFormShown;
-            PortalAuthService.saveSessionIfEnabled(SessionStores.defaultStore(), descriptor, context);
 
-            adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);
-            engine.runSteps(descriptor.baseUrl(), descriptor.steps());
+            if (authOk) {
+                adapter.beforeSteps(descriptor, page, bindings, listBindings, credentials, manifest);
+                engine.runSteps(descriptor.baseUrl(), descriptor.steps());
+            }
 
             manifest.step("screenshot", "report.png");
             page.screenshot(new Page.ScreenshotOptions()

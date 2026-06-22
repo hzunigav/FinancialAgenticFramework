@@ -128,6 +128,19 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         }
     }
 
+    /**
+     * Records an auth-phase failure that happened in {@code PortalRunService}
+     * BEFORE {@link #beforeSteps} ran (e.g. the login/2FA never settled), so the
+     * adapter still emits a result envelope instead of the run throwing with no
+     * result for Praxis to correlate. Marked {@code AUTH} → retryable (transient:
+     * re-seed / redeliver).
+     */
+    void markAuthFailure(ErrorCategory category, String message) {
+        this.failedStage = FailedStage.AUTH;
+        this.errorCategory = category;
+        this.errorMessage = message;
+    }
+
     // --- UI stages ----------------------------------------------------------
 
     private Locator switchOrgAndSelectAccount(Page page, BankStatementTask task, RunManifest manifest) {
@@ -416,11 +429,15 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
             errors.add(new ErrorItem(primary, message, ErrorSeverity.ERROR));
         }
 
+        // AUTH failures are transient (session/2FA) → retryable: redeliver or
+        // re-seed and try again. Upload/verify/reconciliation failures need a
+        // human, not a blind retry (a re-upload risks duplicates).
+        boolean retryable = failedStage == FailedStage.AUTH;
         ResultBody body = new ResultBody(
                 status,
                 status == BankStatementStatus.SUCCESS ? null : primary,
                 status == BankStatementStatus.SUCCESS ? null : message,
-                false,                                   // upload failures need a human, not a retry
+                retryable,
                 failedStage,
                 orgSelected ? task.xeroOrgName() : null,
                 accountSelected ? task.bankAccountNumber() + " (" + task.currency() + ")" : null,

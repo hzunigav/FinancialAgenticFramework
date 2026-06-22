@@ -190,16 +190,19 @@ if [[ "$PORTAL_ID" == "mock-payroll" ]]; then
   ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"MOCK_PORTAL_BASE_URL","value":"http://testing-harness:3000"}]')
 fi
 
-# Xero (bankstatement): the adapter launches a stealth real-Chrome to clear
-# Akamai Bot Manager (a vanilla Chromium gets a 403). XERO_BROWSER_CHANNEL picks
-# the channel; the runtime image must actually contain that channel (see the
-# OPEN ITEM note at the end — branded Chrome + headless on Fargate is unverified).
-# The shared Xero login + TOTP seed come from Secrets Manager via
+# Xero (bankstatement): the adapter launches a STEALTH browser to clear Akamai
+# Bot Manager. XERO_BROWSER_CHANNEL is set EMPTY here so the worker uses the
+# image's BUNDLED Chromium rather than branded Chrome: the playwright/java image
+# has no branded Chrome, and it isn't available for ARM64 Linux anyway. Validated
+# 2026-06-20 (XeroAkamaiProbe inside this exact image): bundled Chromium + the
+# stealth launch, headless, renders the Xero login with NO Akamai block. Locally
+# the code defaults to channel=chrome (devs have it); the empty env overrides it
+# in-container. The shared Xero login + TOTP seed come from Secrets Manager via
 # FINANCEAGENT_CREDENTIALS=aws (path: <prefix>/financeagent/shared/portals/xero/ui-login),
 # and the persisted browser session is stored via the AWS Secrets-Manager+KMS
 # SessionStore so it survives scale-to-zero.
 if [[ "$PORTAL_ID" == "xero" ]]; then
-  ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"XERO_BROWSER_CHANNEL","value":"chrome"}]')
+  ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"XERO_BROWSER_CHANNEL","value":""}]')
 fi
 
 TD_JSON=$(jq -n \
@@ -300,9 +303,9 @@ if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
   echo "         arn:aws:sqs:${REGION}:${ACCOUNT}:${ENV_PREFIX}-financeagent-bankstatement-results"
   echo "       to the PublishResults statement."
   echo ""
-  echo "    OPEN ITEM — Akamai + headless: the adapter uses a stealth real-Chrome launch"
-  echo "    (XERO_BROWSER_CHANNEL=chrome). The playwright/java:v1.48.0-jammy runtime image"
-  echo "    ships Chromium, NOT branded Chrome, and the stealth launch is unverified headless"
-  echo "    in-container. Validate on first deploy; if Akamai 403s, add a Chrome layer to the"
-  echo "    Dockerfile and/or run headed via xvfb. This does not affect the Praxis contract."
+  echo "    Akamai + headless: RESOLVED 2026-06-20. The stealth launch with the image's"
+  echo "    BUNDLED Chromium (XERO_BROWSER_CHANNEL empty, set above) renders the Xero login"
+  echo "    headless with no Akamai block — verified via XeroAkamaiProbe inside this exact"
+  echo "    playwright/java:v1.48.0-jammy image. No branded-Chrome layer or xvfb needed; stay"
+  echo "    on ARM64. Re-run the probe if the base image or Playwright version changes."
 fi

@@ -107,8 +107,8 @@ safety net — but please avoid blind redelivery of an already-succeeded `busine
 
 ---
 
-## 4. Open item on our side (not blocking your integration)
-Xero's login is behind Akamai Bot Manager; locally we bypass it with a stealth real-Chrome
-launch. We still need to confirm that survives **headless in the Fargate container**. If it
-doesn't, the worker may need a headed/xvfb launch or a branded-Chrome image layer. This affects
-only our deployment, not the contract.
+## 4. Deployment note (resolved; not part of the contract)
+Xero's login is behind Akamai Bot Manager. We confirmed (2026-06-20, probing inside the actual
+Fargate runtime image) that our stealth launch with the image's **bundled Chromium clears Akamai
+headless** — no branded-Chrome layer, no xvfb, stays on ARM64. The worker logs in per cold batch
+and reuses the session otherwise. Nothing here affects the contract you consume.

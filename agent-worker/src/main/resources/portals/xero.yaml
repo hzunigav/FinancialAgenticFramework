@@ -71,9 +71,15 @@ authSteps:
   - action: click
     selector: "[data-automationid='LoginSubmit--button']"
 
-  # 2FA is skipped by the trust-device cookie. If that cookie is ever absent a
-  # 2FA prompt appears after Log in; the future fallback is a conditional totp
-  # step (credentials.totpSeed) once that DOM is captured.
+  # 2FA is skipped by the trust-device cookie. When that cookie expires (~30d)
+  # or is revoked, a TOTP prompt appears after Log in — handled AUTONOMOUSLY by
+  # PortalRunService.completeXeroLogin: it detects the challenge, fills the code
+  # from credentials.totpSeed (TotpGenerator), ticks "trust this device" to
+  # re-mint the ~30d cookie, and submits. So no declarative totp step here; the
+  # branch is conditional (fires only when Xero actually challenges). The 2FA
+  # selectors are candidate sets (XERO_2FA_* in PortalRunService) pending a live
+  # DOM capture — the first real challenge is auto-dumped (2fa-challenge.html)
+  # to harden them. If the seed is ever wrong/rotated, re-seed via SessionSeeder.
 
 # The import flow (org switch by short-code, account select, the 3-step
 # Upload->Import settings->Review wizard, duplicate handling, balance read-back)

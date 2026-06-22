@@ -17,9 +17,11 @@ import com.neoproc.financialagent.worker.portal.PortalDescriptorLoader;
 import com.neoproc.financialagent.worker.portal.PortalEngine;
 import com.neoproc.financialagent.worker.portal.PortalRateLimiter;
 import com.neoproc.financialagent.worker.portal.PortalScraper;
+import com.neoproc.financialagent.worker.auth.TotpGenerator;
 import com.microsoft.playwright.Browser;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
+import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.Tracing;
@@ -79,6 +81,35 @@ public class PortalRunService {
     // prompts (cold start / expired session); absent on a warm session reuse.
     // Mirrors xero.yaml's authSteps Username selector.
     private static final String XERO_USERNAME_INPUT = "[data-automationid='Username--input']";
+
+    // 2FA challenge selectors. Xero only shows a TOTP prompt after the password
+    // step when the trust-device cookie has expired (~30 days) or been revoked.
+    // The exact DOM wasn't in the Phase-0 capture, so these are candidate sets
+    // matching Xero's XUI conventions (X--input / X--button) plus generic
+    // one-time-code fallbacks; the first real challenge is auto-dumped so they
+    // can be hardened. The "trust this device" check re-mints the ~30-day cookie
+    // so 2FA stays rare (≈ monthly per worker).
+    private static final String XERO_2FA_CODE_INPUT = String.join(", ",
+            "[data-automationid='AuthenticationCode--input']",
+            "[data-automationid='Confirmation--input']",
+            "[data-automationid='TwoStepAuthentication--input']",
+            "[data-automationid='Totp--input']",
+            "input[autocomplete='one-time-code']",
+            "input[name='AuthenticationCode']",
+            "input[name='Code']",
+            "input[id*='totp' i]",
+            "input[id*='authentication-code' i]");
+    private static final String XERO_2FA_TRUST_CHECKBOX = String.join(", ",
+            "[data-automationid='RememberMe--checkbox']",
+            "[data-automationid='TrustThisDevice--checkbox']",
+            "input[type='checkbox'][name*='emember' i]",
+            "input[type='checkbox'][name*='rust' i]",
+            "input[type='checkbox']");
+    private static final String XERO_2FA_CONFIRM_BUTTON = String.join(", ",
+            "[data-automationid='ConfirmAuthentication--button']",
+            "[data-automationid='Confirm--button']",
+            "[data-automationid='LoginSubmit--button']",
+            "button[type='submit']");
 
     private final Path artifactsRoot;
     private final S3ArtifactStore artifactStore;
@@ -410,9 +441,8 @@ public class PortalRunService {
                 loginFormShown = false;
             }
             if (loginFormShown) {
-                engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());
-                page.waitForURL(u -> !u.contains("/identity/") && !u.toLowerCase().contains("login.xero.com"),
-                        new Page.WaitForURLOptions().setTimeout(60_000));
+                engine.runSteps(descriptor.baseUrl(), descriptor.authSteps());   // navigate + fill user/pass + submit
+                completeXeroLogin(page, credentials, manifest, runDir);          // optional TOTP 2FA, then wait into the app
                 manifest.step("auth", "logged in via authSteps for portal=" + descriptor.id());
             } else {
                 manifest.step("auth", "session reuse — already authenticated, login skipped");
@@ -642,6 +672,94 @@ public class PortalRunService {
                 .setLocale("en-US")
                 .setTimezoneId("America/Costa_Rica")
                 .setViewportSize(1366, 768);
+    }
+
+    /** True once the page has left Xero's login/identity host (i.e. we're in the app). */
+    private static boolean offLogin(String url) {
+        String u = url.toLowerCase(Locale.ROOT);
+        return !u.contains("/identity/") && !u.contains("login.xero.com");
+    }
+
+    /**
+     * Completes a Xero credential login that may or may not be followed by a 2FA
+     * challenge, and blocks until we're in the app (or throws).
+     *
+     * <p>After username+password submit Xero either redirects straight into the
+     * app (the persisted trust-device cookie is still valid → 2FA skipped) or
+     * holds us on {@code login.xero.com} with a TOTP prompt (the ~30-day
+     * trust-device cookie has expired/been revoked). This handles the latter
+     * autonomously: compute the TOTP from the {@code totpSeed} credential, fill
+     * it, check "trust this device" (re-minting the cookie so 2FA stays rare),
+     * and submit. The first real challenge is dumped to the run dir so the
+     * candidate selectors can be hardened against the live DOM.
+     *
+     * @throws IllegalStateException if a 2FA challenge appears but no totpSeed is
+     *                               configured (operator must re-seed / add the seed)
+     */
+    private static void completeXeroLogin(Page page, PortalCredentials credentials,
+                                          RunManifest manifest, Path runDir) {
+        // Fast path: trust cookie still valid → straight into the app, no 2FA.
+        try {
+            page.waitForURL(PortalRunService::offLogin,
+                    new Page.WaitForURLOptions().setTimeout(12_000));
+            return;
+        } catch (RuntimeException stillOnLogin) {
+            // still on the login host after the password step — likely a TOTP challenge
+        }
+
+        Locator code = page.locator(XERO_2FA_CODE_INPUT);
+        boolean challenge;
+        try {
+            code.first().waitFor(new Locator.WaitForOptions().setTimeout(8_000));
+            challenge = true;
+        } catch (RuntimeException notShown) {
+            challenge = false;
+        }
+
+        if (challenge) {
+            dumpDebug(page, runDir, "2fa-challenge");   // capture the live DOM to harden selectors
+            String seed = credentials.values().get("totpSeed");
+            if (seed == null || seed.isBlank()) {
+                throw new IllegalStateException(
+                        "Xero presented a 2FA challenge but no totpSeed is configured — the "
+                                + "trust-device cookie has expired. Add totpSeed to the xero credential "
+                                + "secret or re-seed the session via SessionSeeder.");
+            }
+            // Generate at fill time to minimise the 30s-window boundary risk.
+            code.first().fill(TotpGenerator.now(seed));
+            Locator trust = page.locator(XERO_2FA_TRUST_CHECKBOX);
+            if (trust.count() > 0) {
+                try {
+                    trust.first().check(new Locator.CheckOptions().setTimeout(3_000));
+                } catch (RuntimeException ignore) {
+                    // best-effort: if we can't tick "trust this device", 2FA just recurs sooner
+                }
+            }
+            page.locator(XERO_2FA_CONFIRM_BUTTON).first().click();
+            manifest.step("auth", "submitted TOTP 2FA + trusted device (trust-device cookie had expired)");
+        } else {
+            // Neither in the app nor a recognised 2FA screen — capture for diagnosis;
+            // the wait below will throw if we genuinely never reach the app.
+            dumpDebug(page, runDir, "post-login-unrecognised");
+        }
+
+        // Block until we're in the app (post-2FA redirect or a slow login).
+        page.waitForURL(PortalRunService::offLogin,
+                new Page.WaitForURLOptions().setTimeout(60_000));
+    }
+
+    /** Best-effort HTML + screenshot dump to the run dir for post-mortem of an auth hang. */
+    private static void dumpDebug(Page page, Path runDir, String name) {
+        if (runDir == null) {
+            return;
+        }
+        try {
+            Files.writeString(runDir.resolve(name + ".html"), page.content());
+            page.screenshot(new Page.ScreenshotOptions()
+                    .setPath(runDir.resolve(name + ".png")).setFullPage(true));
+        } catch (Exception ignore) {
+            // diagnostics are best-effort; never mask the original failure
+        }
     }
 
     private static String sha256Hex(Path path) throws IOException {

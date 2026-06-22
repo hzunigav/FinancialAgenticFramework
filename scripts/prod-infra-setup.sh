@@ -83,7 +83,22 @@ for VAR in SUBNET_ID SG_ID EXEC_ROLE_ARN TASK_ROLE_ARN NS_ARN; do
   fi
 done
 
-echo "=== Provisioning portal: $PORTAL_ID (queue-type=$QUEUE_TYPE) ==="
+# ── Service naming ──────────────────────────────────────────────────────────
+# Payroll flows use financeagent-worker-<portal>. The bankstatement flow uses
+# financeagent-bankstatement-<portal> instead: it mirrors the queue naming
+# (bankstatement- is the flow-distinguishing token) and — deliberately — stays
+# OUT of the monthly scaling Lambda's "financeagent-worker-" prefix match, so a
+# daily-cadence Xero worker isn't swept into the payroll scaling window. (To put
+# it on its own daily window later, add "financeagent-bankstatement-" to a
+# sibling scaling schedule's SERVICE_PREFIXES.) Drives the service name, the
+# task-definition family, and the log group below.
+if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
+  SERVICE_BASENAME="financeagent-bankstatement-${PORTAL_ID}"
+else
+  SERVICE_BASENAME="financeagent-worker-${PORTAL_ID}"
+fi
+
+echo "=== Provisioning portal: $PORTAL_ID (queue-type=$QUEUE_TYPE, service=$SERVICE_BASENAME) ==="
 
 # ── Step 0: S3 artifacts bucket (idempotent, one-time per env) ────────────────
 # Holds post-run artifact uploads from every worker:
@@ -163,7 +178,7 @@ if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
 fi
 
 # ── Step 2: CloudWatch log group ──────────────────────────────────────────────
-LOG_GROUP="/ecs/financeagent-worker-${PORTAL_ID}"
+LOG_GROUP="/ecs/${SERVICE_BASENAME}"
 if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --region "$REGION" \
     --query "logGroups[?logGroupName=='$LOG_GROUP']" --output text | grep -q .; then
   echo "  Log group already exists: $LOG_GROUP"
@@ -173,7 +188,7 @@ else
 fi
 
 # ── Step 3: Task definition ───────────────────────────────────────────────────
-SERVICE_NAME="financeagent-worker-${PORTAL_ID}"
+SERVICE_NAME="${SERVICE_BASENAME}"
 
 # Build environment array; add MOCK_PORTAL_BASE_URL only for mock-payroll
 ENV_JSON="[

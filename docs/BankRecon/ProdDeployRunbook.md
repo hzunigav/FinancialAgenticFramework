@@ -63,8 +63,8 @@ Add to the worker task role (the script echoes the exact ARNs):
 ## Step 6 — Confirm the worker is up
 ```bash
 aws ecs describe-services --cluster financeagent \
-  --services financeagent-worker-xero --query 'services[0].{desired:desiredCount,running:runningCount}'
-aws logs tail /ecs/financeagent-worker-xero --follow      # expect: BankStatementTaskListener registered
+  --services financeagent-bankstatement-xero --query 'services[0].{desired:desiredCount,running:runningCount}'
+aws logs tail /ecs/financeagent-bankstatement-xero --follow   # expect: BankStatementTaskListener registered
 ```
 If a scale-to-zero schedule applies, make sure desired-count ≥ 1 while testing.
 
@@ -98,6 +98,6 @@ synthetic FAILED without re-executing — don't reuse a succeeded key for a fres
 ## Rollback / re-deploy
 - Code change → push to `main`; the deploy job rebuilds and updates the `xero` service in place
   (env vars preserved).
-- Bad image → `aws ecs update-service --cluster financeagent --service financeagent-worker-xero
+- Bad image → `aws ecs update-service --cluster financeagent --service financeagent-bankstatement-xero
   --task-definition <previous-TD-arn> --force-new-deployment`.
 - Stuck session → delete `prod/financeagent/sessions/xero` (forces a fresh cold login) or re-seed.

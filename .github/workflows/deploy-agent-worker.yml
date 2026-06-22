@@ -73,14 +73,18 @@ jobs:
       id-token: write
       contents: read
     strategy:
+      # {portal, service} pairs: payroll flows use the financeagent-worker-<id>
+      # service; the bankstatement flow (xero) uses financeagent-bankstatement-<id>
+      # to mirror the queue naming and stay out of the monthly scaling Lambda's
+      # financeagent-worker-* prefix match. Adding a portal: append a pair.
       matrix:
-        portal:
-          - mock-payroll
-          - autoplanilla
-          - ccss-sicere
-          - ins-rt-virtual
-          - hacienda-ovi
-          - xero
+        include:
+          - { portal: mock-payroll,   service: financeagent-worker-mock-payroll }
+          - { portal: autoplanilla,   service: financeagent-worker-autoplanilla }
+          - { portal: ccss-sicere,    service: financeagent-worker-ccss-sicere }
+          - { portal: ins-rt-virtual, service: financeagent-worker-ins-rt-virtual }
+          - { portal: hacienda-ovi,   service: financeagent-worker-hacienda-ovi }
+          - { portal: xero,           service: financeagent-bankstatement-xero }
       fail-fast: false   # one portal failure doesn't block the others
 
     steps:
@@ -110,7 +114,7 @@ jobs:
       - name: Update ECS service image
         if: steps.filter.outputs.deploy == 'true'
         env:
-          SERVICE:   financeagent-worker-${{ matrix.portal }}
+          SERVICE:   ${{ matrix.service }}
           NEW_IMAGE: ${{ needs.build.outputs.image }}
         run: |
           # Check the service exists before attempting deploy

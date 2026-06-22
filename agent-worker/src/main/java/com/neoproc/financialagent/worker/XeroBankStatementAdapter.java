@@ -57,6 +57,9 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
     private static final String BANK_WIDGET = "[data-automationid='bankWidget']";
     private static final String FILE_INPUT = "input[data-automationid='select-file-control--input']";
     private static final String WIZARD_NEXT = "[data-automationid='wizard-next-step-button']";
+    // Org short-code segment of go.xero.com/app/<shortCode>/... — used to confirm
+    // the deep-link landed on the requested org (not a silent bounce to home).
+    private static final Pattern APP_SHORTCODE = Pattern.compile("/app/([^/?#]+)");
     private static final Pattern REVIEW_COUNT =
             Pattern.compile("(\\d+)\\s+transaction\\(s\\)\\s+will be imported");
     // Post-import banner on the BankRec page (confirmed Phase-2d):
@@ -163,8 +166,22 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
             throw new StageFailure(FailedStage.ORG_SELECT, ErrorCategory.ORG_NOT_FOUND,
                     "Org short-code " + task.xeroShortCode() + " did not load a bank-accounts page");
         }
+        // Confirm we actually landed on the REQUESTED org before touching anything.
+        // A deep-link to an org the agent user is NOT a member of silently bounces
+        // to the user's home org (it doesn't error at the URL — it lands on the
+        // wrong org). The page has settled now (bank widget present), so the URL
+        // short-code is authoritative. Verifying here fails fast with a clear
+        // ORG_NOT_FOUND AND prevents ever importing into the wrong org if that org
+        // happens to have a matching account number (Praxis hardening, 2026-06-22).
+        String landed = landedShortCode(page.url());
+        if (landed == null || !landed.equals(task.xeroShortCode())) {
+            throw new StageFailure(FailedStage.ORG_SELECT, ErrorCategory.ORG_NOT_FOUND,
+                    "Org deep-link bounced: expected short-code " + task.xeroShortCode()
+                            + " but landed on " + (landed != null ? landed : page.url())
+                            + " — the agent user is likely not a member of that org (or the short-code is wrong)");
+        }
         orgSelected = true;
-        manifest.step("xero", "org switched shortCode=" + task.xeroShortCode());
+        manifest.step("xero", "org confirmed shortCode=" + landed);
 
         // Match the account widget by its visible account number.
         Locator widget = page.locator(BANK_WIDGET)
@@ -176,6 +193,14 @@ final class XeroBankStatementAdapter extends AbstractBankStatementAdapter {
         accountSelected = true;
         manifest.step("xero", "account matched " + task.bankAccountNumber());
         return widget.first();
+    }
+
+    /** The org short-code in a go.xero.com/app/&lt;shortCode&gt;/... URL, decoded; null if absent. */
+    private static String landedShortCode(String url) {
+        if (url == null) return null;
+        Matcher m = APP_SHORTCODE.matcher(url);
+        if (!m.find()) return null;
+        return java.net.URLDecoder.decode(m.group(1), java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private void openImportWizard(Locator accountWidget, Page page, RunManifest manifest) {

@@ -187,6 +187,15 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     // Dry-run mode: navigates, scrapes, matches, but does NOT touch the
     // portal (no fill, no Continuar). Set with -Dparams.dryRun=true (CLI).
     private boolean dryRun;
+    // Set true when the post-fill Resumen totals never render within
+    // RESUMEN_TOTALS_TIMEOUT_MS. Every per-row salary auto-saves on blur
+    // BEFORE Continuar, so the Resumen is only a totals read-back — a
+    // timeout there must NOT discard the saved work as a hard failure.
+    // buildSubmitOutcome routes this to PARTIAL with a "totals unverified,
+    // HITL verify the draft & Presentar" review instead of the
+    // UNCAUGHT_EXCEPTION / FAILED-0 the raw TimeoutError produced
+    // (100-employee prod hang, 2026-07-06).
+    private boolean resumenUnverified;
 
     @Override
     public void beforeSteps(PortalDescriptor descriptor,
@@ -223,6 +232,7 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         }
 
         dryRun = Boolean.parseBoolean(bindings.getOrDefault("params.dryRun", "false"));
+        resumenUnverified = false;   // reset per run (adapter instance is reused)
         boolean diagDumpResumen = Boolean.parseBoolean(
                 bindings.getOrDefault("params.diag.dumpResumen", "false"));
         log.info("ins-rt-virtual starting clientIdentifier={} dryRun={} diagDumpResumen={}",
@@ -408,14 +418,21 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         // In dryRun mode we never opened the Resumen dialog, so there's
         // no Cancelar to click — the cloned planilla just stays in
         // "Planillas guardadas" with whatever state it cloned from.
-        if (!dryRun) {
-            safeClick(page.locator(CANCELAR_BUTTON), "Cancelar");
-            page.waitForLoadState(LoadState.LOAD);
-            manifest.step("cancelar", "dismissed Resumen dialog without Presentar");
-        } else {
+        if (dryRun) {
             manifest.step("cancelar-DRYRUN",
                     "skipped Cancelar (Resumen dialog never opened in dryRun); "
                             + "cloned planilla left in Planillas guardadas for manual cleanup");
+        } else if (resumenUnverified) {
+            // The Resumen never rendered, so there's no #btn-cancel-payroll
+            // to click. Leave the planilla as-is — the auto-saved rows are
+            // intact in Planillas guardadas for HITL to verify and Presentar.
+            manifest.step("cancelar-skip-unverified",
+                    "Resumen never rendered; no dialog to Cancelar — draft left in "
+                            + "Planillas guardadas with auto-saved rows for HITL review");
+        } else {
+            safeClick(page.locator(CANCELAR_BUTTON), "Cancelar");
+            page.waitForLoadState(LoadState.LOAD);
+            manifest.step("cancelar", "dismissed Resumen dialog without Presentar");
         }
     }
 
@@ -434,7 +451,12 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         // dialog after auto-save settles.
         boolean totalsMatch = canonicalGrandTotal.compareTo(portalReportedTotal) == 0;
         String status;
-        if (!rosterDiff.isEmpty() || !nameDriftSignals.isEmpty() || !fillFailureSignals.isEmpty()) {
+        if (resumenUnverified || !rosterDiff.isEmpty()
+                || !nameDriftSignals.isEmpty() || !fillFailureSignals.isEmpty()) {
+            // resumenUnverified routes here (not MISMATCH) even though
+            // portalReportedTotal is 0: we couldn't READ the total, which is
+            // a "needs review" state, not a proven divergence. The rows are
+            // saved; HITL verifies the draft and Presentar-s.
             status = EnvelopeStatus.PARTIAL;
         } else if (!totalsMatch) {
             status = EnvelopeStatus.MISMATCH;
@@ -446,13 +468,15 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
                 "status=" + status
                         + " expected=" + canonicalGrandTotal
                         + " portalReported=" + portalReportedTotal
+                        + " resumenUnverified=" + resumenUnverified
                         + " rosterDiff.empty=" + rosterDiff.isEmpty()
                         + " nameDrift=" + nameDriftSignals.size()
                         + " fillFailed=" + fillFailureSignals.size());
 
         SubmitResultBody.Review review = buildReview(
                 status, canonicalGrandTotal, portalReportedTotal, rosterDiff,
-                nameDriftSignals, fillFailureSignals);
+                nameDriftSignals, fillFailureSignals, resumenUnverified,
+                submittedRows.size());
 
         // INS Consecutivo temporal is a diagnostic id pre-Presentar; it
         // promotes to a permanent planilla number after HITL final-submit.
@@ -1595,6 +1619,22 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
             return new DialogTotals("", 0, BigDecimal.ZERO);
         }
 
+        // Drain the auto-save backlog before Continuar. Every row auto-saves
+        // on blur; on a high-latency link (Fargate us-east-1 → INS Costa
+        // Rica) 98 back-to-back saves can still be committing server-side
+        // when Continuar fires, and INS then spins indefinitely instead of
+        // opening the Resumen (100-employee prod hang, 2026-07-06 — not
+        // reproducible on a low-latency local link). Give the queue a
+        // bounded, size-scaled window to settle first: cheap for small
+        // planillas (~15 rows ≈ 3s), meaningful for large ones (~98 ≈ 20s).
+        long settleMs = Math.min((long) submittedRows.size() * 200L, 20_000L);
+        if (settleMs > 0) {
+            manifest.step("pre-continuar-settle",
+                    "waiting " + settleMs + "ms for " + submittedRows.size()
+                            + " auto-save(s) to drain before Continuar");
+            page.waitForTimeout(settleMs);
+        }
+
         safeClick(page.locator(CONTINUAR_BUTTON), "Continuar");
         // Two-phase wait: first the dialog mounts (with a loader spinner),
         // then INS fetches the totals async and replaces the spinner with
@@ -1629,7 +1669,18 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
                     "totals not visible in " + RESUMEN_TOTALS_TIMEOUT_MS
                             + "ms — see resumen-timeout.png; dialogText="
                             + dlgText.substring(0, Math.min(200, dlgText.length())));
-            throw timeout;
+            // Graceful degradation: every per-row salary already auto-saved
+            // on blur, BEFORE Continuar — the Resumen is only a totals
+            // read-back. Rethrowing here nuked a run whose work succeeded to
+            // UNCAUGHT_EXCEPTION / FAILED-0, hiding the saved rows from HITL
+            // (100-employee prod hang, 2026-07-06). Instead flag the run
+            // resumen-unverified and return zero totals; buildSubmitOutcome
+            // routes to PARTIAL with a "verify the draft & Presentar" review,
+            // so the saved work is preserved and actionable rather than lost.
+            log.warn("resumen unverified — treating as PARTIAL; {} row(s) auto-saved to the draft "
+                    + "planilla for HITL to verify and Presentar", submittedRows.size());
+            resumenUnverified = true;
+            return new DialogTotals("", 0, BigDecimal.ZERO);
         }
 
         // Single innerText scrape + label-anchored regex extracts. The
@@ -1813,12 +1864,16 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     private static SubmitResultBody.Review buildReview(
             String status, BigDecimal canonical, BigDecimal portal, RosterDiff diff,
             List<SubmitResultBody.Signal> nameDrifts,
-            List<SubmitResultBody.Signal> fillFailures) {
+            List<SubmitResultBody.Signal> fillFailures,
+            boolean resumenUnverified, int rowsSaved) {
         if (!EnvelopeStatus.MISMATCH.equals(status) && !EnvelopeStatus.PARTIAL.equals(status)) {
             return null;
         }
         List<SubmitResultBody.Signal> signals = new ArrayList<>();
-        if (canonical.compareTo(portal) != 0) {
+        // Only emit TOTAL_GAP when we actually READ a portal total. On the
+        // resumen-unverified path portal=0 is "unknown", not a real gap —
+        // a TOTAL_GAP here would read as a proven divergence and mislead HITL.
+        if (!resumenUnverified && canonical.compareTo(portal) != 0) {
             signals.add(new SubmitResultBody.Signal(
                     "TOTAL_GAP", canonical, portal, portal.subtract(canonical),
                     null, null, null, null));
@@ -1833,7 +1888,18 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         signals.addAll(fillFailures);
 
         StringBuilder summary = new StringBuilder();
-        if (canonical.compareTo(portal) != 0) {
+        if (resumenUnverified) {
+            // Lead with the actionable instruction — this is what HITL sees first.
+            summary.append("Portal totals could not be read back after Continuar (the "
+                    + "Resumen never rendered within the wait window). ")
+                    .append(rowsSaved)
+                    .append(" row(s) were auto-saved to the draft planilla. ")
+                    .append("HITL: open Planillas guardadas for this period, verify the "
+                            + "saved salaries against the expected total of ")
+                    .append(canonical.toPlainString())
+                    .append(" CRC, then Presentar. The agent did NOT verify or submit.");
+        }
+        if (!resumenUnverified && canonical.compareTo(portal) != 0) {
             BigDecimal gap = portal.subtract(canonical).abs();
             String direction = portal.compareTo(canonical) > 0
                     ? "Portal exceeds expected" : "Expected exceeds portal";

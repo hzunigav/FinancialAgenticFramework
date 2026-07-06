@@ -1096,20 +1096,33 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         // params-driven row selector here (e.g. by params.priorPlanillaId).
         // INS uses custom-rendered checkbox components rather than native
         // <input type="checkbox">; role=checkbox covers both forms.
-        page.waitForTimeout(800);  // dialog render + content fetch
-        // Locate rows using the role=row engine, scoped under the dialog
-        // via the >> chain operator (the role= engine can't be combined
-        // directly with CSS — it needs an explicit chain).
-        Locator firstRow = page.locator("[role=\"dialog\"]")
-                .locator("role=row").first();
-        if (firstRow.count() == 0) {
-            // Fallback: <tr> inside the dialog (native table form).
-            firstRow = page.locator("[role=\"dialog\"] tr").first();
-        }
-        if (firstRow.count() == 0) {
+        // The clone dialog lists prior planillas as native <tr> rows; each
+        // row's name cell is <span id="lblNombrePayroll">Planilla NNNN</span>
+        // (INS's own stable id, verified on the live 2026-07 UI). Two traps
+        // the previous locator fell into:
+        //   1. This modal is NOT wrapped in role="dialog" (the Resumen dialog
+        //      is, but this one isn't), so the old [role="dialog"] >> role=row
+        //      / tr scoping matched nothing — or matched the stray "Cerrar"
+        //      notification banner behind the modal — and the adapter
+        //      mis-reported "no rows visible" with a clonable planilla sitting
+        //      right there.
+        //   2. The row list is fetched async; the old fixed 800ms wait raced
+        //      the skeleton (same lesson the Resumen dialog already learned
+        //      with its loader poll).
+        // Anchor directly on the #lblNombrePayroll name cell's row and poll
+        // for it to render, rather than guessing the modal container.
+        Locator priorRows = page.locator("tr:has(#lblNombrePayroll)");
+        try {
+            priorRows.first().waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(15_000));
+        } catch (RuntimeException noRows) {
             saveDiagnosticScreenshot(page, bindings, "nueva-planilla-no-rows");
-            // Dump dialog innerText to manifest for diagnostic
-            Locator dlg = page.locator("[role=\"dialog\"]").first();
+            // Distinguish "genuinely no prior planilla to clone" (the dialog
+            // offers only "Iniciar con lista vacía", which this clone-based
+            // adapter can't drive — HITL must handle) from a selector break.
+            // Dump the modal text for the manifest either way.
+            Locator dlg = page.locator(":has-text(\"Cargar lista de trabajadores\")").last();
             String dlgText = dlg.count() > 0
                     ? dlg.innerText().replaceAll("\\s+", " ")
                     : "(no dialog visible)";
@@ -1118,13 +1131,28 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
             manifest.step("nueva-planilla-no-rows",
                     "dialogText=" + dlgText.substring(0, Math.min(200, dlgText.length())));
             throw new IllegalStateException(
-                    "ins-rt-virtual: Nueva planilla dialog opened but no rows visible. "
+                    "ins-rt-virtual: Nueva planilla dialog opened but no clonable "
+                            + "prior-planilla row was found (looked for tr:has(#lblNombrePayroll)). "
+                            + "Either this póliza has no prior planilla in the last 3 periods "
+                            + "(only 'Iniciar con lista vacía' is offered — not supported by "
+                            + "this clone-based adapter) or INS restructured the row markup. "
                             + "See nueva-planilla-no-rows.png and the manifest "
-                            + "nueva-planilla-no-rows step for the dialog text.");
+                            + "nueva-planilla-no-rows step for the dialog text.", noRows);
         }
-        // Click the row's checkbox via role-aware locator (handles native
-        // <input> and custom-rendered checkbox components alike).
-        firstRow.locator("role=checkbox").first().check();
+        // Operator confirmed the most recent prior (top row) is the template.
+        Locator firstRow = priorRows.first();
+        // Tick THIS row's checkbox — never the "Seleccionar todo" header
+        // (which would unify every prior into one planilla). INS may render
+        // the control as a native <input type=checkbox> or a custom
+        // role=checkbox/styled element; check() drives the former, click()
+        // the latter.
+        Locator rowCheckbox = firstRow
+                .locator("input[type=\"checkbox\"], [role=\"checkbox\"]").first();
+        try {
+            rowCheckbox.check(new Locator.CheckOptions().setTimeout(3_000));
+        } catch (RuntimeException notNativeCheckbox) {
+            rowCheckbox.click(new Locator.ClickOptions().setTimeout(3_000));
+        }
         manifest.step("nueva-planilla", "selected first prior-planilla row to clone");
 
         safeClick(page.locator("button:has-text(\"Cargar lista seleccionada\")"),

@@ -85,6 +85,18 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     // than chasing PrimeReact / MUI sibling-axis quirks across releases.
     private static final String RESUMEN_DIALOG = "[role=\"dialog\"]:has-text(\"Resumen de planilla\")";
 
+    // INS computes the Resumen totals (Total de salarios, Trabajadores
+    // reportados, promedio) server-side after Continuar, and that
+    // aggregation time scales with the planilla size. The original 30s
+    // ceiling was calibrated on ~15-row planillas; a 100-row planilla
+    // blew past it (2026-07-06, clientIdentifier 3-102-720009 →
+    // TimeoutError on the "Total de salarios:" wait). 120s covers the
+    // largest planilla the 200-row page size allows, with margin. On
+    // timeout the scrape captures a diagnostic screenshot + dialog text
+    // so a genuine non-loading failure (e.g. a validation dialog) is
+    // debuggable rather than surfacing as a bare TimeoutError.
+    private static final int RESUMEN_TOTALS_TIMEOUT_MS = 120_000;
+
     // INS RT does not auto-commit the planilla — Cancelar exits the
     // Resumen dialog leaving the per-row auto-saved edits intact (the
     // planilla stays in en-edición state). Presentar planilla is the
@@ -380,7 +392,7 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         // Continuar fires regardless of dryRun — the dialog is read-only
         // until the user clicks Presentar / Cancelar, and we always
         // Cancelar so the planilla is never committed.
-        DialogTotals totals = openResumenAndScrape(page, manifest);
+        DialogTotals totals = openResumenAndScrape(page, bindings, manifest);
         portalReportedTotal = totals.totalSalarios() == null
                 ? BigDecimal.ZERO : totals.totalSalarios();
         consecutivoTemporal = totals.consecutivoTemporal();
@@ -1570,7 +1582,9 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
 
     // --- Resumen dialog ----------------------------------------------------
 
-    private DialogTotals openResumenAndScrape(Page page, RunManifest manifest) {
+    private DialogTotals openResumenAndScrape(Page page,
+                                              Map<String, String> bindings,
+                                              RunManifest manifest) {
         if (dryRun) {
             // Don't even open the Resumen — keeps the planilla truly
             // untouched. Returns zero totals; the result envelope's
@@ -1588,12 +1602,35 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         // etc. Anchoring on a label that only exists post-load gates the
         // scrape correctly — verified via diag.dumpResumen 2026-05-04T14:44
         // (skeletal capture, 0 bytes of text) vs 2026-05-04T15:11 (loaded,
-        // 364 bytes). 30s ceiling matches the loader timeout we observed
-        // in the wild + a safety margin.
-        page.waitForSelector(RESUMEN_DIALOG + ":has-text(\"Total de salarios:\")",
-                new Page.WaitForSelectorOptions()
-                        .setState(WaitForSelectorState.VISIBLE)
-                        .setTimeout(30_000));
+        // 364 bytes). The ceiling scales to the largest planilla we support
+        // (see RESUMEN_TOTALS_TIMEOUT_MS); on timeout we capture a
+        // screenshot + the visible dialog text so a genuine non-loading
+        // failure is debuggable instead of a bare TimeoutError.
+        try {
+            page.waitForSelector(RESUMEN_DIALOG + ":has-text(\"Total de salarios:\")",
+                    new Page.WaitForSelectorOptions()
+                            .setState(WaitForSelectorState.VISIBLE)
+                            .setTimeout(RESUMEN_TOTALS_TIMEOUT_MS));
+        } catch (RuntimeException timeout) {
+            saveDiagnosticScreenshot(page, bindings, "resumen-timeout");
+            String dlgText;
+            try {
+                Locator dlg = page.locator("[role=\"dialog\"]:visible").first();
+                dlgText = dlg.count() > 0
+                        ? dlg.innerText().replaceAll("\\s+", " ")
+                        : "(no visible dialog after Continuar)";
+            } catch (RuntimeException e) {
+                dlgText = "(dialog innerText read failed: " + e.getMessage() + ")";
+            }
+            log.warn("resumen totals did not render within {}ms; visible dialog text: {}",
+                    RESUMEN_TOTALS_TIMEOUT_MS,
+                    dlgText.substring(0, Math.min(500, dlgText.length())));
+            manifest.step("resumen-timeout",
+                    "totals not visible in " + RESUMEN_TOTALS_TIMEOUT_MS
+                            + "ms — see resumen-timeout.png; dialogText="
+                            + dlgText.substring(0, Math.min(200, dlgText.length())));
+            throw timeout;
+        }
 
         // Single innerText scrape + label-anchored regex extracts. The
         // Resumen dialog is small (6 labels + values + 2 buttons), so

@@ -44,3 +44,7 @@ testing-harness/logs/
 
 # Phase-0 Xero spike output — storageState.json holds a LIVE session cookie
 xero-spike/
+# Phase-0 Hacienda OVI spike / dry-run output — storageState.json holds a LIVE
+# session cookie, and the captured DOM/screenshots contain the cédula + OTP screen
+hacienda-spike/
+hacienda-dryrun/

@@ -91,9 +91,17 @@ authSteps:
 # for the full story; summarised here so descriptor readers don't have
 # to dig):
 #   - "Nueva planilla" was renamed by INS to "Cargar lista de
-#     trabajadores de periodos anteriores" inside the "Acciones rápidas"
+#     trabajadores de períodos anteriores" inside the "Acciones rápidas"
 #     dropdown. The adapter accepts both labels, preferring the legacy
-#     one if visible.
+#     one if visible, and matches the renamed one by regex prefix so the
+#     accented "í" can't break it.
+#   - Current INS builds auto-open that clone dialog when Preparar
+#     planilla loads, so there is usually no launcher to click at all.
+#     The adapter probes for the open dialog first (via its "Cargar lista
+#     seleccionada" button) and only hunts for a launcher if it's absent.
+#     Order matters: the dialog is aria-modal, so any launcher click
+#     attempted while it's open is intercepted and burns Playwright's
+#     full 30s click timeout (the 2026-08-04 UNCAUGHT_EXCEPTION).
 #   - "Presentar planilla sin trabajadores" is the dropdown sibling that
 #     would file an EMPTY planilla on click. Listed in
 #     FORBIDDEN_BUTTON_LABELS (alongside "presentar planilla" /

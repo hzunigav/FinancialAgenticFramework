@@ -45,11 +45,19 @@ import java.util.regex.Pattern;
  *       guess. The day a firm gets a second póliza, the listener will
  *       need a {@code params.policyNumber} tiebreaker.</li>
  *   <li>Dismiss the welcome dialog → expand the Planilla menu →
- *       Preparar planilla → Nueva planilla.</li>
- *   <li>The Nueva planilla dialog lists prior-period planillas to clone.
- *       Operator confirmed the most recent prior planilla is the
- *       source-template; the adapter checks the first row's checkbox
- *       and clicks Cargar lista seleccionada → Aceptar.</li>
+ *       Preparar planilla.</li>
+ *   <li>Reach the clone picker ("Cargar lista de trabajadores de períodos
+ *       anteriores"). INS auto-opens it on arrival at Preparar planilla on
+ *       current builds; older builds required clicking a "Nueva planilla" /
+ *       "Cargar lista..." launcher, directly or via the Acciones rápidas
+ *       dropdown. The adapter probes for the already-open dialog first and
+ *       only hunts for a launcher if it isn't up — clicking a launcher while
+ *       the modal is open is impossible (it's aria-modal) and used to cost a
+ *       30s interception timeout.</li>
+ *   <li>The picker lists prior-period planillas to clone. Operator confirmed
+ *       the most recent prior planilla is the source-template; the adapter
+ *       checks the first row's checkbox and clicks Cargar lista seleccionada
+ *       → Aceptar.</li>
  *   <li>On the edit page, scrape every row (cédula + name + current
  *       salary) across all pages, then per canonical employee match by
  *       cédula via {@link EmployeeMatcher#matchWithDrift}, fill the
@@ -128,6 +136,23 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     // index is already captured per row when we iterate via gotoNextPage.
     private static final Pattern PAGE_STATUS_PATTERN =
             Pattern.compile("(?:(\\d+)\\s+)?de\\s+(\\d+)");
+
+    // Clone-picker selectors. The picker is the "Cargar lista de trabajadores
+    // de períodos anteriores" dialog that seeds a new planilla from a prior
+    // period's roster.
+    //
+    // CONFIRM doubles as the "is the picker open?" probe (see clonePickerOpen)
+    // because INS auto-opens the dialog on some builds. Deliberately keyed on
+    // the action button, not the dialog heading: the heading's accent has
+    // shifted between releases ("periodos" vs "períodos") and the dialog
+    // wrapper markup has too — it gained role="dialog"/aria-modal since the
+    // 2026-05-04 recording — but this button label has been stable.
+    private static final String CLONE_PICKER_CONFIRM =
+            "button:visible:has-text(\"Cargar lista seleccionada\")";
+    // Regex prefix, so the accented "í" INS actually renders can't break the
+    // match the way the exact-text form did.
+    private static final String CLONE_LAUNCHER_PATTERN =
+            "role=button[name=/Cargar lista de trabajadores/]";
 
     /**
      * Buttons the adapter will refuse to click, ever — visible-text denylist
@@ -674,6 +699,117 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
     }
 
     /**
+     * True when the "Cargar lista de trabajadores de períodos anteriores"
+     * clone picker is already on screen. INS opens it automatically when
+     * Preparar planilla loads, in which case there is no launcher to click.
+     *
+     * <p>Probes the dialog's primary action button rather than its heading:
+     * the heading text carries an accent INS has spelled both ways across
+     * releases ("periodos" / "períodos"), while "Cargar lista seleccionada"
+     * has been stable and is unique to this dialog.
+     *
+     * <p>5s budget: the dialog is part of the Preparar planilla render, so
+     * it is either up almost immediately or not coming at all. Long enough
+     * to absorb the async row fetch, short enough that the launcher-hunt
+     * fallback stays cheap when this portal build doesn't auto-open.
+     */
+    private static boolean clonePickerOpen(Page page) {
+        try {
+            page.locator(CLONE_PICKER_CONFIRM).first().waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(5_000));
+            return true;
+        } catch (RuntimeException notOpen) {
+            return false;
+        }
+    }
+
+    /**
+     * Find the affordance that opens the clone picker on portal builds that
+     * don't auto-open it — either the legacy "Nueva planilla" button or the
+     * renamed "Cargar lista de trabajadores de períodos anteriores" item.
+     *
+     * <p>The renamed label is matched by regex prefix, not exact text: INS
+     * renders it with an accented "períodos", and the exact-text form we
+     * shipped from the 2026-05-04 codegen recording spelled it "periodos",
+     * so {@code :text-is()} could never match. The prefix is unambiguous on
+     * this page and side-steps the accent entirely.
+     *
+     * @return a clickable locator, or null if neither label resolves
+     */
+    private static Locator findCloneLauncher(Page page) {
+        Locator nueva = clickableByText(page, "Nueva planilla");
+        if (nueva != null) {
+            return nueva;
+        }
+        Locator byPattern = page.locator(CLONE_LAUNCHER_PATTERN).first();
+        try {
+            byPattern.waitFor(new Locator.WaitForOptions()
+                    .setState(WaitForSelectorState.VISIBLE)
+                    .setTimeout(5_000));
+            return byPattern;
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Open the "Acciones rápidas" dropdown, tolerating the case where a
+     * modal is covering it.
+     *
+     * <p>Bounded at 5s rather than Playwright's 30s default, and never
+     * throws. Before this existed, a modal over the nav bar cost a 30s
+     * TimeoutError that propagated straight out of {@code beforeSteps},
+     * skipping the diagnostic screenshot and visible-button dump that the
+     * caller runs on the not-found path — so the one code path that would
+     * have identified the modal never executed. The 2026-08-04 failure
+     * produced no artifact at all for exactly this reason.
+     *
+     * @return true if the dropdown was clicked; false if it was blocked or
+     *         absent, with the reason recorded on the manifest
+     */
+    private static boolean openAccionesRapidas(Page page, RunManifest manifest) {
+        Locator acciones = clickableByText(page, "Acciones rápidas");
+        if (acciones == null) {
+            manifest.step("acciones-rapidas-absent", "no Acciones rápidas affordance on this page");
+            return false;
+        }
+        try {
+            acciones.click(new Locator.ClickOptions().setTimeout(5_000));
+            page.waitForTimeout(500);
+            return true;
+        } catch (RuntimeException blocked) {
+            String modal = describeBlockingModal(page);
+            log.warn("Acciones rápidas click blocked (likely a modal intercepting pointer events): {}",
+                    modal);
+            manifest.step("acciones-rapidas-blocked", "blockingModal=" + modal);
+            return false;
+        }
+    }
+
+    /**
+     * Summarise whatever modal is currently covering the page, for manifest
+     * and exception messages. Returns "(none visible)" when nothing matches,
+     * which is itself a useful signal — it means a failed click was blocked
+     * by something other than a modal.
+     */
+    private static String describeBlockingModal(Page page) {
+        Locator modal = page.locator(
+                "[role=\"dialog\"]:visible, [aria-modal=\"true\"]:visible, .modal.show:visible").first();
+        try {
+            if (modal.count() == 0) {
+                return "(none visible)";
+            }
+            String text = modal.innerText().replaceAll("\\s+", " ").trim();
+            return text.isEmpty()
+                    ? "(modal present, no text)"
+                    : text.substring(0, Math.min(300, text.length()));
+        } catch (RuntimeException unreadable) {
+            return "(modal present, unreadable: " + unreadable.getClass().getSimpleName() + ")";
+        }
+    }
+
+    /**
      * Resolve a sidebar / page button by its visible label, preferring
      * the affordance Playwright's role engine identifies as a button
      * (<button>, role="button", input type=button) and falling back to
@@ -1085,45 +1221,59 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         // Never click it. Belt-and-suspenders: it's also in
         // FORBIDDEN_BUTTON_LABELS, and we anchor on the specific
         // "Cargar lista..." text rather than any visible dropdown item.
-        Locator nueva = clickableByText(page, "Nueva planilla");
-        if (nueva == null) {
-            nueva = clickableByText(page, "Cargar lista de trabajadores de periodos anteriores");
-        }
-        if (nueva == null) {
-            log.info("Cargar/Nueva planilla not directly visible — opening Acciones rápidas dropdown");
-            Locator acciones = clickableByText(page, "Acciones rápidas");
-            if (acciones != null) {
-                safeClick(acciones, "Acciones rápidas");
-                page.waitForTimeout(500);
-                nueva = clickableByText(page, "Nueva planilla");
-                if (nueva == null) {
-                    nueva = clickableByText(page, "Cargar lista de trabajadores de periodos anteriores");
+        // INS auto-opens the clone picker when Preparar planilla loads
+        // (observed 2026-08-04 on póliza 7637352): the "Cargar lista de
+        // trabajadores de períodos anteriores" dialog is already up, fully
+        // populated, before we look for anything. There is no launcher to
+        // click in that state, and hunting for one is actively harmful —
+        // the dialog is aria-modal, so the Acciones rápidas fallback below
+        // resolves the nav link *behind* it and then burns Playwright's full
+        // 30s click timeout on pointer-event interception. That was the
+        // 2026-08-04 UNCAUGHT_EXCEPTION: 54s spent trying to open a dialog
+        // that was already open.
+        //
+        // Anchor the "is it open?" probe on the dialog's own primary button
+        // rather than its heading: it's unambiguous (nothing else on the
+        // Preparar planilla page carries that label) and it's the very
+        // button clicked further down, so if this probe matches, the rest of
+        // the clone flow is reachable by construction.
+        if (clonePickerOpen(page)) {
+            manifest.step("clone-picker-auto",
+                    "Cargar lista dialog auto-opened on Preparar planilla — no launcher click needed");
+            log.info("clone picker already open on arrival; skipping launcher hunt");
+        } else {
+            Locator nueva = findCloneLauncher(page);
+            if (nueva == null) {
+                log.info("Cargar/Nueva planilla not directly visible — opening Acciones rápidas dropdown");
+                if (openAccionesRapidas(page, manifest)) {
+                    nueva = findCloneLauncher(page);
                 }
             }
-        }
-        if (nueva == null) {
-            saveDiagnosticScreenshot(page, bindings, "nueva-planilla-not-found");
-            // Dump every visible button label to the manifest so the next
-            // iteration can pin the right selector without another screenshot.
-            Locator allButtons = page.locator("button:visible, [role=\"button\"]:visible");
-            int btnCount = allButtons.count();
-            StringBuilder labels = new StringBuilder();
-            for (int i = 0; i < Math.min(btnCount, 30); i++) {
-                String t = textOrEmpty(allButtons.nth(i)).replaceAll("\\s+", " ");
-                if (!t.isEmpty()) labels.append('[').append(i).append(":'").append(t).append("'] ");
+            if (nueva == null) {
+                saveDiagnosticScreenshot(page, bindings, "nueva-planilla-not-found");
+                // Dump every visible button label to the manifest so the next
+                // iteration can pin the right selector without another screenshot.
+                Locator allButtons = page.locator("button:visible, [role=\"button\"]:visible");
+                int btnCount = allButtons.count();
+                StringBuilder labels = new StringBuilder();
+                for (int i = 0; i < Math.min(btnCount, 30); i++) {
+                    String t = textOrEmpty(allButtons.nth(i)).replaceAll("\\s+", " ");
+                    if (!t.isEmpty()) labels.append('[').append(i).append(":'").append(t).append("'] ");
+                }
+                log.info("visible buttons on Preparar planilla page: {}", labels);
+                manifest.step("nueva-planilla-not-found",
+                        "blockingModal=" + describeBlockingModal(page) + " buttons=" + labels);
+                throw new IllegalStateException(
+                        "ins-rt-virtual: the clone picker did not auto-open and neither "
+                                + "'Nueva planilla' nor 'Cargar lista de trabajadores de "
+                                + "períodos anteriores' was clickable on the Preparar planilla "
+                                + "page (or inside the Acciones rápidas dropdown). See "
+                                + "nueva-planilla-not-found.png and the manifest "
+                                + "nueva-planilla-not-found step for the blocking-modal text "
+                                + "and visible button list.");
             }
-            log.info("visible buttons on Preparar planilla page: {}", labels);
-            manifest.step("nueva-planilla-not-found",
-                    "buttons=" + labels.toString());
-            throw new IllegalStateException(
-                    "ins-rt-virtual: neither 'Nueva planilla' nor "
-                            + "'Cargar lista de trabajadores de periodos anteriores' "
-                            + "found on the Preparar planilla page (or inside Acciones "
-                            + "rápidas dropdown). See nueva-planilla-not-found.png and "
-                            + "the manifest nueva-planilla-not-found step for the visible "
-                            + "button list.");
+            safeClick(nueva, "Cargar/Nueva planilla");
         }
-        safeClick(nueva, "Cargar/Nueva planilla");
 
         // The Nueva planilla dialog lists prior-period planillas as rows
         // with checkboxes. Operator confirmed the most recent prior is
@@ -1136,12 +1286,15 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         // row's name cell is <span id="lblNombrePayroll">Planilla NNNN</span>
         // (INS's own stable id, verified on the live 2026-07 UI). Two traps
         // the previous locator fell into:
-        //   1. This modal is NOT wrapped in role="dialog" (the Resumen dialog
-        //      is, but this one isn't), so the old [role="dialog"] >> role=row
-        //      / tr scoping matched nothing — or matched the stray "Cerrar"
-        //      notification banner behind the modal — and the adapter
+        //   1. Modal-wrapper markup is not stable across INS releases. As of
+        //      the 2026-05-04 recording this dialog carried no role="dialog";
+        //      by 2026-08-04 it renders as
+        //      <div role="dialog" aria-modal="true" class="Modal-Control-Basic
+        //      ... modal show">. Scoping the row lookup to a wrapper selector
+        //      therefore broke once already (matching nothing, or matching the
+        //      stray "Cerrar" notification banner behind the modal) and
         //      mis-reported "no rows visible" with a clonable planilla sitting
-        //      right there.
+        //      right there. Stay off the wrapper; anchor on row content.
         //   2. The row list is fetched async; the old fixed 800ms wait raced
         //      the skeleton (same lesson the Resumen dialog already learned
         //      with its loader poll).
@@ -1191,8 +1344,7 @@ final class InsRtVirtualSubmitAdapter extends AbstractSubmitAdapter {
         }
         manifest.step("nueva-planilla", "selected first prior-planilla row to clone");
 
-        safeClick(page.locator("button:has-text(\"Cargar lista seleccionada\")"),
-                "Cargar lista seleccionada");
+        safeClick(page.locator(CLONE_PICKER_CONFIRM), "Cargar lista seleccionada");
         // The codegen recording captured an "Aceptar" confirmation
         // dialog after Cargar — but empirically that only fires when
         // there's existing planilla state to overwrite. When the

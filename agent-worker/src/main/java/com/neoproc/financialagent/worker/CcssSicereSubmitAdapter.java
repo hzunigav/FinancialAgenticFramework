@@ -12,6 +12,7 @@ import com.neoproc.financialagent.worker.envelope.EnvelopeIo;
 import com.neoproc.financialagent.worker.portal.PortalDescriptor;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
+import com.microsoft.playwright.PlaywrightException;
 import com.microsoft.playwright.options.LoadState;
 import com.microsoft.playwright.options.WaitForSelectorState;
 import org.slf4j.Logger;
@@ -81,6 +82,41 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
     // sit in the DOM even when not displayed; scoping to visible-only
     // disambiguates without needing to know each dialog's id.
     private static final String APLICAR_SALARIOS = "button:visible:has-text(\"Aplicar Salarios\")";
+
+    // Aplicar Salarios fires a PrimeFaces ajax round-trip that replaces the
+    // entire table body. Everything below exists to survive that swap.
+    //
+    // Number of times to re-resolve and re-fill a row whose DOM node is
+    // pulled out from under us mid-edit. 3 covers the observed case (one
+    // late ajax response landing on top of the next row's edit) with room
+    // for a second swap; beyond that the table is churning for a reason the
+    // adapter shouldn't paper over.
+    private static final int FILL_ATTEMPTS = 3;
+    private static final int AJAX_QUIESCE_TIMEOUT_MS = 15_000;
+    // Paint floor after the ajax queue reports empty. The queue drains when
+    // the response is applied, which is a beat before the browser has laid
+    // the new rows out.
+    private static final int SETTLE_FLOOR_MS = 250;
+
+    // Quiescence probe for the Aplicar ajax round-trip. Every clause is
+    // written to degrade to "quiescent" when the thing it inspects isn't
+    // there, so a PrimeFaces upgrade that renames internals costs us the
+    // old fixed-delay behaviour rather than a hang.
+    private static final String AJAX_QUIESCENT_JS = """
+            () => {
+              const pf = window.PrimeFaces;
+              if (pf && pf.ajax && pf.ajax.Queue
+                  && typeof pf.ajax.Queue.isEmpty === 'function'
+                  && !pf.ajax.Queue.isEmpty()) {
+                return false;
+              }
+              const overlays = document.querySelectorAll('.ui-blockui, .ui-widget-overlay');
+              for (const o of overlays) {
+                if (o.offsetParent !== null) return false;
+              }
+              return true;
+            }
+            """;
     private static final String LOGOUT_LINK = "a:visible:has-text(\"exit_to_app\")";
     private static final String LOGOUT_CONFIRM = "button:visible:has-text(\"Sí\")";
 
@@ -577,34 +613,108 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
             return;
         }
 
-        // CRITICAL: re-locate the input by the row's cédula text at apply
-        // time, NOT by the stored inputId. PrimeFaces renumbers positional
-        // row indexes after each Aplicar's ajax response (the row that
-        // received the change can shift in the new ordering), so the
-        // inputId captured at scrape time becomes stale by iteration 2+.
-        // Anchor on the cédula text in a <td> within the row instead — the
-        // cédula is unique on the planilla and survives reordering.
-        Locator targetRow = page.locator(
-                "tbody tr:has(td:has-text(\"" + row.rawIdentification() + "\"))");
-        Locator input = targetRow.locator("input[id$='" + SALARY_INPUT_SUFFIX + "']").first();
-        input.waitFor(new Locator.WaitForOptions()
-                .setState(WaitForSelectorState.VISIBLE)
-                .setTimeout(10_000));
-        input.scrollIntoViewIfNeeded();
-        input.click();
-        input.fill(salary.toPlainString());
-        input.press("Tab");
+        fillSalary(page, row, salary);
+
         safeClick(page.locator(APLICAR_SALARIOS), "Aplicar Salarios");
         // PrimeFaces does an ajax round-trip on Aplicar that replaces the
         // table's DOM. waitForLoadState(LOAD) doesn't wait for ajax (LOAD
-        // only fires on initial navigation). A short fixed delay lets the
-        // ajax response render and the new <tr>/inputs settle before the
-        // next iteration's waitForSelector queries them. 800ms is well
-        // above typical PrimeFaces ajax round-trips and well below any
-        // sane portal-side rate-limit threshold.
-        page.waitForTimeout(800);
+        // only fires on initial navigation), so this used to be a flat 800ms
+        // sleep — a guess, not a synchronization. When the round-trip ran
+        // long, the next iteration walked into a table mid-replacement and
+        // the run died on "Element is not attached to the DOM" (2026-08-04).
+        // Wait on the ajax queue itself instead.
+        waitForAjaxQuiescent(page);
         manifest.step("aplicar",
                 "id=" + row.identification() + " salary=" + salary.toPlainString());
+    }
+
+    /**
+     * Fill one row's salary input and commit it with Tab, re-resolving the
+     * row from scratch on each attempt.
+     *
+     * <p>Retries specifically on detachment. A late ajax response from the
+     * *previous* row's Aplicar can replace the table while this row is being
+     * edited, invalidating the node between our locator resolving it and the
+     * next action running against it. Re-resolving by cédula picks up the
+     * replacement node, so the retry succeeds where the first attempt lost a
+     * race. Any other PlaywrightException propagates untouched — a missing
+     * row or a broken selector is a real failure and must not be retried
+     * into a timeout.
+     */
+    private void fillSalary(Page page, PortalRow row, BigDecimal salary) {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                // CRITICAL: re-locate the input by the row's cédula text at
+                // apply time, NOT by the stored inputId. PrimeFaces renumbers
+                // positional row indexes after each Aplicar's ajax response
+                // (the row that received the change can shift in the new
+                // ordering), so the inputId captured at scrape time becomes
+                // stale by iteration 2+. Anchor on the cédula text in a <td>
+                // within the row instead — the cédula is unique on the
+                // planilla and survives reordering.
+                //
+                // Resolving inside the loop is what makes the retry work:
+                // a Locator is a lazily-evaluated query, so re-running these
+                // two lines re-queries the live DOM rather than handing back
+                // the node that just got swapped out.
+                Locator targetRow = page.locator(
+                        "tbody tr:has(td:has-text(\"" + row.rawIdentification() + "\"))");
+                Locator input = targetRow.locator(
+                        "input[id$='" + SALARY_INPUT_SUFFIX + "']").first();
+                input.waitFor(new Locator.WaitForOptions()
+                        .setState(WaitForSelectorState.VISIBLE)
+                        .setTimeout(10_000));
+                // Deliberately no scrollIntoViewIfNeeded() here. It resolves
+                // to an ElementHandle and does NOT auto-retry when that node
+                // is replaced — it was the exact call that failed on
+                // 2026-08-04, one line after waitFor had just confirmed the
+                // element visible. click() scrolls as part of its own
+                // actionability checks and *does* auto-retry, so the scroll
+                // was redundant as well as fragile.
+                input.click();
+                input.fill(salary.toPlainString());
+                input.press("Tab");
+                return;
+            } catch (PlaywrightException e) {
+                if (attempt >= FILL_ATTEMPTS || !isDetached(e)) {
+                    throw e;
+                }
+                log.warn("fill-retry attempt={}/{} id={} — row was replaced mid-edit by a "
+                                + "PrimeFaces ajax update; re-resolving once the table settles",
+                        attempt, FILL_ATTEMPTS, row.identification());
+                waitForAjaxQuiescent(page);
+            }
+        }
+    }
+
+    /**
+     * True when a Playwright failure is the "the node I was holding got
+     * replaced" flavour, which is retryable by re-resolving the locator, as
+     * opposed to a genuine not-found/timeout, which is not.
+     */
+    private static boolean isDetached(PlaywrightException e) {
+        String msg = e.getMessage();
+        return msg != null && msg.contains("not attached to the DOM");
+    }
+
+    /**
+     * Block until PrimeFaces has finished applying its ajax response and the
+     * table has had a beat to lay out.
+     *
+     * <p>Never throws. If the probe can't confirm quiescence within the
+     * timeout we proceed anyway: the caller's retry loop is the real safety
+     * net, and a hard failure here would turn a slow portal into a dead run.
+     */
+    private static void waitForAjaxQuiescent(Page page) {
+        try {
+            page.waitForFunction(AJAX_QUIESCENT_JS, null,
+                    new Page.WaitForFunctionOptions().setTimeout(AJAX_QUIESCE_TIMEOUT_MS));
+        } catch (PlaywrightException stillBusy) {
+            log.warn("PrimeFaces ajax queue never reported empty within {}ms — continuing; "
+                            + "a stale row from here is absorbed by the fill retry",
+                    AJAX_QUIESCE_TIMEOUT_MS);
+        }
+        page.waitForTimeout(SETTLE_FLOOR_MS);
     }
 
     /**

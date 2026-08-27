@@ -148,7 +148,33 @@ public record PortalDescriptor(
             // Use "value" when the visible label is operator-renameable but the
             // value is a stable id. Trailing position so existing positional
             // Step(...) constructors only need a null appended.
-            String match) {
+            String match,
+            // For action=emailOtp: the mailbox filters + code pattern used to
+            // retrieve an out-of-band email 2FA code and type it into selector.
+            // Trailing position (append one null to positional constructors).
+            EmailOtp emailOtp,
+            // For action=waitForSelector: which element state to await —
+            // "visible" (default), "hidden", "attached" or "detached". Waiting
+            // for a login field to go "hidden"/"detached" is the canonical
+            // "logged in now" signal for an SPA whose login card is replaced.
+            String state) {
+
+        /**
+         * Back-compat constructor for the pre-{@code emailOtp}/{@code state}
+         * 18-arg positional signature — delegates with the two new fields null.
+         * Lets existing positional {@code new Step(...)} call sites (tests)
+         * compile unchanged; YAML deserialization always uses the canonical
+         * constructor.
+         */
+        public Step(Action action, String selector, String target, String value,
+                    Boolean redactValue, String prompt, String bindTo, Boolean submit,
+                    String over, String item, List<Step> steps, Boolean exists,
+                    List<Step> elseSteps, String containsText, String matchesRegex,
+                    Integer hasCount, Integer maxIterations, String match) {
+            this(action, selector, target, value, redactValue, prompt, bindTo, submit,
+                    over, item, steps, exists, elseSteps, containsText, matchesRegex,
+                    hasCount, maxIterations, match, null, null);
+        }
 
         public boolean redacted() {
             return Boolean.TRUE.equals(redactValue);
@@ -176,9 +202,44 @@ public record PortalDescriptor(
     }
 
     public enum Action {
-        navigate, fill, click, waitForUrl, waitForSelector, select, pause, totp, forEach,
+        navigate, fill, click, waitForUrl, waitForSelector, select, pause, totp, emailOtp, forEach,
         when, expect,
         @JsonProperty("while") whileLoop
+    }
+
+    /**
+     * Config for an {@code emailOtp} step — retrieves a server-generated 2FA
+     * code from a mailbox (email OTP, e.g. Hacienda OVI) and types it into the
+     * step's {@code selector}. Unlike {@code totp}, there is no held seed; the
+     * code exists only in an inbox, so an {@code OtpMailboxReader} fetches it.
+     * All fields here are non-secret filters — the mailbox connection is
+     * supplied out-of-band (Secrets Manager), never in the descriptor.
+     *
+     * <ul>
+     *   <li>{@code fromContains} — sender substring the OTP mail must match
+     *       (e.g. {@code tribucrcorreo@hacienda.go.cr}).</li>
+     *   <li>{@code subjectContains} — subject substring
+     *       (e.g. {@code Validación de los usuarios de servicios}).</li>
+     *   <li>{@code codeRegex} — pattern whose group 1 is the code
+     *       (e.g. {@code código de validación es:\s*(\d{4,6})}).</li>
+     *   <li>{@code timeoutSeconds} — how long to wait for the mail (default 90).</li>
+     *   <li>{@code pollSeconds} — mailbox poll interval (default 4).</li>
+     * </ul>
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record EmailOtp(String fromContains,
+                           String subjectContains,
+                           String codeRegex,
+                           Integer timeoutSeconds,
+                           Integer pollSeconds) {
+
+        public int timeoutSecondsOrDefault() {
+            return timeoutSeconds == null ? 90 : timeoutSeconds;
+        }
+
+        public int pollSecondsOrDefault() {
+            return pollSeconds == null ? 4 : pollSeconds;
+        }
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

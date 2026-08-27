@@ -2,8 +2,13 @@ package com.neoproc.financialagent.worker.portal;
 
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.SelectOption;
+import com.microsoft.playwright.options.WaitForSelectorState;
+import com.neoproc.financialagent.worker.auth.OtpMailboxReader;
+import com.neoproc.financialagent.worker.auth.OtpQuery;
 import com.neoproc.financialagent.worker.auth.TotpGenerator;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -25,12 +30,26 @@ public final class PortalEngine {
 
     private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^}]+)}");
 
+    /**
+     * Skew subtracted from "now" to form the OTP freshness cutoff. The mail is
+     * sent when we submit the login (the step before {@code emailOtp}), so it
+     * arrives AFTER now — but the mail server's clock may differ from ours, so
+     * we accept a mail timestamped up to this far in the past. Wide enough to
+     * absorb clock drift, narrow enough that a code from a prior run (minutes+
+     * old, and marked read anyway) is never re-typed.
+     */
+    private static final int OTP_FRESHNESS_SKEW_SECONDS = 120;
+
     private final Page page;
     private final Map<String, String> bindings;
     private final Map<String, List<Map<String, String>>> listBindings;
     private final BiConsumer<String, String> auditListener;
     private final Function<String, String> operatorInput;
     private final boolean shadowMode;
+    // Optional — only the emailOtp action needs it. Injected via withOtpMailbox
+    // so existing constructors/call sites are untouched. Null → an emailOtp step
+    // fails fast with a clear message.
+    private OtpMailboxReader otpMailbox;
 
     public PortalEngine(Page page,
                         Map<String, String> bindings,
@@ -59,6 +78,17 @@ public final class PortalEngine {
         this.auditListener = auditListener;
         this.operatorInput = operatorInput;
         this.shadowMode = shadowMode;
+    }
+
+    /**
+     * Supplies the mailbox reader used by {@code emailOtp} steps and returns
+     * {@code this} for chaining. Optional — portals without email-OTP auth
+     * never call it. Kept a post-construction seam (not a constructor arg) so
+     * the existing PortalEngine call sites and tests need no change.
+     */
+    public PortalEngine withOtpMailbox(OtpMailboxReader reader) {
+        this.otpMailbox = reader;
+        return this;
     }
 
     public void runSteps(String baseUrl, List<PortalDescriptor.Step> steps) {
@@ -98,8 +128,20 @@ public final class PortalEngine {
             }
             case waitForSelector -> {
                 String resolvedSelector = resolve(step.selector());
-                audit("waitForSelector", resolvedSelector);
-                page.waitForSelector(resolvedSelector);
+                String state = step.state() == null ? "visible" : step.state().toLowerCase();
+                WaitForSelectorState wfState = switch (state) {
+                    case "visible" -> WaitForSelectorState.VISIBLE;
+                    case "hidden" -> WaitForSelectorState.HIDDEN;
+                    case "attached" -> WaitForSelectorState.ATTACHED;
+                    case "detached" -> WaitForSelectorState.DETACHED;
+                    default -> throw new IllegalStateException(
+                            "waitForSelector.state must be visible|hidden|attached|detached, got: "
+                                    + step.state());
+                };
+                audit("waitForSelector", resolvedSelector
+                        + ("visible".equals(state) ? "" : " state=" + state));
+                page.waitForSelector(resolvedSelector,
+                        new Page.WaitForSelectorOptions().setState(wfState));
             }
             case select -> {
                 String resolvedSelector = resolve(step.selector());
@@ -122,6 +164,34 @@ public final class PortalEngine {
                 String seed = resolve(step.value());
                 String code = TotpGenerator.now(seed);
                 audit("totp", resolvedSelector + " (code redacted)");
+                page.locator(resolvedSelector).fill(code);
+            }
+            case emailOtp -> {
+                // Retrieve a server-generated 2FA code from a mailbox and type it
+                // into the field. Unlike totp there is no held seed — the code
+                // only exists in an inbox, so an OtpMailboxReader fetches it. The
+                // code is never audited.
+                if (otpMailbox == null) {
+                    throw new IllegalStateException(
+                            "emailOtp step requires an OtpMailboxReader — none configured "
+                                    + "(call PortalEngine.withOtpMailbox). Selector: " + step.selector());
+                }
+                PortalDescriptor.EmailOtp cfg = step.emailOtp();
+                if (cfg == null || cfg.codeRegex() == null || cfg.codeRegex().isBlank()) {
+                    throw new IllegalStateException(
+                            "emailOtp step requires an emailOtp block with a codeRegex");
+                }
+                String resolvedSelector = resolve(step.selector());
+                OtpQuery query = new OtpQuery(
+                        resolve(cfg.fromContains()),
+                        resolve(cfg.subjectContains()),
+                        Pattern.compile(cfg.codeRegex()),
+                        Instant.now().minusSeconds(OTP_FRESHNESS_SKEW_SECONDS),
+                        Duration.ofSeconds(cfg.timeoutSecondsOrDefault()),
+                        Duration.ofSeconds(cfg.pollSecondsOrDefault()));
+                audit("emailOtp", resolvedSelector + " (awaiting code from~=" + cfg.fromContains()
+                        + " subject~=" + cfg.subjectContains() + "; code redacted)");
+                String code = otpMailbox.awaitCode(query);
                 page.locator(resolvedSelector).fill(code);
             }
             case pause -> {

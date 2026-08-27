@@ -1,0 +1,111 @@
+id: hacienda-ovi
+description: >-
+  Ministerio de Hacienda — Oficina Virtual (OVi), ovitribucr.hacienda.go.cr.
+  Login-only for now: cédula + password with an email-delivered 2FA code. The
+  business flow (tax declarations/filings) is a later workstream; this descriptor
+  establishes the authenticated session.
+baseUrl: https://ovitribucr.hacienda.go.cr/
+
+# LOGIN ONLY — no business flow wired yet. Declaring an (as-yet-unused) flow keeps
+# the worker from registering payroll/bankstatement @SqsListeners for a queue that
+# was never provisioned. Revisit when the OVi business flow is defined; for now the
+# portal is exercised via the headed dry-run (HaciendaLoginDryRun), not a listener.
+flows:
+  - submit
+
+# Shared scope: one OVi login fronts every client firm (Phase-0 decision). The
+# per-firm portal-side selector will ride on task.clientIdentifier once a business
+# flow exists. Secret path (shared): financeagent/shared/portals/hacienda-ovi/*.
+credentialScope: shared
+
+# One session, gentle pacing — a government portal we must not hammer, and email
+# 2FA means logins are costly. maxConcurrent=1 (single shared session).
+rateLimit:
+  maxConcurrent: 1
+  minIntervalSeconds: 3.0
+
+# Session reuse is the PRIMARY auth path. Phase-0 confirmed the persisted
+# storageState (cookies + localStorage; NOT sessionStorage) silently
+# re-authenticates — the reuse probe landed with the login form gone. So we hit
+# 2FA rarely: only on a cold seed or once this TTL lapses. Persisted via the AWS
+# Secrets-Manager + KMS SessionStore so it survives Fargate scale-to-zero.
+# ttlMinutes is deliberately conservative pending the observed server-side session
+# lifetime (VALIDATE-LIVE) — start low and raise once a reused run is confirmed.
+session:
+  ttlMinutes: 240   # 4h — conservative until server session lifetime is measured
+
+# Runtime bindings the auth phase supplies:
+#   credentials.username  — the OVi cédula/identificación (shared login)
+#   credentials.password  — the OVi password
+# The email-OTP mailbox connection is NOT a descriptor binding — it is supplied to
+# the engine out-of-band (ImapOtpMailboxReader from Secrets Manager) so no mailbox
+# secret ever appears here.
+
+# --- AUTH STEPS — selectors confirmed from the Phase-0 login+OTP DOM capture -----
+# These run ONLY on the re-seed path (no reusable session). This is a Vuetify SPA;
+# the login-txt-* / login-btn-* ids are stable/semantic. The "Por correo
+# electrónico" channel radio (input[value=email]) is the default (aria-checked),
+# so we don't click it. Flow: fill cédula + password → Entrar (sends the code) →
+# the pin field appears → emailOtp retrieves + types the code → submit again →
+# the login card disappears (login-txt-ident gone) which is our "logged in" signal.
+authSteps:
+  - action: navigate
+    target: home                       # https://ovitribucr.hacienda.go.cr/home
+
+  - action: waitForSelector
+    selector: "#login-txt-ident"
+
+  - action: fill
+    selector: "#login-txt-ident"
+    value: "${credentials.username}"
+
+  - action: fill
+    selector: "#login-txt-password"
+    value: "${credentials.password}"
+    redact: true
+
+  - action: click
+    selector: "#login-btn-send-form"   # Entrar — triggers the OTP email send
+
+  - action: waitForSelector
+    selector: "#login-txt-pin"         # code-entry field appears after Entrar
+
+  # Retrieve the emailed code and type it in. All filters below are non-secret;
+  # the mailbox connection is injected via ImapOtpMailboxReader. Sender/subject/
+  # code format are the Phase-0 sample: "…el código de validación es: 14528."
+  - action: emailOtp
+    selector: "#login-txt-pin"
+    emailOtp:
+      fromContains: "tribucrcorreo@hacienda.go.cr"
+      subjectContains: "Validación de los usuarios de servicios"
+      codeRegex: "código de validación es:\\s*(\\d{4,6})"
+      timeoutSeconds: 120
+      pollSeconds: 4
+
+  - action: click
+    selector: "#login-btn-send-form"   # submit the code
+
+  # Login complete when the login card is gone. login-txt-ident is present ONLY
+  # pre-auth (Phase-0: count 1 on the login page, 0 after login and on a reused
+  # session), so its disappearance is an unambiguous authenticated signal.
+  - action: waitForSelector
+    selector: "#login-txt-ident"
+    state: hidden
+
+# No business steps yet — the OVi flow (declarations/filings) is a later workstream.
+steps: []
+
+scrape:
+  fields: []
+
+# Scrub the OTP code + password from the captured HAR. The login POST carries the
+# password; the pin submit carries the code. Field names are best-effort until the
+# live request shape is captured (VALIDATE-LIVE).
+securityContext:
+  scrubHarFields:
+    - urlPattern: "**/ovitribucr.hacienda.go.cr/**"
+      bodyFields:
+        - password
+        - pinAddress
+        - pin
+        - code

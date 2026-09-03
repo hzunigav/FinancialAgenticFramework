@@ -931,10 +931,13 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
     }
 
     private void ensureOnPage(Page page, int targetPage) {
-        // Already there is the common case by far — the Aplicar ajax
-        // re-renders the table in place and keeps the current page. Checking
-        // first saves two confirmed ajax hops per row on a multi-page
-        // planilla, and the per-row loop runs once per employee.
+        // Whether the Aplicar ajax preserves the current page or drops back
+        // to page 1 is genuinely unknown: until 2026-09 every planilla the
+        // adapter had ever seen fit on one page, so the multi-page apply
+        // loop has never run against the real portal. Reading the live
+        // paginator settles it per row instead of assuming either way — and
+        // when Aplicar does preserve the page, it skips two ajax hops on
+        // every employee.
         if (readCurrentPage(page) == targetPage) return;
 
         // Otherwise jump to first, then click Next (targetPage-1) times.

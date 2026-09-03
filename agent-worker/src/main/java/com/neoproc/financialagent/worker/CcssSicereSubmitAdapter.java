@@ -25,6 +25,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Submit adapter for CCSS Sicere — the per-client salary save flow.
@@ -69,6 +71,11 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
     // PrimeFaces and survives template tweaks; the <table> id itself
     // would only churn on a major form rename.
     private static final String SALARY_INPUT_SUFFIX = "txtNuevoSalario_input";
+    private static final String SALARY_INPUT_SELECTOR = "input[id$='" + SALARY_INPUT_SUFFIX + "']";
+    // A planilla row is any <tr> carrying a Nuevo Salario input. Rows the
+    // portal renders read-only (and the header/footer rows of the sibling
+    // tables on the page) have no such input and are excluded for free.
+    private static final String ROW_SELECTOR = "tbody tr:has(" + SALARY_INPUT_SELECTOR + ")";
     private static final String PAGINATOR_BOTTOM = "[id='formAPL:planillaCambiosTable_paginator_bottom']";
     // PrimeFaces buttons compose icon + text via two child spans; the
     // button's accessible name includes the icon's text content, making
@@ -117,6 +124,53 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
               return true;
             }
             """;
+    // Paging is an ajax round-trip too — same table swap, different trigger.
+    // How long to wait for the paginator to report the page we asked for
+    // before giving up on the hop. Matches the Aplicar quiescence budget.
+    private static final int PAGE_SWAP_TIMEOUT_MS = 15_000;
+    private static final int PAGE_POLL_INTERVAL_MS = 100;
+    /** {@link #readCurrentPage} when the paginator text can't be parsed. */
+    private static final int UNKNOWN_PAGE = -1;
+    // "Total registros: 16 (Página 1 de 1)". The accent is matched with a
+    // wildcard so a charset mishap on the portal side degrades to "can't
+    // read the paginator" (single-page behaviour) rather than to a regex
+    // that silently never matches.
+    private static final Pattern PAGINATOR_PAGE_OF =
+            Pattern.compile("P.gina\\s+(\\d+)\\s+de\\s+(\\d+)");
+    private static final Pattern PAGINATOR_TOTAL_RECORDS =
+            Pattern.compile("Total\\s+registros:\\s*(\\d+)");
+
+    // Extracts every row of the current page in ONE evaluation.
+    //
+    // Reading the rows cell-by-cell through the locator API costs four
+    // round-trips per row, and PrimeFaces can replace the table between any
+    // two of them. Page JS is single-threaded, so an ajax response cannot
+    // land in the middle of this function: either we read the whole old page
+    // or the whole new one, never a splice of both.
+    //
+    // Cells are read via .datos when present: PrimeFaces emits a
+    // .ui-column-title span in every cell for its responsive/stacked layout,
+    // which desktop CSS hides. innerText honours that (textContent would
+    // not) and .datos pins the value regardless of how the column titles are
+    // styled.
+    private static final String ROW_EXTRACT_JS = """
+            rows => rows.map(tr => {
+              const cellText = (td) => {
+                if (!td) return '';
+                const el = td.querySelector('span.datos') || td;
+                return (el.innerText || el.textContent || '').trim();
+              };
+              const cells = Array.from(tr.children).filter(c => c.tagName === 'TD');
+              const input = tr.querySelector("%s");
+              return {
+                rawId: cellText(cells[1]),
+                name: cellText(cells[2]),
+                salary: cellText(cells[3]),
+                inputId: input ? input.id : ''
+              };
+            })
+            """.formatted(SALARY_INPUT_SELECTOR);
+
     private static final String LOGOUT_LINK = "a:visible:has-text(\"exit_to_app\")";
     private static final String LOGOUT_CONFIRM = "button:visible:has-text(\"Sí\")";
 
@@ -432,6 +486,9 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
         safeClick(modificar, "Modificar");
         page.waitForSelector(PAGINATOR_BOTTOM,
                 new Page.WaitForSelectorOptions().setState(WaitForSelectorState.VISIBLE));
+        // The paginator chrome can render before the table body is populated;
+        // let the ajax queue drain before anyone scrapes.
+        waitForAjaxQuiescent(page);
         manifest.step("variation-B",
                 "selected PRESENTADA row, opened Modificar; on planilla edit page");
         return true;
@@ -455,6 +512,7 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
         safeClick(page.locator("button:visible:has-text(\"Continuar\")"), "Continuar");
         page.waitForSelector(PAGINATOR_BOTTOM,
                 new Page.WaitForSelectorOptions().setState(WaitForSelectorState.VISIBLE));
+        waitForAjaxQuiescent(page);
         manifest.step("variation-A",
                 "Presentar -> period dblclick -> Continuar; on planilla edit page");
         return true;
@@ -462,7 +520,9 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
 
     // --- Pagination + per-row Aplicar ---------------------------------------
 
-    private List<PortalRow> scrapeAllPages(Page page, RunManifest manifest) {
+    // Package-private: CcssSicereScrapeTest drives this directly against a
+    // fixture page that reproduces the PrimeFaces paginator swap.
+    List<PortalRow> scrapeAllPages(Page page, RunManifest manifest) {
         // Read the total page count upfront from the paginator's
         // "Página X de Y" indicator. Defends against the silent no-op
         // when "Next Page" is rendered-but-disabled (PrimeFaces marks
@@ -487,6 +547,24 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
                 break;
             }
         }
+
+        // The paginator publishes the row count it believes it is paging
+        // over. Cross-check it: a short scrape silently becomes
+        // missingFromPortal entries and a PARTIAL envelope, which reads like
+        // a roster problem at the client rather than a scrape that lost
+        // rows. Warn rather than fail — the envelope is still actionable,
+        // and the manifest step tells the operator which reading to trust.
+        int totalRecords = readTotalRecords(page);
+        if (totalRecords >= 0 && totalRecords != all.size()) {
+            log.warn("scrape-incomplete: paginator reports {} registros but {} rows were scraped "
+                            + "across {} page(s) — roster diff may be overstated",
+                    totalRecords, all.size(), totalPages);
+            manifest.step("scrape-incomplete",
+                    "paginatorRegistros=" + totalRecords
+                            + " scrapedRows=" + all.size()
+                            + " pages=" + totalPages);
+        }
+
         // Return to page 1 — the per-row Aplicar loop walks pages by id-match
         // anyway, and the post-loop totals scrape reads from the header
         // (visible on every page) so position-after-loop doesn't matter for
@@ -504,48 +582,138 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
      * paginator chrome may render but the page-of-pages text may be
      * formatted differently or absent).
      */
-    private int readTotalPages(Page page) {
-        try {
-            String text = page.locator(PAGINATOR_BOTTOM).innerText();
-            java.util.regex.Matcher m = java.util.regex.Pattern
-                    .compile("Página\\s+\\d+\\s+de\\s+(\\d+)")
-                    .matcher(text);
-            if (m.find()) {
-                return Integer.parseInt(m.group(1));
-            }
-            log.warn("paginator text did not match 'Página X de Y' pattern: {}",
-                    text.replaceAll("\\s+", " "));
-        } catch (RuntimeException e) {
-            log.warn("could not read paginator text — defaulting totalPages=1", e);
+    private static int readTotalPages(Page page) {
+        Matcher m = matchPaginator(page);
+        if (m == null) {
+            log.warn("could not read 'Página X de Y' from the paginator — defaulting totalPages=1");
+            return 1;
         }
-        return 1;
+        return Integer.parseInt(m.group(2));
     }
 
+    /**
+     * The page the paginator currently reports, or {@link #UNKNOWN_PAGE}
+     * when its text can't be read or parsed (mid-swap detachment, or a
+     * layout change). Never throws — callers treat unknown as "keep
+     * waiting", never as "we arrived".
+     */
+    private static int readCurrentPage(Page page) {
+        Matcher m = matchPaginator(page);
+        return m == null ? UNKNOWN_PAGE : Integer.parseInt(m.group(1));
+    }
+
+    /** "Total registros: N" from the paginator, or -1 when unreadable. */
+    private static int readTotalRecords(Page page) {
+        String text = paginatorText(page);
+        if (text == null) return -1;
+        Matcher m = PAGINATOR_TOTAL_RECORDS.matcher(text);
+        return m.find() ? Integer.parseInt(m.group(1)) : -1;
+    }
+
+    private static Matcher matchPaginator(Page page) {
+        String text = paginatorText(page);
+        if (text == null) return null;
+        Matcher m = PAGINATOR_PAGE_OF.matcher(text);
+        return m.find() ? m : null;
+    }
+
+    private static String paginatorText(Page page) {
+        try {
+            return page.locator(PAGINATOR_BOTTOM).first().innerText();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Block until the paginator reports {@code expected}, then until the
+     * ajax that swapped the table has settled.
+     *
+     * <p>This is the synchronization the paging hops used to lack. They
+     * waited on {@link LoadState#LOAD}, which for an ajax paginator returns
+     * immediately — the load event fired back when the planilla page first
+     * arrived and never fires again — so the caller went straight on to
+     * scrape or fill against the page it was leaving. PrimeFaces re-renders
+     * the paginator and the table body in the same response, so the
+     * paginator reporting the new page is proof the new rows are in the DOM.
+     *
+     * @return true when the hop was confirmed; false when it wasn't, which
+     *         callers must treat as "we are not where we asked to be"
+     */
+    private static boolean awaitPage(Page page, int expected) {
+        long deadline = System.currentTimeMillis() + PAGE_SWAP_TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline) {
+            if (readCurrentPage(page) == expected) {
+                waitForAjaxQuiescent(page);
+                return true;
+            }
+            page.waitForTimeout(PAGE_POLL_INTERVAL_MS);
+        }
+        log.warn("paginator never reported page {} within {}ms (last read: {})",
+                expected, PAGE_SWAP_TIMEOUT_MS, readCurrentPage(page));
+        return false;
+    }
+
+    /**
+     * Scrape every row of the page currently displayed.
+     *
+     * <p>The read is a single atomic {@link Locator#evaluateAll} rather than
+     * a per-row walk of the locator API. The walk was a live race with the
+     * table's ajax swap: it snapshotted {@code rows.count()} and then indexed
+     * {@code rows.nth(i)}, so a table that shrank mid-loop — the last page of
+     * a multi-page planilla, arriving while the previous page's rows were
+     * still being read — left {@code nth(i)} pointing at a row that would
+     * never exist again, and the read blocked for the full 30s default
+     * timeout before failing the whole submit. When the new page was the
+     * longer one the failure was quieter and worse: the scrape returned a
+     * splice of two pages, double-counting some employees and dropping
+     * others into {@code missingFromPortal}.
+     */
     private List<PortalRow> scrapeCurrentPage(Page page, int pageIdx) {
-        // Anchor on <tr> elements within the table body that contain the
-        // salary input. Earlier attempt used [id^='formAPL:planillaCambiosTable:']
-        // which incorrectly matched the PrimeFaces <span> wrapper around the
-        // input (same id prefix, no <td> children) — so cell scraping
-        // returned empty strings and matching missed everything.
-        Locator rows = page.locator("tbody tr:has(input[id$='" + SALARY_INPUT_SUFFIX + "'])");
-        int n = rows.count();
-        List<PortalRow> out = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            Locator row = rows.nth(i);
-            String rawId = textOrEmpty(row.locator("td").nth(1));
+        List<PortalRow> rows = extractRows(page, pageIdx);
+        if (rows.isEmpty()) {
+            // Either the table is genuinely empty or we arrived a beat early.
+            // Give the rows one bounded chance to show up before believing it.
+            try {
+                page.locator(ROW_SELECTOR).first().waitFor(new Locator.WaitForOptions()
+                        .setState(WaitForSelectorState.VISIBLE)
+                        .setTimeout(10_000));
+            } catch (PlaywrightException none) {
+                log.warn("page {} has no rows carrying a Nuevo Salario input after 10s "
+                        + "— scraping it as empty", pageIdx);
+                return List.of();
+            }
+            rows = extractRows(page, pageIdx);
+        }
+        return rows;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<PortalRow> extractRows(Page page, int pageIdx) {
+        Object raw = page.locator(ROW_SELECTOR).evaluateAll(ROW_EXTRACT_JS);
+        if (!(raw instanceof List<?> extracted)) return List.of();
+
+        List<PortalRow> out = new ArrayList<>(extracted.size());
+        for (Object element : extracted) {
+            if (!(element instanceof Map<?, ?> cells)) continue;
+            Map<String, Object> row = (Map<String, Object>) cells;
+            String rawId = cellText(row, "rawId");
             String identification = stripIdTypePrefix(rawId);
-            String name = textOrEmpty(row.locator("td").nth(2));
-            BigDecimal currentSalary = parseMoneyOrNull(textOrEmpty(row.locator("td").nth(3)));
-            String inputId = row.locator("input[id$='" + SALARY_INPUT_SUFFIX + "']")
-                    .first()
-                    .getAttribute("id");
-            if (i < 2) {
-                log.info("scrape-row[{}] rawId='{}' strippedId='{}' name='{}' salario='{}' inputId='{}'",
-                        i, rawId, identification, name, currentSalary, inputId);
+            String name = cellText(row, "name");
+            BigDecimal currentSalary = parseMoneyOrNull(cellText(row, "salary"));
+            String inputId = cellText(row, "inputId");
+            if (out.size() < 2) {
+                log.info("scrape-row[{}] page={} rawId='{}' strippedId='{}' name='{}' salario='{}' inputId='{}'",
+                        out.size(), pageIdx, rawId, identification, name, currentSalary, inputId);
             }
             out.add(new PortalRow(pageIdx, inputId, identification, rawId, name, currentSalary));
         }
         return out;
+    }
+
+    private static String cellText(Map<String, Object> row, String key) {
+        Object value = row.get(key);
+        return value == null ? "" : value.toString().trim();
     }
 
     /**
@@ -575,9 +743,19 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
             if (next.count() == 0) return false;
         }
         if (isDisabled(next)) return false;
+        int before = readCurrentPage(page);
         next.click();
-        page.waitForLoadState(LoadState.LOAD);
-        return true;
+        // Unknown current page means the paginator text is unreadable, and
+        // readTotalPages parses the same text — so the scrape loop would
+        // have concluded totalPages=1 and never asked to advance. Reaching
+        // here with UNKNOWN means the paginator changed shape mid-run;
+        // fall back to the ajax probe rather than pretending we know where
+        // we landed.
+        if (before == UNKNOWN_PAGE) {
+            waitForAjaxQuiescent(page);
+            return true;
+        }
+        return awaitPage(page, before + 1);
     }
 
     private static boolean isDisabled(Locator locator) {
@@ -593,9 +771,10 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
             first = page.locator(PAGINATOR_BOTTOM + " >> role=link[name='First Page']").first();
             if (first.count() == 0) return;
         }
+        // Disabled == already on page 1. PrimeFaces keeps the link rendered.
         if (isDisabled(first)) return;
         first.click();
-        page.waitForLoadState(LoadState.LOAD);
+        awaitPage(page, 1);
     }
 
     private void applySalary(Page page, PortalRow row, BigDecimal salary, RunManifest manifest) {
@@ -659,8 +838,7 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
                 // the node that just got swapped out.
                 Locator targetRow = page.locator(
                         "tbody tr:has(td:has-text(\"" + row.rawIdentification() + "\"))");
-                Locator input = targetRow.locator(
-                        "input[id$='" + SALARY_INPUT_SUFFIX + "']").first();
+                Locator input = targetRow.locator(SALARY_INPUT_SELECTOR).first();
                 input.waitFor(new Locator.WaitForOptions()
                         .setState(WaitForSelectorState.VISIBLE)
                         .setTimeout(10_000));
@@ -753,12 +931,29 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
     }
 
     private void ensureOnPage(Page page, int targetPage) {
-        // Cheap implementation: jump to first, then click Next (targetPage-1)
-        // times. Adequate for ≤ a few hundred employees; real-world planillas
-        // top out far below that.
+        // Whether the Aplicar ajax preserves the current page or drops back
+        // to page 1 is genuinely unknown: until 2026-09 every planilla the
+        // adapter had ever seen fit on one page, so the multi-page apply
+        // loop has never run against the real portal. Reading the live
+        // paginator settles it per row instead of assuming either way — and
+        // when Aplicar does preserve the page, it skips two ajax hops on
+        // every employee.
+        if (readCurrentPage(page) == targetPage) return;
+
+        // Otherwise jump to first, then click Next (targetPage-1) times.
+        // Adequate for ≤ a few hundred employees; real-world planillas top
+        // out far below that.
         gotoFirstPage(page);
         for (int i = 1; i < targetPage; i++) {
-            if (!gotoNextPage(page)) return;
+            if (!gotoNextPage(page)) {
+                // Filling against the wrong page would either miss the row
+                // (10s timeout, opaque) or — worse — write the salary into
+                // whichever row now sits where we expected ours. Stop here.
+                throw new IllegalStateException(
+                        "ccss-sicere: could not navigate back to planilla page " + targetPage
+                                + " (stalled after page " + i + "); refusing to fill against "
+                                + "the wrong page");
+            }
         }
     }
 
@@ -824,15 +1019,6 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
             }
         }
         return result;
-    }
-
-    private static String textOrEmpty(Locator loc) {
-        if (loc.count() == 0) return "";
-        try {
-            return loc.innerText().trim();
-        } catch (RuntimeException e) {
-            return "";
-        }
     }
 
     private static BigDecimal readMoneyOrZero(Page page, String selector) {
@@ -931,10 +1117,10 @@ final class CcssSicereSubmitAdapter extends AbstractSubmitAdapter {
      * captured for diagnostic logging only; do not rely on it across
      * iterations.
      */
-    private record PortalRow(int pageIndex,
-                             String inputId,
-                             String identification,
-                             String rawIdentification,
-                             String name,
-                             BigDecimal currentSalary) {}
+    record PortalRow(int pageIndex,
+                     String inputId,
+                     String identification,
+                     String rawIdentification,
+                     String name,
+                     BigDecimal currentSalary) {}
 }

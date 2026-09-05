@@ -72,22 +72,34 @@ public class S3ArtifactStore {
      *         {@code null} when S3 is not configured or the upload failed
      *         (failure must never flip a successful run to FAILED).
      */
-    public String uploadRunDir(Path runDir, String portalId, String runId) {
+    public Upload uploadRunDir(Path runDir, String portalId, String runId) {
         if (!isEnabled()) {
             log.debug("S3 upload skipped — no bucket configured runId={}", runId);
-            return null;
+            return Upload.none();
         }
         if (!Files.isDirectory(runDir)) {
             log.warn("S3 upload skipped — runDir missing runId={} path={}", runId, runDir);
-            return null;
+            return Upload.none();
         }
 
         String keyPrefix = envPrefix + "/runs/" + portalId + "/" + runId + "/";
+        String folderUri = "s3://" + bucket + "/" + keyPrefix;
         List<CompletableFuture<?>> uploads = new ArrayList<>();
+        List<StoredArtifact> stored = new ArrayList<>();
 
-        try (Stream<Path> files = Files.list(runDir)) {
+        // Walks the tree rather than listing the top level: adapters that write
+        // into a subdirectory (ccss-sicere-reports puts its archived documents
+        // in reports/, and fixture capture uses fixtures/) would otherwise have
+        // their output dropped silently — isRegularFile skips the directory and
+        // nothing reports a problem, so the run still looks clean.
+        try (Stream<Path> files = Files.walk(runDir)) {
             files.filter(Files::isRegularFile).forEach(file -> {
-                String key = keyPrefix + file.getFileName().toString();
+                // Relative path keeps the subdirectory in the S3 key; the
+                // separator has to be normalised because a worker developing on
+                // Windows would otherwise emit backslashes into the key.
+                String relative = runDir.relativize(file).toString().replace('\\', '/');
+                String key = keyPrefix + relative;
+                stored.add(new StoredArtifact(relative, "s3://" + bucket + "/" + key, sizeOf(file)));
                 PutObjectRequest req = PutObjectRequest.builder()
                         .bucket(bucket)
                         .key(key)
@@ -96,7 +108,7 @@ public class S3ArtifactStore {
             });
         } catch (IOException e) {
             log.warn("S3 upload failed to enumerate runDir runId={} error={}", runId, e.toString());
-            return null;
+            return Upload.none();
         }
 
         try {
@@ -106,11 +118,48 @@ public class S3ArtifactStore {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             log.warn("S3 upload failed runId={} uploaded={} error={}",
                     runId, uploads.size(), e.toString());
-            return null;
+            return Upload.none();
         }
 
         String manifestUri = "s3://" + bucket + "/" + keyPrefix + "manifest.json";
         log.info("artifacts uploaded count={} manifestUri={}", uploads.size(), manifestUri);
-        return manifestUri;
+        return new Upload(manifestUri, folderUri, List.copyOf(stored));
     }
+
+    private static long sizeOf(Path file) {
+        try {
+            return Files.size(file);
+        } catch (IOException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * What an upload put in S3.
+     *
+     * <p>Consumers need more than the manifest URI: Praxis is handed the folder
+     * and the per-file locations so it can fetch a specific document without
+     * having to know how the run directory is laid out.
+     *
+     * @param manifestUri {@code s3://…/manifest.json}, or null when S3 is not
+     *                    configured or the upload failed — callers treat a null
+     *                    here exactly as before, artifacts stay on local disk
+     * @param folderUri   {@code s3://…/<runId>/}, trailing slash included
+     * @param files       every object written, relative name and absolute URI
+     */
+    public record Upload(String manifestUri, String folderUri, List<StoredArtifact> files) {
+
+        /** No upload happened; preserves the historical null manifest URI. */
+        public static Upload none() {
+            return new Upload(null, null, List.of());
+        }
+    }
+
+    /**
+     * @param name relative path inside the run directory, e.g.
+     *             {@code reports/PlanillaNeoproc082026.pdf}
+     * @param uri  fully-qualified {@code s3://} location
+     * @param bytes object size, or -1 if it could not be read
+     */
+    public record StoredArtifact(String name, String uri, long bytes) {}
 }

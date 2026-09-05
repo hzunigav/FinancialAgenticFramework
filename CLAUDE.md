@@ -6,6 +6,33 @@ No `mvnw.cmd` in this project. Use the system Maven:
 mvn.cmd <goals> -pl <module>
 ```
 
+**JDK 21 is required** (`maven.compiler.release=21`). CI (`setup-java` 21) and the
+Docker build (`maven:3.9-eclipse-temurin-21-jammy`) already use it; only local
+machines need setting up. Building on 17 fails with *"release version 21 not
+supported"*; building on 25 compiles but breaks `common-lib` tests with
+*"Mockito cannot mock … SecretsManagerClient"* (ByteBuddy doesn't understand JDK 25
+bytecode) — that failure is environmental, not a code regression.
+
+Global `JAVA_HOME` is intentionally not assumed, since other projects on the same
+machine pin other JDKs. `.vscode/settings.json` (untracked) sets
+`terminal.integrated.env.windows.JAVA_HOME` for this workspace only. For a
+standalone shell, prefix the invocation:
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.<build>-hotspot"; mvn.cmd <goals>
+```
+Maven toolchains were considered and rejected: CI and Docker already build on 21,
+so a `maven-toolchains-plugin` requirement would only add a `toolchains.xml` that
+must be shipped into both to avoid breaking the release path.
+
+### Stale `target/classes` from the IDE
+The VS Code Java extension compiles into the same `target/classes` Maven uses. If it
+writes a class file newer than the source, Maven's incremental compiler **skips the
+file entirely** and reports `BUILD SUCCESS` having compiled nothing — including when
+the IDE baked compile errors into the class (Eclipse defers those to a runtime
+throw). A build log with no `Compiling N source files` line did nothing. To force a
+real compile, delete the class files and re-run, then verify the artifact (`javap`)
+rather than trusting the exit code.
+
 ## Starting the testing-harness (mock-payroll server)
 The `testing-harness` module is a Spring Boot app that simulates a government payroll portal at `http://localhost:3000`. Start it before running any `mock-payroll` capture/submit flow.
 
@@ -82,4 +109,4 @@ mvn -pl contract-api -am deploy
 
 The `-am` (also-make) flag rebuilds and redeploys all three JARs in dependency order: root → common-lib → contract-api. No manual step is needed beyond the push.
 
-**Version:** `1.0.0-SNAPSHOT` — Praxis resolves the latest published SNAPSHOT each time it rebuilds. No version bump required for iterative development.
+**Version:** `1.0.1-SNAPSHOT` (root `pom.xml`) — Praxis resolves the latest published SNAPSHOT each time it rebuilds. No version bump required for iterative development.

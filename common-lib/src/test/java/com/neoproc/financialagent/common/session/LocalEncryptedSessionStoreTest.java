@@ -59,6 +59,34 @@ class LocalEncryptedSessionStoreTest {
     }
 
     @Test
+    void zeroMaxAgeNeverReuses_evenWhenSaveAndLoadShareAClockTick(@TempDir Path dir) {
+        // ttlMinutes: 0 in a descriptor means "always log in fresh". While the
+        // expiry check used a strict >, that promise held only if the clock
+        // ticked between save and load — so this passed or failed depending on
+        // machine speed (~1 run in 4 failed on a warm JVM). Looping pins the
+        // boundary regardless of clock granularity.
+        LocalEncryptedSessionStore store = new LocalEncryptedSessionStore(
+                dir.resolve("sessions"), dir.resolve("key"));
+
+        for (int i = 0; i < 200; i++) {
+            store.save("portal", "payload");
+            assertTrue(store.load("portal", Duration.ZERO).isEmpty(),
+                    "a zero TTL must never hand back a session, attempt " + i);
+        }
+    }
+
+    @Test
+    void sessionWithinMaxAgeIsStillReturned(@TempDir Path dir) {
+        // Guards the other side of the boundary: tightening > to >= must not
+        // start expiring sessions that are still comfortably inside their TTL.
+        LocalEncryptedSessionStore store = new LocalEncryptedSessionStore(
+                dir.resolve("sessions"), dir.resolve("key"));
+        store.save("portal", "payload");
+
+        assertEquals(Optional.of("payload"), store.load("portal", Duration.ofHours(1)));
+    }
+
+    @Test
     void missingSession_returnsEmpty(@TempDir Path dir) {
         LocalEncryptedSessionStore store = new LocalEncryptedSessionStore(
                 dir.resolve("sessions"), dir.resolve("key"));

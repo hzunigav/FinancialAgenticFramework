@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoproc.com/financialagent/schemas/agent-task-request.v1.json",
+  "title": "AgentTaskRequest v1",
+  "description": "Generic launch envelope for any agent-worker bot. One queue serves every automation: task.botId selects which bot runs and task.params carries its inputs. Adding a bot therefore requires no change to this schema and no contract-api republish — the bot's own descriptor declares and validates its parameters inside the worker.",
+  "type": "object",
+  "required": ["schema", "envelope", "task"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "agent-task-request.v1" },
+
+    "envelope": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/envelope" },
+
+    "task": {
+      "type": "object",
+      "required": ["botId", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "botId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Which bot to run. Must match a portal descriptor id shipped in the worker (e.g. 'ccss-sicere-reports'). An unknown botId is rejected with error.category = SCHEMA_VIOLATION rather than being retried, since redelivery cannot make it resolvable."
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] },
+          "description": "Bot-specific inputs as a flat map. Values are coerced to strings and exposed to the run as params.<key> bindings. Deliberately open: the required keys, their patterns and defaults are declared by the bot's descriptor and validated in-worker, so a new bot never edits this schema. A missing or malformed param fails fast with error.category = SCHEMA_VIOLATION naming the offending key."
+        }
+      }
+    }
+  }
+}

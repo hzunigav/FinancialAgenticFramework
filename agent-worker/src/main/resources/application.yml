@@ -34,6 +34,16 @@ agent:
     submit-queue: ${agent.worker.queue-prefix}-financeagent-tasks-submit-${portal.id}
     capture-queue: ${agent.worker.queue-prefix}-financeagent-tasks-capture-${portal.id}
     results-queue: ${agent.worker.queue-prefix}-financeagent-results
+    # Generic bot dispatch: one request queue for every automation, with
+    # task.botId selecting the bot. Onboarding a bot adds a descriptor and an
+    # adapter — no queue, no schema, no contract-api republish.
+    #
+    # Disabled by default and deliberately so: AgentTaskListener binds to this
+    # queue, and a listener on a queue that was never created aborts the whole
+    # Spring context, taking the payroll listeners with it. Set
+    # AGENT_TASK_ENABLED=true only in an environment where the queue exists.
+    agent-task-queue: ${agent.worker.queue-prefix}-financeagent-tasks
+    agent-task-enabled: ${AGENT_TASK_ENABLED:false}
     # Bank-statement (Xero) flow — dedicated queues (BankStatementUploadDesign Q4).
     # Resolved only on a PORTAL_ID=xero worker (BankStatementTaskListener is gated
     # on agent.worker.bankstatement-enabled, set from the descriptor's flows).

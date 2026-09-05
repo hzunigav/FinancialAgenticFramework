@@ -44,6 +44,9 @@ public final class SchemaValidator {
     public static final String SUBMIT_RESULT   = "payroll-submit-result.v1";
     public static final String BANK_STATEMENT_UPLOAD_REQUEST = "bank-statement-upload-request.v1";
     public static final String BANK_STATEMENT_UPLOAD_RESULT  = "bank-statement-upload-result.v1";
+    /** Generic bot dispatch — one pair for every automation, keyed by task.botId. */
+    public static final String AGENT_TASK_REQUEST = "agent-task-request.v1";
+    public static final String AGENT_TASK_RESULT  = "agent-task-result.v1";
 
     private static final String CLASSPATH_PREFIX = "/schemas/v1/";
     private static final String CANONICAL_URI_PREFIX =

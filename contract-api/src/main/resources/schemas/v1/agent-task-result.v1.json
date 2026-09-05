@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neoproc.com/financialagent/schemas/agent-task-result.v1.json",
+  "title": "AgentTaskResult v1",
+  "description": "Generic result envelope for any agent-worker bot. Reports the terminal status and where the run's output landed in S3, so the consumer can fetch documents without knowing how a run directory is laid out. envelope.businessKey is echoed verbatim from the request — the worker never synthesises one.",
+  "type": "object",
+  "required": ["schema", "envelope", "task", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "agent-task-result.v1" },
+
+    "envelope": { "$ref": "https://neoproc.com/financialagent/schemas/payroll-capture-result.v1.json#/properties/envelope" },
+
+    "task": {
+      "type": "object",
+      "required": ["botId"],
+      "additionalProperties": false,
+      "properties": {
+        "botId": { "type": "string", "minLength": 1 },
+        "params": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] },
+          "description": "Echo of the request params, so a result is self-describing in an audit trail without joining back to the request."
+        }
+      }
+    },
+
+    "status": {
+      "enum": ["SUCCESS", "PARTIAL", "FAILED"],
+      "description": "SUCCESS: everything the bot set out to produce exists. PARTIAL: some output produced, some not — the artifacts listed are valid and usable, but the run is incomplete and worth review. FAILED: nothing usable produced."
+    },
+
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["category", "message"],
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "enum": [
+                "NETWORK", "SELECTOR", "CREDENTIALS", "CREDENTIALS_INVALID",
+                "CREDENTIALS_EXPIRED", "PORTAL_REJECTED", "PORTAL_UNREACHABLE",
+                "PORTAL_AUTH_BLOCKED", "DUPLICATE_ENVELOPE", "EXPIRED_DUPLICATE",
+                "SCHEMA_VIOLATION", "UNCAUGHT_EXCEPTION", "UNEXPECTED", "OTHER"
+              ],
+              "description": "Same taxonomy as payroll-submit-result.v1, so existing consumer branching keeps working."
+            },
+            "message": { "type": "string" }
+          }
+        }
+      ],
+      "description": "Required (non-null) whenever status is FAILED. Optional on PARTIAL to explain what is missing."
+    },
+
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "folder": {
+          "type": ["string", "null"],
+          "description": "s3:// URI of the run folder, trailing slash included. Null when no artifacts bucket is configured (local dev) or the upload failed — in that case the output exists only on the worker's disk and the run should be treated as unretrievable."
+        },
+        "files": {
+          "type": "array",
+          "description": "Every object uploaded for this run, including operational artifacts (manifest.json, report.png, network.har). Documents produced by the bot are under a bot-specific prefix — ccss-sicere-reports writes reports/.",
+          "items": {
+            "type": "object",
+            "required": ["name", "uri"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Path relative to the run folder, e.g. 'reports/PlanillaNeoprocSociedadAnonima082026.pdf'."
+              },
+              "uri": { "type": "string", "pattern": "^s3://" },
+              "bytes": { "type": "integer", "description": "Object size; -1 when it could not be read." }
+            }
+          }
+        }
+      }
+    }
+  }
+}

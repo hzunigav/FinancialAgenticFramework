@@ -219,7 +219,10 @@ public class PortalRunService {
         Path manifestPath = runDir.resolve("manifest.json");
         long runStartNanos = System.nanoTime();
         S3ArtifactStore.Upload upload = S3ArtifactStore.Upload.none();
-        try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
+        // firmId/clientId identify the login this run will occupy, so a CCSS
+        // run for one company does not wait behind another company's.
+        try (PortalRateLimiter.Permit ignored =
+                     PortalRateLimiter.acquire(descriptor, firmId, clientId);
              Playwright playwright = Playwright.create();
              Browser browser = playwright.chromium().launch(
                      new BrowserType.LaunchOptions().setHeadless(headless()));
@@ -404,7 +407,7 @@ public class PortalRunService {
         Path manifestPath = runDir.resolve("manifest.json");
         long runStartNanos = System.nanoTime();
         String uploadedUri = null;
-        try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
+        try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor, firmId, credClientId);
              Playwright playwright = Playwright.create();
              Browser browser = playwright.chromium().launch(xeroLaunchOptions());
              BrowserContext context = browser.newContext(xeroContextOptions(runDir, savedSession))) {
@@ -589,7 +592,7 @@ public class PortalRunService {
         String uploadedUri = null;
         Path manifestPath = runDir.resolve("manifest.json");
 
-        try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
+        try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor, firmId, clientId);
              Playwright playwright = Playwright.create();
              Browser browser = playwright.chromium().launch(
                      new BrowserType.LaunchOptions().setHeadless(headless()));

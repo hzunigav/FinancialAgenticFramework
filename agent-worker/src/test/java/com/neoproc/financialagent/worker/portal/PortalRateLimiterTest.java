@@ -101,6 +101,61 @@ class PortalRateLimiterTest {
     }
 
     @Test
+    void sharedCredentialPortalSerialisesEveryone() {
+        // INS RT-Virtual has one login for the whole fleet, so every run
+        // contends regardless of which client it is for.
+        PortalDescriptor ins = descriptorWithScope("ins-rt-virtual", "shared", "ins-rt-virtual");
+
+        assertEquals(PortalRateLimiter.sessionKey(ins, "1", "3101680139"),
+                PortalRateLimiter.sessionKey(ins, "2", "3999999999"),
+                "shared credentials mean one session for everyone");
+    }
+
+    @Test
+    void perClientPortalKeepsCompaniesIndependent() {
+        // CCSS Sicere logs in per company. One company's payroll must not delay
+        // another company's reports.
+        PortalDescriptor submit = descriptorWithScope("ccss-sicere", "per-client", "ccss-sicere");
+        PortalDescriptor reports = descriptorWithScope("ccss-sicere-reports", "per-client", "ccss-sicere");
+
+        assertNotEquals(PortalRateLimiter.sessionKey(submit, "1", "3101680139"),
+                PortalRateLimiter.sessionKey(submit, "1", "3999999999"),
+                "different companies hold different CCSS sessions");
+
+        assertEquals(PortalRateLimiter.sessionKey(submit, "1", "3101680139"),
+                PortalRateLimiter.sessionKey(reports, "1", "3101680139"),
+                "submit and reports share one company's session");
+    }
+
+    @Test
+    void perClientKeyIgnoresFirmBecauseThePortalBindsToTheCompany() {
+        // Two tenants holding credentials for the same company still contend
+        // for that company's single portal session.
+        PortalDescriptor ccss = descriptorWithScope("ccss-sicere", "per-client", "ccss-sicere");
+
+        assertEquals(PortalRateLimiter.sessionKey(ccss, "1", "3101680139"),
+                PortalRateLimiter.sessionKey(ccss, "2", "3101680139"));
+    }
+
+    @Test
+    void missingClientIdentifierCollapsesToOneBucket() {
+        // Over-serialising costs latency; under-serialising drops a live
+        // session mid-run. Absent identity takes the safe side.
+        PortalDescriptor ccss = descriptorWithScope("ccss-sicere", "per-client", "ccss-sicere");
+
+        assertEquals(PortalRateLimiter.sessionKey(ccss, "1", null),
+                PortalRateLimiter.sessionKey(ccss, "1", "  "));
+    }
+
+    @Test
+    void perFirmPortalKeysOnTheFirm() {
+        PortalDescriptor mock = descriptorWithScope("mock-payroll", "per-firm", null);
+
+        assertNotEquals(PortalRateLimiter.sessionKey(mock, "1", null),
+                PortalRateLimiter.sessionKey(mock, "2", null));
+    }
+
+    @Test
     void descriptorsSharingAGroupContendForOnePermit() throws Exception {
         // CCSS Sicere and INS RT-Virtual allow only ONE active session per
         // account. Submit, capture and report pulls are separate descriptors
@@ -149,6 +204,13 @@ class PortalRateLimiterTest {
             assertNotNull(p1);
             assertNotNull(p2);
         }
+    }
+
+    /** Descriptor carrying the credential scope and session group under test. */
+    private static PortalDescriptor descriptorWithScope(String id, String scope, String group) {
+        return new PortalDescriptor(id, null, "http://localhost", false,
+                scope, new PortalDescriptor.RateLimit(1, null, group),
+                null, null, null, null, null, null);
     }
 
     private static PortalDescriptor minimalDescriptor(String id, PortalDescriptor.RateLimit rateLimit) {

@@ -1,0 +1,78 @@
+id: ccss-sicere-reports
+description: CCSS Sicere — post-confirmation report archival (PDF + Excel).
+baseUrl: https://aissfa.ccss.sa.cr/afiliacion/
+
+# Same per-client scope as ccss-sicere: one (firm × clientIdentifier) maps to
+# one corporate-id-bound login. Secret path:
+# financeagent/firms/<firmId>/portals/ccss-sicere/<clientIdentifier>.
+# NOTE the secret path deliberately keeps the `ccss-sicere` segment — this is
+# the same portal account, not a second set of credentials.
+credentialScope: per-client
+
+# Inherited from ccss-sicere for the same reason: CCSS sits behind an F5 WAF
+# (TS*/f5avr* cookies) and throttles hard. This run is lighter than the submit
+# loop — five reports x two formats — but shares the account, so the same
+# ceiling applies.
+rateLimit:
+  maxConcurrent: 1
+  minIntervalSeconds: 2.0
+
+# Fresh login every run, matching ccss-sicere. This run happens right after a
+# confirmed submit, so a warm session would often still be valid, but the
+# reports are archival evidence and a silently-expired session reused across
+# runs is a worse failure than a 3-4 second login.
+session:
+  ttlMinutes: 0
+
+# Runtime parameters:
+#   params.clientIdentifier = corporate id (cédula jurídica) driving credential
+#                             lookup, exactly as ccss-sicere uses it.
+#   params.period           = planilla period as MM/yyyy (e.g. "08/2026"). The
+#                             period the submit run just confirmed — NOT the
+#                             current month. Defaults to the prior month when
+#                             absent, which is what a run kicked off shortly
+#                             after month-end confirmation wants.
+#   params.formats          = comma-separated subset of pdf,xls. Default
+#                             "pdf,xls".
+
+authSteps:
+  # Kept byte-for-byte in sync with ccss-sicere.yaml and
+  # ccss-sicere-capture.yaml. If the CCSS login flow changes, update ALL THREE.
+  - action: navigate
+    target: /
+
+  - action: fill
+    selector: '[id="formInicioSesion:usuario"]'
+    value: "${credentials.username}"
+
+  - action: click
+    selector: 'form[id="formInicioSesion"] button:has-text("Continuar")'
+
+  - action: fill
+    selector: '[id="formInicioSesion:clave"]'
+    value: "${credentials.password}"
+    redact: true
+
+  - action: click
+    selector: 'form[id="formInicioSesion"] button:has-text("Ingresar")'
+
+  - action: waitForSelector
+    selector: 'role=menuitem[name=/Planilla/]'
+
+# Empty by design — CcssSicereReportsAdapter.beforeSteps drives every report
+# directly via Playwright. The loop cannot be expressed as descriptor steps: it
+# has to intercept the document request to obtain the file bytes (the portal
+# serves reports inline, so no download event ever fires) and read the JSF
+# messages panel after each click to tell a rejection from a slow report.
+steps: []
+
+scrape:
+  fields: []
+
+securityContext:
+  scrubHarFields:
+    - urlPattern: "**/afiliacion/**"
+      bodyFields:
+        - "formInicioSesion:clave"
+        - password
+        - clave

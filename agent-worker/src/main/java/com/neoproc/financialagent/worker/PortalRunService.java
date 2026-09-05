@@ -218,7 +218,7 @@ public class PortalRunService {
 
         Path manifestPath = runDir.resolve("manifest.json");
         long runStartNanos = System.nanoTime();
-        String uploadedUri = null;
+        S3ArtifactStore.Upload upload = S3ArtifactStore.Upload.none();
         try (PortalRateLimiter.Permit ignored = PortalRateLimiter.acquire(descriptor);
              Playwright playwright = Playwright.create();
              Browser browser = playwright.chromium().launch(
@@ -307,9 +307,9 @@ public class PortalRunService {
             // network.har, trace.zip, *.v1.json) to S3 so they survive
             // Fargate task shutdown. Failure is non-fatal — manifest.artifactUri
             // was already embedded in the envelope and audits can re-check.
-            uploadedUri = artifactStore != null
+            upload = artifactStore != null
                     ? artifactStore.uploadRunDir(runDir, portalId, runId)
-                    : null;
+                    : S3ArtifactStore.Upload.none();
             log.info("run complete status={} envelopeId={} businessKey={}",
                     manifest.status, manifest.envelopeId, manifest.businessKey);
             String metricName = adapter instanceof AbstractCaptureAdapter
@@ -322,7 +322,7 @@ public class PortalRunService {
                     .record(System.nanoTime() - runStartNanos, TimeUnit.NANOSECONDS);
         }
 
-        return new RunOutcome(runDir, manifest.status, null, uploadedUri);
+        return new RunOutcome(runDir, manifest.status, null, upload.manifestUri(), upload.folderUri(), upload.files());
     }
 
     /**
@@ -503,7 +503,7 @@ public class PortalRunService {
             manifest.finishedAt = Instant.now();
             EnvelopeIo.MAPPER.writeValue(manifestPath.toFile(), manifest);
             uploadedUri = artifactStore != null
-                    ? artifactStore.uploadRunDir(runDir, portalId, runId) : null;
+                    ? artifactStore.uploadRunDir(runDir, portalId, runId).manifestUri() : null;
             log.info("bank-statement run complete status={} envelopeId={} businessKey={}",
                     manifest.status, manifest.envelopeId, manifest.businessKey);
             String terminalStatus = manifest.status != null ? manifest.status : "UNKNOWN";
@@ -629,7 +629,7 @@ public class PortalRunService {
             manifest.finishedAt = Instant.now();
             EnvelopeIo.MAPPER.writeValue(manifestPath.toFile(), manifest);
             uploadedUri = artifactStore != null
-                    ? artifactStore.uploadRunDir(runDir, portalId, runId)
+                    ? artifactStore.uploadRunDir(runDir, portalId, runId).manifestUri()
                     : null;
             log.info("probe complete status={} portal={} screenshotSha256={}",
                     manifest.status, portalId, screenshotSha256);
@@ -647,6 +647,7 @@ public class PortalRunService {
             case "mock-payroll"   -> isCapture ? new MockPayrollCaptureAdapter() : new MockPayrollAdapter();
             case "autoplanilla"   -> new AutoplanillaAdapter();
             case "ccss-sicere"    -> isCapture ? new CcssSicereCaptureAdapter() : new CcssSicereSubmitAdapter();
+            case "ccss-sicere-reports" -> new CcssSicereReportsAdapter();
             case "ins-rt-virtual" -> new InsRtVirtualSubmitAdapter();
             default -> throw new IllegalStateException(
                     "No PortalAdapter registered for portal: " + portalId);

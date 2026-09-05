@@ -42,5 +42,8 @@ artifacts/
 logs/
 testing-harness/logs/
 
-# Phase-0 Xero spike output — storageState.json holds a LIVE session cookie
+# Spike output — storageState.json holds a LIVE session cookie, and the
+# recorded HAR carries the unscrubbed login POST (password in plaintext)
 xero-spike/
+hacienda-spike/
+sicere-*/

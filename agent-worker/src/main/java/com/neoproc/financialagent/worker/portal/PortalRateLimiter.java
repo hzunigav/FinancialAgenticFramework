@@ -52,15 +52,19 @@ public final class PortalRateLimiter {
             return () -> {};
         }
 
-        String portalId = descriptor.id();
+        // Keyed on the rate-limit group, not the descriptor id: portals that
+        // permit only one active session per account (CCSS Sicere, INS
+        // RT-Virtual) are driven by several descriptors sharing one login, and
+        // keying on id would hand each of them its own permit.
+        String key = config.groupOrDefault(descriptor.id());
 
-        Semaphore semaphore = SEMAPHORES.computeIfAbsent(portalId,
+        Semaphore semaphore = SEMAPHORES.computeIfAbsent(key,
                 id -> new Semaphore(config.maxConcurrentOrDefault(), true));
         semaphore.acquire();
 
         double minInterval = config.minIntervalSecondsOrDefault();
         if (minInterval > 0.0) {
-            RATE_LIMITERS.computeIfAbsent(portalId,
+            RATE_LIMITERS.computeIfAbsent(key,
                     id -> RateLimiter.create(1.0 / minInterval)).acquire();
         }
 

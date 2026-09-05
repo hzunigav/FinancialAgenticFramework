@@ -136,9 +136,18 @@ create_queue() {
     echo "  Queue already exists: $NAME"
     return
   fi
+  # VisibilityTimeout must exceed the LONGEST run this queue carries, not the
+  # average. If it lapses mid-run SQS redelivers while the first run is still
+  # driving the portal — and CCSS/INS permit only one active session per
+  # account, so the redelivery collides with the run it duplicated. 1800s
+  # covers a large payroll (per-row Aplicar over a big roster); a report pull
+  # finishes in ~90s. Raise this before onboarding anything slower.
+  #
+  # The cost of a high value is slower recovery: if a worker dies mid-message,
+  # nothing retries it until the timeout lapses.
   aws sqs create-queue --queue-name "$NAME" --region "$REGION" \
     --attributes "{
-      \"VisibilityTimeout\":           \"900\",
+      \"VisibilityTimeout\":           \"1800\",
       \"ReceiveMessageWaitTimeSeconds\":\"20\",
       \"MessageRetentionPeriod\":      \"345600\",
       \"RedrivePolicy\": \"{\\\"deadLetterTargetArn\\\":\\\"$DLQ_ARN\\\",\\\"maxReceiveCount\\\":\\\"5\\\"}\"

@@ -109,4 +109,4 @@ mvn -pl contract-api -am deploy
 
 The `-am` (also-make) flag rebuilds and redeploys all three JARs in dependency order: root → common-lib → contract-api. No manual step is needed beyond the push.
 
-**Version:** `1.0.0-SNAPSHOT` — Praxis resolves the latest published SNAPSHOT each time it rebuilds. No version bump required for iterative development.
+**Version:** `1.0.1-SNAPSHOT` (root `pom.xml`) — Praxis resolves the latest published SNAPSHOT each time it rebuilds. No version bump required for iterative development.

@@ -73,7 +73,15 @@ public final class LocalEncryptedSessionStore implements SessionStore {
         }
         try {
             Envelope env = JSON.readValue(file.toFile(), Envelope.class);
-            if (Duration.between(env.savedAt, Instant.now()).compareTo(maxAge) > 0) {
+            // >=, not >: a session is expired once it has reached maxAge.
+            //
+            // The strict form made `maxAge` of ZERO — the ttlMinutes: 0
+            // sentinel that descriptors like ccss-sicere.yaml use to mean
+            // "never reuse, always log in fresh" — reusable whenever save and
+            // load landed in the same clock tick, because elapsed was then
+            // exactly zero and not strictly greater. With >=, a zero TTL always
+            // expires, which is what those descriptors already claim happens.
+            if (Duration.between(env.savedAt, Instant.now()).compareTo(maxAge) >= 0) {
                 Files.deleteIfExists(file);
                 return Optional.empty();
             }

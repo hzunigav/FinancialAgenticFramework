@@ -42,7 +42,18 @@ agent:
     # queue, and a listener on a queue that was never created aborts the whole
     # Spring context, taking the payroll listeners with it. Set
     # AGENT_TASK_ENABLED=true only in an environment where the queue exists.
-    agent-task-queue: ${agent.worker.queue-prefix}-financeagent-tasks
+    # One FIFO queue per portal family (sicere, ins, hacienda, xero) rather
+    # than one for everything: a 30-minute payroll and a 90-second report pull
+    # should not share a consumer pool or an autoscaling signal. Which family a
+    # deployment serves is a deployment choice, hence the env override.
+    #
+    # FIFO is required, not preferred. SICERE and INS permit only one active
+    # session per set of credentials, and FIFO's one-in-flight-per-MessageGroupId
+    # is what enforces that across worker tasks. Senders set MessageGroupId to
+    # the session identity (e.g. ccss-sicere::client:<clientIdentifier>), which
+    # matches how PortalRateLimiter keys its in-process permit. A queue cannot
+    # be converted to FIFO later.
+    agent-task-queue: ${AGENT_TASK_QUEUE:${agent.worker.queue-prefix}-financeagent-tasks-sicere.fifo}
     agent-task-enabled: ${AGENT_TASK_ENABLED:false}
     # Bank-statement (Xero) flow — dedicated queues (BankStatementUploadDesign Q4).
     # Resolved only on a PORTAL_ID=xero worker (BankStatementTaskListener is gated

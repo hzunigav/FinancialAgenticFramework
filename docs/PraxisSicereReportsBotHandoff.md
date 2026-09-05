@@ -111,8 +111,15 @@ Patrono is expected for a given client before treating it as a defect.
 
 A full run is roughly **60–90 seconds**: fresh login (~4s), then nine documents at ~4–8s
 each, plus a mandatory 2s gap between reports (CCSS sits behind an F5 WAF and throttles).
-Concurrency is capped at 1 per client. Size the BPMN task timeout at **5 minutes** to leave
-room for a slow Planilla PDF (the largest, ~370KB).
+
+**Size the BPMN Receive Task at 30 minutes, not 90 seconds.** Execution time is not the
+number that matters. CCSS permits only one active session per company, so a report run for a
+company whose payroll is still submitting will **wait for that payroll to finish** before it
+starts — by design, and a large payroll can run close to 30 minutes. The timeout has to cover
+queue wait plus execution, so it should match the queue's visibility timeout (1800s).
+
+This is also why the trigger should be the payroll's *confirmation*, not a timer: fire it on
+confirmation and the wait is usually zero, because the session has just been released.
 
 ---
 
@@ -132,9 +139,15 @@ the current pattern would mean:
 
 ### The proposal
 
-**One request queue, one result queue, a fixed envelope, and a `botId` that says what to
-run.** Adding a bot then becomes a worker-side change with **no contract change and no
-republish** — which is the property that actually makes this scale.
+**A fixed envelope and a `botId` that says what to run.** Adding a bot then becomes a
+worker-side change with **no contract change and no republish** — which is the property
+that actually makes this scale.
+
+Note what that does *not* say: it says nothing about how many queues there are. The
+contract and the queue topology are independent, and conflating them is a mistake — the
+expensive part of "n queues with n contract changes" was always the contract half. With a
+generic envelope, queue count becomes a pure capacity-and-isolation decision you can
+revisit later without Praxis changing anything but a destination.
 
 Good news: the result side is **already** consolidated —
 `${prefix}-financeagent-results` is shared across portals today. This mostly formalises
@@ -223,33 +236,118 @@ The worker validates on receipt and fails fast with `SCHEMA_VIOLATION` and a mes
 the offending param. You get the same protection, delivered as a clear result envelope
 rather than a queue-level rejection — and a new bot never touches `contract-api`.
 
+### Queue topology: one FIFO queue per portal family
+
+**One request queue per portal family** — `sicere`, `ins`, `hacienda`, `xero` — not one
+queue per bot, and not one queue for everything. Every bot for a given portal shares its
+family's queue.
+
+Why not one queue for everything: run durations differ by an order of magnitude. A large
+payroll takes up to 30 minutes; a report pull takes about 90 seconds. Sharing one queue and
+one consumer pool means the 90-second job with a hard submittal-window deadline waits behind
+the 30-minute one, and you cannot give SICERE more capacity than Hacienda. Per-family queues
+give independent autoscaling (the existing scaling lambda already scales on queue depth) and
+contain a stuck family.
+
+Why not one queue per bot: that is the cost the generic envelope exists to remove. Adding a
+bot to an existing portal adds nothing — no queue, no schema, no republish.
+
+**Every request queue must be FIFO** (`.fifo` suffix). This is not a preference. SICERE and
+INS permit only **one active session per set of credentials**, and FIFO's one-in-flight-per-
+message-group guarantee is what enforces that across separate worker tasks. FIFO cannot be
+enabled on an existing queue, so the queues must be created FIFO from the start.
+
+### `MessageGroupId` — the part that must be right
+
+**`MessageGroupId` is the identity of the login the run will occupy.** Get this wrong and
+FIFO silently guarantees nothing.
+
+The obvious choice — the bot id — is **wrong**. `ccss-sicere` (payroll submit) and
+`ccss-sicere-reports` use the *same* company login, so keying on bot id puts them in
+different groups and lets a report pull start mid-payroll. The portal then drops one of the
+two sessions.
+
+The correct key follows the **credential scope**, because that is what determines how many
+logins exist:
+
+| Portal | Credential scope | `MessageGroupId` | Effect |
+|---|---|---|---|
+| INS RT-Virtual | shared — one login for everyone | `ins-rt-virtual` | every INS run serialises fleet-wide |
+| CCSS Sicere (all bots) | per company | `ccss-sicere::client:<clientIdentifier>` | one company at a time; **companies run in parallel** |
+| Xero | shared | `xero` | serialises fleet-wide |
+
+So a CCSS payroll for `3101680139` and a report pull for `3101680139` serialise, while
+`3999999999` proceeds untouched. That is the intended behaviour: **one company's long
+payroll must never delay another company's reports.**
+
+Concretely, for the report bot in this document:
+
+```
+MessageGroupId        = "ccss-sicere::client:3101680139"
+MessageDeduplicationId = <envelope.envelopeId>
+```
+
+`MessageDeduplicationId` should be the `envelopeId`, which aligns with the worker's
+idempotency store (already keyed on it). Mind SQS's **5-minute deduplication window**: a
+deliberate re-send inside 5 minutes carrying the same `envelopeId` is silently dropped, not
+delivered. Use a fresh `envelopeId` for a genuine retry.
+
+**Known coupling, stated rather than buried.** The session key is a worker-side fact — it
+derives from each descriptor's `credentialScope` — but SQS requires the *sender* to set
+`MessageGroupId`. That means Praxis needs the small table above. It is stable (it changes
+only when a portal changes its credential model, which is close to never), but it is real
+coupling and worth knowing before it is discovered mid-implementation. If you would rather
+not carry it, the alternative is a thin dispatcher on our side that computes the group and
+re-enqueues; it costs a hop and we would rather not, but say so and we will.
+
+### Head-of-line blocking is intended here
+
+With FIFO, if a run fails and its message returns to the queue, later messages **for that
+same group** wait. For "one active session per login" that is exactly right — but it means a
+stuck payroll delays that company's reports until the visibility timeout lapses or the
+message reaches the DLQ (`maxReceiveCount: 5`).
+
+Queue settings that matter:
+
+- **`VisibilityTimeout` = 1800s (30 min).** It must exceed the *longest* run the queue
+  carries, not the average. If it lapses mid-run, SQS redelivers while the original is still
+  driving the portal — and the redelivery then collides with the run it duplicated. Raise it
+  before onboarding anything slower than a large payroll.
+- **DLQ with `maxReceiveCount: 5`**, as today.
+- The cost of a high visibility timeout is slower recovery: if a worker dies mid-message,
+  nothing retries for 30 minutes.
+
+### What this does not cover
+
+FIFO serialises everything that arrives *through the queue*. It cannot see a run started
+outside it — an operator running the CLI runbook against production while a queued run is in
+flight would still open a second session. The worker also holds an in-process semaphore
+keyed on the same session identity, which catches same-process overlap and a mis-set
+`MessageGroupId`, but not a second process. Closing that fully needs a distributed lock
+(e.g. a DynamoDB conditional write on the session key); we have not built one, on the
+assumption that CLI-against-production is not routine practice. Tell us if it is.
+
 ### Trade-offs, stated plainly
 
-| | Today (per-bot queues) | Proposed (one queue) |
+| | Today (per-bot queues) | Proposed (FIFO per portal family) |
 |---|---|---|
-| Add a bot | 2 queues + 2 schemas + republish + deployment | descriptor + adapter, worker-side only |
-| Isolation | A stuck bot blocks only its own queue | A stuck bot occupies shared consumers |
-| Autoscaling | Per-queue depth | Aggregate depth |
-| Param validation | Central, published schema | Descriptor-declared, validated in-worker |
-
-The isolation loss is the one that deserves scrutiny. Two mitigations, and neither requires
-going back to per-bot queues: per-bot concurrency limits already exist
-(`rateLimit.maxConcurrent` in each descriptor — CCSS is pinned to 1 regardless of how many
-workers run), and lanes can be split by *expected duration* (`-fast` / `-slow`) rather than
-by bot, which caps the blast radius at two queues no matter how many automations you add.
-
-Per-portal autoscaling matters less than it appears: CCSS is capped at one concurrent run by
-the portal itself, so extra workers for it were never useful.
+| Add a bot to an existing portal | 2 queues + 2 schemas + republish + deployment | descriptor + adapter, worker-side only |
+| Add a new portal | same as above | one FIFO queue, no contract change |
+| Session safety | none across tasks | enforced by the broker per login |
+| Isolation | per bot | per portal family |
+| Autoscaling | per-queue depth | per-family depth |
+| Param validation | central, published schema | descriptor-declared, validated in-worker |
 
 ### Migration — incremental, nothing breaks
 
-1. **Add** the generic queue and envelope alongside what exists. `ccss-sicere-reports` is the
-   first consumer. Nothing currently running changes.
-2. **Migrate** payroll capture/submit when convenient, running old and new listeners in
-   parallel until Praxis switches.
-3. **Retire** the per-portal task queues and the divergent bank-statement pair.
+1. **Add** the FIFO queue for one family (`sicere`) alongside what exists.
+   `ccss-sicere-reports` is its first consumer. Nothing currently running changes.
+2. **Migrate** payroll capture/submit onto it when convenient, running old and new listeners
+   in parallel until Praxis switches.
+3. **Add** further families (`ins`, `hacienda`) as those automations arrive.
+4. **Retire** the per-portal task queues and the divergent bank-statement pair.
 
-Step 1 is enough to launch this bot and to onboard the next several automations.
+Step 1 is enough to launch this bot.
 
 ---
 
@@ -261,14 +359,16 @@ Step 1 is enough to launch this bot and to onboard the next several automations.
           ▼
   ┌───────────────────────────────┐
   │ Service Task: archive reports │  send agent-task-request.v1 to
-  │  botId = ccss-sicere-reports  │  <env>-financeagent-tasks
+  │  botId = ccss-sicere-reports  │  <env>-financeagent-tasks-sicere.fifo
   │  params: clientIdentifier,    │
-  │          period, formats      │
+  │          period, formats      │  MessageGroupId =
+  │                               │    ccss-sicere::client:<clientIdentifier>
+  │                               │  MessageDeduplicationId = envelopeId
   └───────────────────────────────┘
           │
           ▼
   ┌───────────────────────────────┐
-  │ Receive Task (5 min timeout)  │  correlate on businessKey
+  │ Receive Task (30 min timeout) │  correlate on businessKey
   │  agent-task-result.v1         │  from <env>-financeagent-results
   └───────────────────────────────┘
           │
@@ -289,23 +389,34 @@ prefix for the documents a human should receive.
 ## What we need from Praxis
 
 1. **Confirm the trigger point** — is the report run a step in the existing payroll BPMN
-   after submit confirmation, or a separate process correlated by `businessKey`?
-2. **Confirm retention.** Bucket lifecycle expires artifacts at 90 days. If these reports are
+   after submit confirmation, or a separate process correlated by `businessKey`? Firing on
+   confirmation matters: it is what keeps the FIFO wait at roughly zero.
+2. **Accept the `MessageGroupId` rule**, or tell us you would rather we compute it behind a
+   dispatcher. This is the one piece of worker-side knowledge the sender has to carry, and
+   getting it wrong removes the session guarantee silently rather than loudly.
+3. **Size the Receive Task at 30 minutes**, matching the queue visibility timeout — not at
+   the 90-second execution time.
+4. **Confirm retention.** Bucket lifecycle expires artifacts at 90 days. If these reports are
    compliance evidence, where should they be copied to, and by whom?
-3. **Agree the queue name** for the shared task queue (`<env>-financeagent-tasks` proposed)
-   so it can be provisioned in each environment.
+5. **Agree the queue name** — `<env>-financeagent-tasks-sicere.fifo` proposed — so it can be
+   provisioned per environment. It must be created FIFO; that cannot be changed later.
 
 ## Status on our side
 
-Implemented and unit-tested (103 tests in `agent-worker`, 35 in `contract-api`):
+Implemented and unit-tested (111 tests in `agent-worker`, 61 in `common-lib`, 35 in
+`contract-api`):
 
 - `ccss-sicere-reports` descriptor + adapter, five reports × two formats
-- `agent-task-request.v1` / `agent-task-result.v1` schemas and POJOs in `contract-api`
-- `AgentTaskListener` — consumes the shared queue, dispatches on `botId`, publishes the
-  result with S3 locations
+- `agent-task-request.v1` / `agent-task-result.v1` schemas and POJOs in `contract-api`,
+  published to GitHub Packages
+- `AgentTaskListener` — consumes the task queue, dispatches on `botId`, publishes the
+  result with S3 locations. Disabled by default until its queue exists.
 - Idempotency matching the existing listeners: warm duplicate re-publishes the cached
   result, cold duplicate reports `EXPIRED_DUPLICATE` rather than running the automation
   a second time
+- An in-process permit keyed on the same session identity as `MessageGroupId`, so submit
+  and report runs for one company cannot overlap even within a single worker
 
-Remaining before a live run: provision the shared task queue, and push `contract-api` to
-`main` so the new schemas publish to GitHub Packages for Praxis to consume.
+Remaining before a live run: provision the FIFO task queue, then enable the listener
+(`AGENT_TASK_ENABLED=true`) — **in that order**. Enabling it against a queue that does not
+exist takes the worker's other listeners down with it.

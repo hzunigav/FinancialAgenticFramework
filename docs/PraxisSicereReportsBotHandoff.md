@@ -386,6 +386,40 @@ Because the result lists every file with a fetchable `s3://` URI, the download/e
 needs no knowledge of the bot — it iterates `artifacts.files`, filtering on the `reports/`
 prefix for the documents a human should receive.
 
+## Impact on the BPMN processes you already run
+
+Short version: **add the new flow, do not restructure anything.** No existing message type,
+queue name or correlation rule changes. `payroll-submit-*`, `payroll-capture-*` and
+`bank-statement-*` are byte-identical, and the `contract-api` update is purely additive — your
+current builds keep working without consuming the new package. You need it only when you
+build the report flow.
+
+Three things do touch existing behaviour, and none require re-drawing a diagram.
+
+**1. The shared results queue now carries a second schema — please confirm this one.**
+`agent-task-result.v1` is published to the same `<env>-financeagent-results` queue as payroll
+results, so your existing consumer will begin seeing a message type it has never seen.
+
+Every message carries a **`schemaName` message attribute** (alongside `envelopeId` and
+`businessKey`). If your consumer already routes on it, nothing changes. If it deserialises
+the body directly into `PayrollSubmitResult`, an `agent-task-result.v1` message will fail to
+parse — in your consumer, on a working production flow.
+
+Tell us which it is. If routing on `schemaName` is awkward, we will publish agent-task
+results to a separate queue instead; that is a one-line change on our side and removes the
+risk entirely.
+
+**2. Payroll Receive Task timeout, if the payroll queues move to a 1800s visibility
+timeout.** We raised the default for large payrolls. Wherever that is applied, the BPMN
+Receive Task must be **≥ 30 minutes**, otherwise the process gives up before SQS has even
+redelivered the message. Configuration only — no structural change.
+
+**3. A small new timing coupling.** CCSS permits one session per company, now enforced, so a
+payroll for a company will wait if a report run for that same company is in flight. In the
+intended flow this never bites, because reports run *after* the payroll is confirmed. An
+ad-hoc report re-run could briefly delay a payroll start, so the payroll timeout should
+tolerate it.
+
 ## What we need from Praxis
 
 1. **Confirm the trigger point** — is the report run a step in the existing payroll BPMN
@@ -396,9 +430,11 @@ prefix for the documents a human should receive.
    getting it wrong removes the session guarantee silently rather than loudly.
 3. **Size the Receive Task at 30 minutes**, matching the queue visibility timeout — not at
    the 90-second execution time.
-4. **Confirm retention.** Bucket lifecycle expires artifacts at 90 days. If these reports are
+4. **Confirm how your results consumer handles an unrecognised schema** — see the section
+   above. This is the only item that can affect a currently-working flow.
+5. **Confirm retention.** Bucket lifecycle expires artifacts at 90 days. If these reports are
    compliance evidence, where should they be copied to, and by whom?
-5. **Agree the queue name** — `<env>-financeagent-tasks-sicere.fifo` proposed — so it can be
+6. **Agree the queue name** — `<env>-financeagent-tasks-sicere.fifo` proposed — so it can be
    provisioned per environment. It must be created FIFO; that cannot be changed later.
 
 ## Status on our side

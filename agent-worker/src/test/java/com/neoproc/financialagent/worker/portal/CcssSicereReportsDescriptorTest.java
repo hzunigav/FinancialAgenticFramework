@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -41,6 +42,22 @@ class CcssSicereReportsDescriptorTest {
         assertEquals(describe(submit), describe(reports),
                 "CCSS login flow drifted between ccss-sicere.yaml and "
                 + "ccss-sicere-reports.yaml — update both (and the capture descriptor)");
+    }
+
+    @Test
+    void everyCcssDescriptorSharesOneRateLimitGroup() throws IOException {
+        // CCSS permits only ONE active session per account. These three
+        // descriptors drive the same login, so they must contend for the same
+        // permit — otherwise a report pull can start while a payroll submit is
+        // mid-run and the portal drops one of the sessions.
+        for (String id : List.of("ccss-sicere", "ccss-sicere-capture", "ccss-sicere-reports")) {
+            PortalDescriptor descriptor = PortalDescriptorLoader.load(id);
+            assertNotNull(descriptor.rateLimit(), id + " must declare a rateLimit");
+            assertEquals("ccss-sicere", descriptor.rateLimit().groupOrDefault(id),
+                    id + " must share the ccss-sicere session group");
+            assertEquals(1, descriptor.rateLimit().maxConcurrentOrDefault(),
+                    id + " must allow only one concurrent session");
+        }
     }
 
     /** Compares the parts that drive the browser, ignoring incidental fields. */

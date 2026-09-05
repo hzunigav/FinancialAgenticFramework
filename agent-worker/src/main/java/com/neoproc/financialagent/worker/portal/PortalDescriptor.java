@@ -260,7 +260,12 @@ public record PortalDescriptor(
      * </ul>
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record RateLimit(Integer maxConcurrent, Double minIntervalSeconds) {
+    public record RateLimit(Integer maxConcurrent, Double minIntervalSeconds, String group) {
+
+        /** Ungrouped limits — the bucket is the descriptor's own id. */
+        public RateLimit(Integer maxConcurrent, Double minIntervalSeconds) {
+            this(maxConcurrent, minIntervalSeconds, null);
+        }
 
         public int maxConcurrentOrDefault() {
             return maxConcurrent == null ? 1 : maxConcurrent;
@@ -268,6 +273,22 @@ public record PortalDescriptor(
 
         public double minIntervalSecondsOrDefault() {
             return minIntervalSeconds == null ? 0.0 : minIntervalSeconds;
+        }
+
+        /**
+         * Bucket these limits are counted against, defaulting to the
+         * descriptor's own id.
+         *
+         * <p>Exists because several descriptors can share one portal login.
+         * CCSS Sicere and INS RT-Virtual permit only <b>one active session per
+         * account</b>, so a payroll submit and a report pull must never overlap
+         * — but they are separate descriptors, and limits keyed on descriptor
+         * id would give each its own "max 1" and let them run together. Setting
+         * the same {@code group} on every descriptor that shares a login makes
+         * them contend for one permit.
+         */
+        public String groupOrDefault(String descriptorId) {
+            return group == null || group.isBlank() ? descriptorId : group;
         }
     }
 

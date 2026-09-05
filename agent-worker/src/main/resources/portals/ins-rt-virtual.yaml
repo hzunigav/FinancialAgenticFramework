@@ -23,6 +23,9 @@ credentialScope: shared
 rateLimit:
   maxConcurrent: 1
   minIntervalSeconds: 2.0
+  # INS RT-Virtual also permits only one active session per account.
+  # Any future ins-rt-virtual-* descriptor MUST carry this same group.
+  group: ins-rt-virtual
 
 # SPA portal — JWT lives in sessionStorage, not cookies/localStorage.
 # Playwright's storageState() captures nothing useful in that case

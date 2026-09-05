@@ -11,6 +11,11 @@ credentialScope: per-client
 rateLimit:
   maxConcurrent: 1
   minIntervalSeconds: 2.0
+  # Shared with every ccss-sicere-* descriptor: CCSS permits only ONE
+  # active session per account, so a payroll submit, a capture and a
+  # report pull must contend for the same permit. Without an explicit
+  # group these limits key on descriptor id and each gets its own.
+  group: ccss-sicere
 
 session:
   ttlMinutes: 0

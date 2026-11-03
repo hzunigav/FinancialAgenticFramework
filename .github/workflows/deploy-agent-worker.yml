@@ -75,15 +75,17 @@ jobs:
     strategy:
       # {portal, service} pairs: payroll flows use the financeagent-worker-<id>
       # service; the bankstatement flow (xero) uses financeagent-bankstatement-<id>
-      # to mirror the queue naming and stay out of the monthly scaling Lambda's
-      # financeagent-worker-* prefix match. Adding a portal: append a pair.
+      # to mirror the queue naming. Adding a portal: append a pair.
+      #
+      # mock-payroll and hacienda-ovi were removed from production: hacienda-ovi
+      # has no descriptor or adapter yet, and mock-payroll depended on a prod
+      # testing-harness that hadn't started since May. Neither queue received a
+      # message in the 90 days before removal.
       matrix:
         include:
-          - { portal: mock-payroll,   service: financeagent-worker-mock-payroll }
           - { portal: autoplanilla,   service: financeagent-worker-autoplanilla }
           - { portal: ccss-sicere,    service: financeagent-worker-ccss-sicere }
           - { portal: ins-rt-virtual, service: financeagent-worker-ins-rt-virtual }
-          - { portal: hacienda-ovi,   service: financeagent-worker-hacienda-ovi }
           - { portal: xero,           service: financeagent-bankstatement-xero }
       fail-fast: false   # one portal failure doesn't block the others
 
@@ -137,11 +139,19 @@ jobs:
           # its next image push. New images are arm64 (built on
           # ubuntu-24.04-arm above) so leaving runtimePlatform unset would
           # cause Fargate to provision x86 capacity and fail the task launch.
+          #
+          # stopTimeout is enforced the same way (Fargate max, 120 s) so it
+          # reaches services provisioned before prod-infra-setup.sh set it.
+          #
+          # With scale-to-zero, a service at desired 0 just records the new
+          # task definition; the next task the scaler starts runs it. A busy
+          # task is not replaced mid-run: it holds scale-in protection.
           TD_JSON=$(aws ecs describe-task-definition \
             --task-definition "$TD_ARN" \
             --query 'taskDefinition' --output json | \
           jq --arg img "$NEW_IMAGE" '
             .containerDefinitions[0].image = $img |
+            .containerDefinitions[0].stopTimeout = 120 |
             .runtimePlatform = {cpuArchitecture: "ARM64", operatingSystemFamily: "LINUX"} |
             del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
                 .placementConstraints, .compatibilities, .registeredAt, .registeredBy)

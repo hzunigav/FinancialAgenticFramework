@@ -46,7 +46,8 @@ which would add that much to every cold start.
 Env vars:
   CLUSTER        ECS cluster name (required)
   IDLE_MINUTES   idle time before scaling to 0 (default 5)
-  DRY_RUN        "true" -> log decisions, change nothing
+  DRY_RUN        "true" -> log decisions without changing any desired count
+                 (the idle-since tag is still kept, so scale-downs show up)
 """
 import json
 import os
@@ -140,10 +141,12 @@ def _apply(svc, tags, now):
     }
     if DRY_RUN:
         result["dryRun"] = True
-        return result
-
-    if new_desired != desired:
+    elif new_desired != desired:
         ecs.update_service(cluster=CLUSTER, service=name, desiredCount=new_desired)
+
+    # The idle stamp is kept even in a dry run. It is bookkeeping, not a
+    # scaling action, and without it the idle clock never starts, so a dry run
+    # could never reach — or show — a scale-to-zero decision.
     if new_idle is None and idle_since is not None:
         ecs.untag_resource(resourceArn=svc["serviceArn"], tagKeys=[IDLE_TAG])
     elif new_idle is not None and new_idle != idle_since:

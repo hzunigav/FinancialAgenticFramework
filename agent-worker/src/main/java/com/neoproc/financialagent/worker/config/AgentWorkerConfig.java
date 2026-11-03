@@ -3,6 +3,9 @@ package com.neoproc.financialagent.worker.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.neoproc.financialagent.worker.PortalRunService;
 import com.neoproc.financialagent.worker.artifact.S3ArtifactStore;
+import com.neoproc.financialagent.worker.ecs.EcsTaskProtectionClient;
+import com.neoproc.financialagent.worker.ecs.TaskProtection;
+import com.neoproc.financialagent.worker.ecs.TaskProtectionInterceptor;
 import io.awspring.cloud.sqs.config.SqsMessageListenerContainerFactory;
 import io.awspring.cloud.sqs.listener.QueueNotFoundStrategy;
 import io.awspring.cloud.sqs.operations.SqsTemplate;
@@ -64,16 +67,39 @@ public class AgentWorkerConfig {
         return new S3ArtifactStore(s3AsyncClient, artifactsBucket, envPrefix);
     }
 
+    // Declaring our own factory replaces SCA's auto-configured one, and that one
+    // is the only place spring.cloud.aws.sqs.listener.* is applied. Without
+    // reading them here the application.yml pin is silently ignored and SCA's
+    // default of 10 applies: a worker would pull up to 10 envelopes at once and
+    // park the extras on the PortalRateLimiter semaphore, where they burn their
+    // visibility timeout waiting and get redelivered as EXPIRED_DUPLICATE.
+    @Value("${spring.cloud.aws.sqs.listener.max-concurrent-messages:1}")
+    private int maxConcurrentMessages;
+
+    @Value("${spring.cloud.aws.sqs.listener.max-messages-per-poll:1}")
+    private int maxMessagesPerPoll;
+
+    @Bean
+    TaskProtection taskProtection() {
+        return EcsTaskProtectionClient.fromEnvironment();
+    }
+
     /**
      * Override the default listener container factory to use FAIL strategy.
      * Prevents SCA from calling sqs:CreateQueue on startup for pre-provisioned queues.
+     *
+     * <p>Also registers {@link TaskProtectionInterceptor}, so a task is never
+     * scaled in or replaced by a deploy while it is driving a portal.
      */
     @Bean
     SqsMessageListenerContainerFactory<Object> defaultSqsListenerContainerFactory(
-            SqsAsyncClient sqsAsyncClient) {
+            SqsAsyncClient sqsAsyncClient, TaskProtection taskProtection) {
         return SqsMessageListenerContainerFactory.builder()
                 .configure(options -> options
-                        .queueNotFoundStrategy(QueueNotFoundStrategy.FAIL))
+                        .queueNotFoundStrategy(QueueNotFoundStrategy.FAIL)
+                        .maxConcurrentMessages(maxConcurrentMessages)
+                        .maxMessagesPerPoll(maxMessagesPerPoll))
+                .messageInterceptor(new TaskProtectionInterceptor(taskProtection))
                 .sqsAsyncClient(sqsAsyncClient)
                 .build();
     }

@@ -1,60 +1,46 @@
 #!/usr/bin/env bash
-# setup-scaling-schedule.sh — one-time provisioning for calendar-based
-# scale-to-zero of the financeagent ECS services across two cadences.
+# setup-scaling-schedule.sh — one-time provisioning for queue-driven
+# scale-to-zero of the financeagent ECS services.
 #
-# Creates (idempotently):
-#   - IAM role for the scaling Lambda (ecs:UpdateService + ecs:ListServices)
+# Creates or updates (idempotently):
+#   - IAM role for the scaling Lambda
 #   - Lambda function `financeagent-scaling` (code: scaling-lambda.py)
 #   - IAM role for EventBridge Scheduler (lambda:InvokeFunction)
-#   - Four schedules in America/Costa_Rica timezone:
+#   - One schedule, financeagent-queue-scaler, rate(1 minute)
+# and removes the calendar schedules earlier versions of this script defined.
 #
-#       MONTHLY (payroll workers + testing-harness, ~11 days/month active):
-#         financeagent-monthly-scale-up   cron(0 0 L-2 * ? *)  — L-2 of prior month 00:00
-#         financeagent-monthly-scale-down cron(0 0 9 * ? *)    — day 9 of new month 00:00
-#         Prefixes: financeagent-worker-,testing-harness
+# Which services scale, and on which queues, is decided by the service tag
+# financeagent:task-queues (set by prod-infra-setup.sh). See the docstring in
+# scaling-lambda.py for the decision rules.
 #
-#       DAILY (bank-statement portals such as Xero, ~2 hours/day active):
-#         financeagent-daily-scale-up   cron(0 6 * * ? *)  — every day 06:00
-#         financeagent-daily-scale-down cron(0 8 * * ? *)  — every day 08:00
-#         Prefixes: financeagent-bankstatement-
+# PREREQUISITE: deploy a worker image that includes TaskProtectionInterceptor
+# before enabling this. Scale-in is already held off while a message is in
+# flight, but task protection closes the remaining race between a scale-in and
+# a message received in the same instant.
 #
-# Each schedule passes its own prefixes in the event payload, so the same
-# Lambda handles both cadences. New portals are picked up automatically by
-# whichever schedule's prefix matches their service name.
+# Run from AWS CloudShell, from the repo root.
 #
-# Run from AWS CloudShell. Requires zip (preinstalled) and scaling-lambda.py
-# alongside this script.
+# Cost: Lambda (~43k invocations/month) and Scheduler are inside the free tier;
+# GetQueueAttributes adds ~43k SQS requests per queue per month (~$0.02 per
+# queue beyond the 1M free requests).
 #
-# Cost impact (Graviton, us-east-1):
-#   - 5 workers + harness on monthly cadence: ~$60/mo
-#   - 1 Xero portal on daily 2-hour window:  ~$2.50/mo
-#   EventBridge + Lambda invocations are free at this volume.
-#
-# Override the daily window with env vars:
-#   DAILY_UP_HOUR=6      (default 06:00 CR scale-up)
-#   DAILY_DOWN_HOUR=8    (default 08:00 CR scale-down)
-#   DAILY_PREFIXES=financeagent-bankstatement-
+# Env overrides:
+#   IDLE_MINUTES=5    idle time before a service scales to 0
+#   DRY_RUN=true      Lambda logs decisions but changes nothing (good first run)
+#   QUEUE_PATTERN=prod-financeagent-tasks-*   queues the Lambda may read
 set -euo pipefail
 
 REGION="${REGION:-us-east-1}"
 ACCOUNT="${ACCOUNT:-409159414704}"
 CLUSTER="${CLUSTER:-financeagent}"
-TIMEZONE="${TIMEZONE:-America/Costa_Rica}"
+IDLE_MINUTES="${IDLE_MINUTES:-5}"
+DRY_RUN="${DRY_RUN:-false}"
+QUEUE_PATTERN="${QUEUE_PATTERN:-prod-financeagent-tasks-*}"
 
 LAMBDA_NAME="financeagent-scaling"
 LAMBDA_ROLE_NAME="FinanceAgentScalingLambdaRole"
 SCHEDULER_ROLE_NAME="FinanceAgentSchedulerRole"
-
-# Cadence configuration. Each cadence has its own service-name prefix list;
-# the Lambda receives the relevant list in the schedule's event payload.
-MONTHLY_PREFIXES="${MONTHLY_PREFIXES:-financeagent-worker-,testing-harness}"
-DAILY_PREFIXES="${DAILY_PREFIXES:-financeagent-bankstatement-}"
-DAILY_UP_HOUR="${DAILY_UP_HOUR:-6}"
-DAILY_DOWN_HOUR="${DAILY_DOWN_HOUR:-8}"
-
-# Fallback env var for ad-hoc Lambda invocations that omit `prefixes`.
-# Schedules always supply prefixes per-event, so this is only a convenience.
-FALLBACK_PREFIXES="$MONTHLY_PREFIXES"
+SCHEDULE_NAME="financeagent-queue-scaler"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LAMBDA_SRC="$SCRIPT_DIR/scaling-lambda.py"
@@ -82,18 +68,25 @@ fi
 aws iam attach-role-policy --role-name "$LAMBDA_ROLE_NAME" \
   --policy-arn "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" > /dev/null
 
+# TagResource/UntagResource: the Lambda keeps each service's idle-since stamp
+# as a tag on the service, so it needs no state store of its own.
 LAMBDA_POLICY="{
   \"Version\":\"2012-10-17\",
   \"Statement\":[
     {
       \"Effect\":\"Allow\",
-      \"Action\":[\"ecs:UpdateService\",\"ecs:DescribeServices\"],
+      \"Action\":[\"ecs:UpdateService\",\"ecs:DescribeServices\",\"ecs:TagResource\",\"ecs:UntagResource\"],
       \"Resource\":\"arn:aws:ecs:${REGION}:${ACCOUNT}:service/${CLUSTER}/*\"
     },
     {
       \"Effect\":\"Allow\",
       \"Action\":\"ecs:ListServices\",
       \"Resource\":\"*\"
+    },
+    {
+      \"Effect\":\"Allow\",
+      \"Action\":[\"sqs:GetQueueUrl\",\"sqs:GetQueueAttributes\"],
+      \"Resource\":\"arn:aws:sqs:${REGION}:${ACCOUNT}:${QUEUE_PATTERN}\"
     }
   ]
 }"
@@ -110,7 +103,7 @@ TMP=$(mktemp -d)
 cp "$LAMBDA_SRC" "$TMP/lambda_function.py"
 (cd "$TMP" && zip -q lambda.zip lambda_function.py)
 
-ENV_VARS="Variables={CLUSTER=$CLUSTER,SERVICE_PREFIXES=$FALLBACK_PREFIXES}"
+ENV_VARS="Variables={CLUSTER=$CLUSTER,IDLE_MINUTES=$IDLE_MINUTES,DRY_RUN=$DRY_RUN}"
 
 if aws lambda get-function --function-name "$LAMBDA_NAME" --region "$REGION" &>/dev/null; then
   aws lambda update-function-code --function-name "$LAMBDA_NAME" \
@@ -128,7 +121,8 @@ else
       --role "$LAMBDA_ROLE_ARN" \
       --handler lambda_function.lambda_handler \
       --zip-file "fileb://$TMP/lambda.zip" \
-      --timeout 60 \
+      --timeout 50 \
+      --memory-size 128 \
       --environment "$ENV_VARS" \
       --region "$REGION" --no-cli-pager > /dev/null 2>&1; then
       echo "  Created: $LAMBDA_NAME"
@@ -143,6 +137,11 @@ else
   done
 fi
 rm -rf "$TMP"
+
+# Ticks every minute; keep the log group from growing forever.
+aws logs create-log-group --log-group-name "/aws/lambda/$LAMBDA_NAME" --region "$REGION" 2>/dev/null || true
+aws logs put-retention-policy --log-group-name "/aws/lambda/$LAMBDA_NAME" \
+  --retention-in-days 30 --region "$REGION"
 
 LAMBDA_ARN=$(aws lambda get-function --function-name "$LAMBDA_NAME" --region "$REGION" \
   --query 'Configuration.FunctionArn' --output text)
@@ -177,71 +176,46 @@ aws iam put-role-policy --role-name "$SCHEDULER_ROLE_NAME" \
 SCHEDULER_ROLE_ARN=$(aws iam get-role --role-name "$SCHEDULER_ROLE_NAME" --query 'Role.Arn' --output text)
 echo "  ARN: $SCHEDULER_ROLE_ARN"
 
-# ── 4. Cleanup of legacy schedule names ───────────────────────────────────────
-# Earlier versions of this script used unsuffixed names. Remove them so the
-# only live schedules are the monthly-/daily- pair below.
-for OLD in financeagent-scale-up financeagent-scale-down; do
+# ── 4. Remove the calendar schedules of earlier versions ─────────────────────
+for OLD in financeagent-scale-up financeagent-scale-down \
+           financeagent-monthly-scale-up financeagent-monthly-scale-down \
+           financeagent-daily-scale-up financeagent-daily-scale-down; do
   if aws scheduler get-schedule --name "$OLD" --region "$REGION" &>/dev/null; then
     aws scheduler delete-schedule --name "$OLD" --region "$REGION" > /dev/null
     echo "  Deleted legacy schedule: $OLD"
   fi
 done
 
-# ── 5. Schedules ──────────────────────────────────────────────────────────────
-echo "── Schedules ──"
-
-upsert_schedule() {
-  local NAME="$1"
-  local CRON="$2"
-  local INPUT_JSON="$3"
-
-  local TARGET="{\"Arn\":\"${LAMBDA_ARN}\",\"RoleArn\":\"${SCHEDULER_ROLE_ARN}\",\"Input\":${INPUT_JSON}}"
-  local CMD="create-schedule"
-  if aws scheduler get-schedule --name "$NAME" --region "$REGION" &>/dev/null; then
-    CMD="update-schedule"
-  fi
-
-  aws scheduler "$CMD" \
-    --name "$NAME" \
-    --schedule-expression "$CRON" \
-    --schedule-expression-timezone "$TIMEZONE" \
-    --flexible-time-window "Mode=OFF" \
-    --target "$TARGET" \
-    --region "$REGION" --no-cli-pager > /dev/null
-  echo "  $CMD: $NAME ($CRON $TIMEZONE)"
-}
-
-# INPUT must be a JSON STRING containing JSON (double-encoded for the API).
-# Build the per-cadence payloads with prefixes embedded so the Lambda routes
-# to the correct service set regardless of which schedule fires.
-MONTHLY_UP_INPUT="\"{\\\"action\\\":\\\"up\\\",\\\"prefixes\\\":\\\"${MONTHLY_PREFIXES}\\\"}\""
-MONTHLY_DOWN_INPUT="\"{\\\"action\\\":\\\"down\\\",\\\"prefixes\\\":\\\"${MONTHLY_PREFIXES}\\\"}\""
-DAILY_UP_INPUT="\"{\\\"action\\\":\\\"up\\\",\\\"prefixes\\\":\\\"${DAILY_PREFIXES}\\\"}\""
-DAILY_DOWN_INPUT="\"{\\\"action\\\":\\\"down\\\",\\\"prefixes\\\":\\\"${DAILY_PREFIXES}\\\"}\""
-
-upsert_schedule "financeagent-monthly-scale-up"   "cron(0 0 L-2 * ? *)" "$MONTHLY_UP_INPUT"
-upsert_schedule "financeagent-monthly-scale-down" "cron(0 0 9 * ? *)"   "$MONTHLY_DOWN_INPUT"
-upsert_schedule "financeagent-daily-scale-up"     "cron(0 ${DAILY_UP_HOUR} * * ? *)"   "$DAILY_UP_INPUT"
-upsert_schedule "financeagent-daily-scale-down"   "cron(0 ${DAILY_DOWN_HOUR} * * ? *)" "$DAILY_DOWN_INPUT"
+# ── 5. The schedule ───────────────────────────────────────────────────────────
+echo "── Schedule ──"
+TARGET="{\"Arn\":\"${LAMBDA_ARN}\",\"RoleArn\":\"${SCHEDULER_ROLE_ARN}\",\"RetryPolicy\":{\"MaximumRetryAttempts\":0}}"
+CMD="create-schedule"
+if aws scheduler get-schedule --name "$SCHEDULE_NAME" --region "$REGION" &>/dev/null; then
+  CMD="update-schedule"
+fi
+# No retries: a failed tick is superseded by the next one a minute later.
+aws scheduler "$CMD" \
+  --name "$SCHEDULE_NAME" \
+  --schedule-expression "rate(1 minute)" \
+  --flexible-time-window "Mode=OFF" \
+  --target "$TARGET" \
+  --region "$REGION" --no-cli-pager > /dev/null
+echo "  $CMD: $SCHEDULE_NAME (rate(1 minute))"
 
 echo ""
-echo "=== Setup complete ==="
-echo "Monthly cadence: L-2 of prior month 00:00 → day 9 00:00 $TIMEZONE"
-echo "  Prefixes: $MONTHLY_PREFIXES"
-echo "Daily cadence: ${DAILY_UP_HOUR}:00 → ${DAILY_DOWN_HOUR}:00 $TIMEZONE"
-echo "  Prefixes: $DAILY_PREFIXES"
+echo "=== Setup complete (IDLE_MINUTES=$IDLE_MINUTES, DRY_RUN=$DRY_RUN) ==="
 echo ""
-echo "Smoke test (scale UP the monthly set now):"
-echo "  aws lambda invoke --function-name $LAMBDA_NAME \\"
-echo "    --payload '{\"action\":\"up\",\"prefixes\":\"$MONTHLY_PREFIXES\"}' \\"
-echo "    --cli-binary-format raw-in-base64-out /tmp/scale.json && cat /tmp/scale.json"
+echo "Opted-in services (tag financeagent:task-queues):"
+for ARN in $(aws ecs list-services --cluster "$CLUSTER" --region "$REGION" --query 'serviceArns[]' --output text); do
+  Q=$(aws ecs list-tags-for-resource --resource-arn "$ARN" --region "$REGION" \
+        --query "tags[?key=='financeagent:task-queues'].value | [0]" --output text)
+  [[ "$Q" != "None" && -n "$Q" ]] && echo "  ${ARN##*/}: $Q"
+done
 echo ""
-echo "Smoke test (scale UP the daily set now):"
-echo "  aws lambda invoke --function-name $LAMBDA_NAME \\"
-echo "    --payload '{\"action\":\"up\",\"prefixes\":\"$DAILY_PREFIXES\"}' \\"
-echo "    --cli-binary-format raw-in-base64-out /tmp/scale.json && cat /tmp/scale.json"
+echo "Watch decisions (only ticks that change something are logged):"
+echo "  aws logs tail /aws/lambda/$LAMBDA_NAME --follow --region $REGION"
 echo ""
-echo "Disable a schedule (e.g. for an off-cycle freeze):"
-echo "  aws scheduler get-schedule --name financeagent-monthly-scale-up --region $REGION \\"
-echo "    | jq '.State = \"DISABLED\"' \\"
+echo "Pause scaling (services keep their current desired count):"
+echo "  aws scheduler get-schedule --name $SCHEDULE_NAME --region $REGION \\"
+echo "    | jq '{Name,ScheduleExpression,FlexibleTimeWindow,Target,State:\"DISABLED\"}' \\"
 echo "    | aws scheduler update-schedule --cli-input-json file:///dev/stdin --region $REGION"

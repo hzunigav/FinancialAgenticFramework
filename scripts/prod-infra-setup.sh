@@ -18,14 +18,18 @@
 #   CLUSTER          ECS cluster name       (default: financeagent)
 #   REGION           AWS region             (default: us-east-1)
 #   ACCOUNT          AWS account ID         (default: 409159414704)
-#   SUBNET_ID        Private subnet for Fargate tasks
+#   SUBNET_ID        Subnet(s) for Fargate tasks, comma-separated. These are the
+#                    PUBLIC subnets (default route to the internet gateway) — see
+#                    Step 4 for why tasks get a public IP rather than a NAT.
 #   SG_ID            Security group ID for Fargate tasks
 #   EXEC_ROLE_ARN    ECS task execution role ARN (ECR pull + CloudWatch logs)
 #   TASK_ROLE_ARN    ECS task role ARN (SQS, KMS, Secrets Manager)
-#   NS_ARN           ECS Service Connect namespace ARN (financeagent.local)
 #
-# To retrieve the last four values from an existing service:
+# To retrieve these values from an existing service:
 #   source <(./scripts/prod-infra-setup.sh --print-env)
+#
+# New services are created at desired-count 0 and tagged for the queue-driven
+# scaler (scripts/scaling-lambda.py), which starts a task when a message lands.
 #
 set -euo pipefail
 
@@ -39,29 +43,18 @@ ARTIFACTS_BUCKET="${ENV_PREFIX}-financeagent-artifacts"
 
 # ── Helper: print env vars from an existing service ───────────────────────────
 if [[ "${1:-}" == "--print-env" ]]; then
-  SVC="financeagent-worker-mock-payroll"
-  TD_ARN=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" \
-    --region "$REGION" --query 'services[0].taskDefinition' --output text)
-  EXEC=$(aws ecs describe-task-definition --task-definition "$TD_ARN" \
-    --region "$REGION" --query 'taskDefinition.executionRoleArn' --output text)
-  TASK=$(aws ecs describe-task-definition --task-definition "$TD_ARN" \
-    --region "$REGION" --query 'taskDefinition.taskRoleArn' --output text)
-  TASK_ARN=$(aws ecs list-tasks --cluster "$CLUSTER" --service-name "$SVC" \
-    --region "$REGION" --query 'taskArns[0]' --output text)
-  ENI_ID=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
-    --region "$REGION" \
-    --query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" \
-    --output text)
-  ENI=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI_ID" \
-    --region "$REGION" --query 'NetworkInterfaces[0]' --output json)
-  echo "export SUBNET_ID=$(echo "$ENI" | jq -r '.SubnetId')"
-  echo "export SG_ID=$(echo "$ENI"    | jq -r '.Groups[0].GroupId')"
-  echo "export VPC_ID=$(echo "$ENI"   | jq -r '.VpcId')"
-  echo "export EXEC_ROLE_ARN=$EXEC"
-  echo "export TASK_ROLE_ARN=$TASK"
-  NS=$(aws servicediscovery list-namespaces --region "$REGION" \
-    --query "Namespaces[?Name=='financeagent.local'].Arn | [0]" --output text)
-  echo "export NS_ARN=$NS"
+  # Read from the service definition, not a running task: with scale-to-zero
+  # there is usually no task to inspect.
+  SVC="${2:-financeagent-worker-ccss-sicere}"
+  SVC_JSON=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SVC" \
+    --region "$REGION" --query 'services[0]' --output json)
+  TD_ARN=$(echo "$SVC_JSON" | jq -r '.taskDefinition')
+  TD_JSON=$(aws ecs describe-task-definition --task-definition "$TD_ARN" \
+    --region "$REGION" --query 'taskDefinition' --output json)
+  echo "export SUBNET_ID=$(echo "$SVC_JSON" | jq -r '.networkConfiguration.awsvpcConfiguration.subnets | join(",")')"
+  echo "export SG_ID=$(echo "$SVC_JSON"     | jq -r '.networkConfiguration.awsvpcConfiguration.securityGroups[0]')"
+  echo "export EXEC_ROLE_ARN=$(echo "$TD_JSON" | jq -r '.executionRoleArn')"
+  echo "export TASK_ROLE_ARN=$(echo "$TD_JSON" | jq -r '.taskRoleArn')"
   exit 0
 fi
 
@@ -76,7 +69,7 @@ QUEUE_TYPE="$2"   # capture | submit | both
 IMAGE_TAG="$3"
 IMAGE_URI="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/financeagent-worker:${IMAGE_TAG}"
 
-for VAR in SUBNET_ID SG_ID EXEC_ROLE_ARN TASK_ROLE_ARN NS_ARN; do
+for VAR in SUBNET_ID SG_ID EXEC_ROLE_ARN TASK_ROLE_ARN; do
   if [[ -z "${!VAR:-}" ]]; then
     echo "ERROR: $VAR is not set. Run: source <(./scripts/prod-infra-setup.sh --print-env)" >&2
     exit 1
@@ -86,12 +79,9 @@ done
 # ── Service naming ──────────────────────────────────────────────────────────
 # Payroll flows use financeagent-worker-<portal>. The bankstatement flow uses
 # financeagent-bankstatement-<portal> instead: it mirrors the queue naming
-# (bankstatement- is the flow-distinguishing token) and — deliberately — stays
-# OUT of the monthly scaling Lambda's "financeagent-worker-" prefix match, so a
-# daily-cadence Xero worker isn't swept into the payroll scaling window. (To put
-# it on its own daily window later, add "financeagent-bankstatement-" to a
-# sibling scaling schedule's SERVICE_PREFIXES.) Drives the service name, the
-# task-definition family, and the log group below.
+# (bankstatement- is the flow-distinguishing token). Drives the service name,
+# the task-definition family, and the log group below. Scaling no longer keys
+# on the name — see the financeagent:task-queues tag in Step 4.
 if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
   SERVICE_BASENAME="financeagent-bankstatement-${PORTAL_ID}"
 else
@@ -130,24 +120,32 @@ DLQ_ARN=$(aws sqs get-queue-attributes \
   --attribute-names QueueArn --region "$REGION" \
   --query 'Attributes.QueueArn' --output text)
 
+# VisibilityTimeout must exceed the LONGEST run this queue carries, not the
+# average. If it lapses mid-run SQS redelivers while the first run is still
+# driving the portal — and CCSS/INS permit only one active session per
+# account, so the redelivery collides with the run it duplicated. 1800s
+# covers a large payroll (per-row Aplicar over a big roster); a report pull
+# finishes in ~90s. Raise this before onboarding anything slower.
+#
+# The cost of a high value is slower recovery: if a worker dies mid-message,
+# nothing retries it until the timeout lapses.
+TASK_VISIBILITY_TIMEOUT=1800
+
 create_queue() {
   local NAME="$1"
-  if aws sqs get-queue-url --queue-name "$NAME" --region "$REGION" &>/dev/null; then
-    echo "  Queue already exists: $NAME"
+  if QURL=$(aws sqs get-queue-url --queue-name "$NAME" --region "$REGION" \
+              --query QueueUrl --output text 2>/dev/null); then
+    # Enforced on existing queues too: queues created before the raise to
+    # 1800 s otherwise keep the old 900 s forever, since this branch used to
+    # return without touching them.
+    aws sqs set-queue-attributes --queue-url "$QURL" --region "$REGION" \
+      --attributes "VisibilityTimeout=${TASK_VISIBILITY_TIMEOUT}"
+    echo "  Queue already exists: $NAME (VisibilityTimeout=${TASK_VISIBILITY_TIMEOUT} enforced)"
     return
   fi
-  # VisibilityTimeout must exceed the LONGEST run this queue carries, not the
-  # average. If it lapses mid-run SQS redelivers while the first run is still
-  # driving the portal — and CCSS/INS permit only one active session per
-  # account, so the redelivery collides with the run it duplicated. 1800s
-  # covers a large payroll (per-row Aplicar over a big roster); a report pull
-  # finishes in ~90s. Raise this before onboarding anything slower.
-  #
-  # The cost of a high value is slower recovery: if a worker dies mid-message,
-  # nothing retries it until the timeout lapses.
   aws sqs create-queue --queue-name "$NAME" --region "$REGION" \
     --attributes "{
-      \"VisibilityTimeout\":           \"1800\",
+      \"VisibilityTimeout\":           \"${TASK_VISIBILITY_TIMEOUT}\",
       \"ReceiveMessageWaitTimeSeconds\":\"20\",
       \"MessageRetentionPeriod\":      \"345600\",
       \"RedrivePolicy\": \"{\\\"deadLetterTargetArn\\\":\\\"$DLQ_ARN\\\",\\\"maxReceiveCount\\\":\\\"5\\\"}\"
@@ -210,10 +208,6 @@ ENV_JSON="[
   {\"name\":\"JAVA_TOOL_OPTIONS\",                \"value\":\"-Dagent.worker.queue-prefix=${ENV_PREFIX}\"}
 ]"
 
-if [[ "$PORTAL_ID" == "mock-payroll" ]]; then
-  ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"MOCK_PORTAL_BASE_URL","value":"http://testing-harness:3000"}]')
-fi
-
 # Xero (bankstatement): the adapter launches a STEALTH browser to clear Akamai
 # Bot Manager. XERO_BROWSER_CHANNEL is set EMPTY here so the worker uses the
 # image's BUNDLED Chromium rather than branded Chrome: the playwright/java image
@@ -229,6 +223,9 @@ if [[ "$PORTAL_ID" == "xero" ]]; then
   ENV_JSON=$(echo "$ENV_JSON" | jq '. += [{"name":"XERO_BROWSER_CHANNEL","value":""}]')
 fi
 
+# stopTimeout 120 is the Fargate maximum. An in-flight run is protected by ECS
+# task scale-in protection (TaskProtectionInterceptor), not by this; it only
+# gives the SQS container time to flush acknowledgements once a task is idle.
 TD_JSON=$(jq -n \
   --arg family   "$SERVICE_NAME" \
   --arg execRole "$EXEC_ROLE_ARN" \
@@ -253,6 +250,7 @@ TD_JSON=$(jq -n \
     name:      "agent-worker",
     image:     $image,
     essential: true,
+    stopTimeout: 120,
     environment: $env,
     logConfiguration: {
       logDriver: "awslogs",
@@ -271,6 +269,20 @@ TD_ARN=$(aws ecs register-task-definition \
 echo "  Registered task definition: $TD_ARN"
 
 # ── Step 4: ECS service ───────────────────────────────────────────────────────
+# Queues the queue-driven scaler watches for this service. Must be exactly the
+# queues the worker CONSUMES, which the portal descriptor's `flows` decides —
+# pick queue-type to match it. A listed queue the worker never polls would
+# hold the service at one task forever, since nothing would drain it.
+case "$QUEUE_TYPE" in
+  capture)       TASK_QUEUES="${ENV_PREFIX}-financeagent-tasks-capture-${PORTAL_ID}" ;;
+  submit)        TASK_QUEUES="${ENV_PREFIX}-financeagent-tasks-submit-${PORTAL_ID}" ;;
+  both)          TASK_QUEUES="${ENV_PREFIX}-financeagent-tasks-capture-${PORTAL_ID} ${ENV_PREFIX}-financeagent-tasks-submit-${PORTAL_ID}" ;;
+  bankstatement) TASK_QUEUES="${ENV_PREFIX}-financeagent-tasks-bankstatement-${PORTAL_ID}" ;;
+  *) echo "ERROR: unknown queue-type $QUEUE_TYPE" >&2; exit 1 ;;
+esac
+# JSON, not key=...,value=... shorthand: the value contains spaces.
+QUEUE_TAG_JSON=$(jq -cn --arg v "$TASK_QUEUES" '[{key:"financeagent:task-queues",value:$v}]')
+
 EXISTING_STATUS=$(aws ecs describe-services \
   --cluster "$CLUSTER" --services "$SERVICE_NAME" --region "$REGION" \
   --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
@@ -281,17 +293,30 @@ if [[ "$EXISTING_STATUS" == "ACTIVE" ]]; then
     --cluster "$CLUSTER" --service "$SERVICE_NAME" \
     --task-definition "$TD_ARN" --force-new-deployment \
     --region "$REGION" --no-cli-pager > /dev/null
+  SERVICE_ARN=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE_NAME" \
+    --region "$REGION" --query 'services[0].serviceArn' --output text)
+  aws ecs tag-resource --resource-arn "$SERVICE_ARN" --region "$REGION" \
+    --tags "$QUEUE_TAG_JSON"
 else
+  # Network: public subnets + a public IP per task. The tasks need outbound
+  # access to the portals, ECR, SQS, S3 and Secrets Manager; a NAT gateway
+  # would cost ~$33/mo + data, while a public IP costs $0.005/h only while a
+  # task runs — near nothing with scale-to-zero. Do NOT set DISABLED in these
+  # subnets: with no NAT, the task can't even pull its image (this is what
+  # kept the old testing-harness service from starting).
+  #
+  # Desired count 0: the queue-driven scaler starts a task when a message
+  # arrives. No Service Connect: workers don't call one another.
   aws ecs create-service \
     --cluster "$CLUSTER" \
     --service-name "$SERVICE_NAME" \
     --task-definition "$TD_ARN" \
-    --desired-count 1 \
+    --desired-count 0 \
     --launch-type FARGATE \
-    --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_ID}],securityGroups=[${SG_ID}],assignPublicIp=DISABLED}" \
-    --service-connect-configuration "{\"enabled\":true,\"namespace\":\"${NS_ARN}\"}" \
+    --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_ID}],securityGroups=[${SG_ID}],assignPublicIp=ENABLED}" \
+    --tags "$QUEUE_TAG_JSON" \
     --region "$REGION" --no-cli-pager > /dev/null
-  echo "  Created ECS service: $SERVICE_NAME"
+  echo "  Created ECS service: $SERVICE_NAME (desired 0, scaled on: ${TASK_QUEUES})"
 fi
 
 echo ""
@@ -309,6 +334,9 @@ echo "        \"Resource\": \"arn:aws:s3:::${ARTIFACTS_BUCKET}/*\" }"
 echo ""
 echo "    Praxis (read-side): grant the Praxis BPM execution role s3:GetObject + s3:ListBucket"
 echo "    on arn:aws:s3:::${ARTIFACTS_BUCKET} so workflow steps can fetch audit.manifestPath."
+echo ""
+echo "    Scale-to-zero (one-time per env): the task role must allow ecs:UpdateTaskProtection"
+echo "    (TaskProtectionInterceptor), and scripts/setup-scaling-schedule.sh must have run."
 
 if [[ "$QUEUE_TYPE" == "bankstatement" ]]; then
   echo ""
